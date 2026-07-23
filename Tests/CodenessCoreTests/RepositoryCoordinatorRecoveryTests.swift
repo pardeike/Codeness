@@ -5,6 +5,55 @@ import Testing
 @MainActor
 struct RepositoryCoordinatorRecoveryTests {
     @Test
+    func explicitRunDeselectionLeavesTheDetailWithoutAFallbackRun() async throws {
+        let savedRun = run(status: .completed)
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+
+        #expect(harness.coordinator.selectedRunID == savedRun.id)
+        #expect(harness.coordinator.selectedRun?.id == savedRun.id)
+
+        harness.coordinator.selectedRunID = nil
+
+        #expect(harness.coordinator.selectedRunID == nil)
+        #expect(harness.coordinator.selectedRun == nil)
+        #expect(harness.coordinator.viewState.selectedRunID == nil)
+        #expect(harness.coordinator.viewState.runSelectionWasSaved)
+        #expect(await harness.coordinator.flushDocumentState())
+
+        let reloaded = RepositoryCoordinator(
+            canonicalPath: harness.coordinator.record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: WorkspaceStore(rootURL: harness.root)
+        )
+        await reloaded.load()
+
+        #expect(reloaded.selectedRunID == nil)
+        #expect(reloaded.selectedRun == nil)
+        #expect(reloaded.viewState.runSelectionWasSaved)
+    }
+
+    @Test
+    func loadTurnsAnOrphanedRunningPassIntoAPausedRecoveryCheckpoint() async throws {
+        let savedRun = run(status: .running)
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .running,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+
+        let activity = try #require(harness.coordinator.record.activity)
+        #expect(activity.status == .paused)
+        #expect(activity.runs.last?.status == .interrupted)
+        #expect(activity.resumeCheckpoint == .recoverRun(savedRun.id))
+        #expect(harness.coordinator.canResume)
+    }
+
+    @Test
     func interruptedLastRunIsResumable() async throws {
         let harness = try await CoordinatorHarness(record: repositoryRecord(
             activityStatus: .paused,
@@ -15,6 +64,101 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(harness.coordinator.canResume)
         let savedRunID = try #require(harness.coordinator.record.activity?.runs.last?.id)
         #expect(harness.coordinator.record.activity?.resumeCheckpoint == .recoverRun(savedRunID))
+    }
+
+    @Test
+    func systemTerminationArmsAndConsumesOnlySafeAutomaticResumeCheckpoints() async throws {
+        let completedRun = run(status: .routing, finalOutput: "Completed repository edits")
+        let safeHarness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: completedRun,
+            resumeCheckpoint: .routeCompletedRun(completedRun.id)
+        ))
+        defer { safeHarness.remove() }
+
+        #expect(await safeHarness.coordinator.armResumeAfterSystemTerminationIfSafe())
+        #expect(safeHarness.coordinator.viewState.resumeAfterSystemTermination == true)
+        let persistedArmedState = try await WorkspaceStore(rootURL: safeHarness.root)
+            .loadViewState(canonicalPath: safeHarness.coordinator.record.canonicalPath)
+        #expect(persistedArmedState.resumeAfterSystemTermination == true)
+        #expect(await safeHarness.coordinator.consumeResumeAfterSystemTerminationRequest())
+        #expect(safeHarness.coordinator.viewState.resumeAfterSystemTermination == nil)
+        let persistedConsumedState = try await WorkspaceStore(rootURL: safeHarness.root)
+            .loadViewState(canonicalPath: safeHarness.coordinator.record.canonicalPath)
+        #expect(persistedConsumedState.resumeAfterSystemTermination == nil)
+        #expect(!(await safeHarness.coordinator.consumeResumeAfterSystemTerminationRequest()))
+
+        let queuedRun = run(status: .completed, finalOutput: "Ready for review")
+        let performHarness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: queuedRun,
+            resumeCheckpoint: .perform(.review)
+        ))
+        defer { performHarness.remove() }
+
+        #expect(await performHarness.coordinator.armResumeAfterSystemTerminationIfSafe())
+
+        let interruptedRun = run(status: .interrupted)
+        let recoveryHarness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: interruptedRun,
+            resumeCheckpoint: .recoverRun(interruptedRun.id)
+        ))
+        defer { recoveryHarness.remove() }
+
+        #expect(!(await recoveryHarness.coordinator.armResumeAfterSystemTerminationIfSafe()))
+        #expect(recoveryHarness.coordinator.viewState.resumeAfterSystemTermination == nil)
+    }
+
+    @Test
+    func staleSystemTerminationRequestIsConsumedWithoutResumingRecovery() async throws {
+        let interruptedRun = run(status: .interrupted)
+        let harness = try await CoordinatorHarness(
+            record: repositoryRecord(
+                activityStatus: .paused,
+                run: interruptedRun,
+                resumeCheckpoint: .recoverRun(interruptedRun.id)
+            ),
+            viewState: RepositoryViewState(resumeAfterSystemTermination: true)
+        )
+        defer { harness.remove() }
+
+        #expect(!(await harness.coordinator.consumeResumeAfterSystemTerminationRequest()))
+        #expect(harness.coordinator.viewState.resumeAfterSystemTermination == nil)
+    }
+
+    @Test
+    func workOverviewSummaryIsGeneratedOnceAndDurablyCachedForItsHandoffs() async throws {
+        var completedRun = run(status: .completed, finalOutput: "Implemented parser")
+        completedRun.handoff = HandoffEnvelope(
+            handoffText: "Parser foundation is complete; malformed-input tests remain.",
+            sourceDisposition: .implementationCheckpoint,
+            runLabel: "Parser foundation"
+        )
+        let router = RecordingSummaryRouter()
+        let harness = try await CoordinatorHarness(
+            record: repositoryRecord(activityStatus: .paused, run: completedRun),
+            router: router
+        )
+        defer { harness.remove() }
+
+        harness.coordinator.requestWorkOverviewSummary()
+        await waitUntil {
+            harness.coordinator.workOverviewSummaryText != nil
+                && !harness.coordinator.isGeneratingWorkOverviewSummary
+        }
+
+        #expect(harness.coordinator.workOverviewSummaryText == "Parser foundation is complete.")
+        #expect(harness.coordinator.workOverviewSummaryError == nil)
+        #expect(await router.summaryCallCount == 1)
+        let signature = try #require(harness.coordinator.workOverviewSummarySourceSignature)
+        let persistedState = try await WorkspaceStore(rootURL: harness.root)
+            .loadViewState(canonicalPath: harness.coordinator.record.canonicalPath)
+        #expect(persistedState.workOverviewSummary?.sourceSignature == signature)
+        #expect(persistedState.workOverviewSummary?.text == "Parser foundation is complete.")
+
+        harness.coordinator.requestWorkOverviewSummary()
+        #expect(await router.summaryCallCount == 1)
     }
 
     @Test
@@ -202,7 +346,8 @@ struct RepositoryCoordinatorRecoveryTests {
                 transcriptViewports: [firstRun.id: viewport],
                 sidebarWidth: 380,
                 pauseAfterCurrent: true,
-                detailPresentation: .result
+                detailPresentation: .result,
+                detailSplitFraction: 0.62
             ),
             canonicalPath: record.canonicalPath
         )
@@ -221,6 +366,15 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(coordinator.pauseAfterCurrent)
         #expect(coordinator.viewState.sidebarWidth == 380)
         #expect(coordinator.runDetailPresentation == .result)
+        #expect(coordinator.viewState.detailSplitFraction == 0.62)
+
+        coordinator.updateRunDetailSplitFraction(0.99)
+        #expect(await coordinator.flushDocumentState())
+        #expect(coordinator.viewState.detailSplitFraction == 0.85)
+        #expect(
+            try await store.loadViewState(canonicalPath: record.canonicalPath)
+                .detailSplitFraction == 0.85
+        )
     }
 
     @Test
@@ -404,7 +558,8 @@ struct RepositoryCoordinatorRecoveryTests {
                 sidebarWidth: 372,
                 sidebarVisible: true,
                 pauseAfterCurrent: true,
-                detailPresentation: .transcript
+                detailPresentation: .transcript,
+                detailSplitFraction: 0.58
             ),
             canonicalPath: record.canonicalPath
         )
@@ -436,6 +591,7 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(coordinator.viewState.sidebarWidth == 372)
         #expect(!coordinator.viewState.sidebarVisible)
         #expect(coordinator.runDetailPresentation == .transcript)
+        #expect(coordinator.viewState.detailSplitFraction == 0.58)
         #expect(!coordinator.pauseAfterCurrent)
         #expect(coordinator.canStartActivity)
         #expect(coordinator.statusMessage == "Configure this activity")
@@ -523,6 +679,74 @@ struct RepositoryCoordinatorRecoveryTests {
 
         #expect(harness.coordinator.pendingInteraction == nil)
         #expect(harness.coordinator.record.activity?.runs.last?.status == .running)
+    }
+
+    @Test
+    func tokenUsageNotificationsTrackTheRunDeltaWithoutCountingDuplicates() async throws {
+        let savedRun = run(status: .running)
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+
+        let first = tokenUsageParameters(
+            total: RunTokenUsage(
+                totalTokens: 10_100,
+                inputTokens: 10_000,
+                cachedInputTokens: 8_000,
+                outputTokens: 100,
+                reasoningOutputTokens: 20
+            ),
+            last: RunTokenUsage(
+                totalTokens: 100,
+                inputTokens: 90,
+                cachedInputTokens: 80,
+                outputTokens: 10,
+                reasoningOutputTokens: 2
+            )
+        )
+        let latest = tokenUsageParameters(
+            total: RunTokenUsage(
+                totalTokens: 10_600,
+                inputTokens: 10_480,
+                cachedInputTokens: 8_400,
+                outputTokens: 120,
+                reasoningOutputTokens: 25
+            ),
+            last: RunTokenUsage(
+                totalTokens: 500,
+                inputTokens: 480,
+                cachedInputTokens: 400,
+                outputTokens: 20,
+                reasoningOutputTokens: 5
+            )
+        )
+
+        await harness.coordinator.handle(.notification(
+            method: "thread/tokenUsage/updated",
+            params: first,
+            rawLine: first.encodedString()
+        ))
+        await harness.coordinator.handle(.notification(
+            method: "thread/tokenUsage/updated",
+            params: latest,
+            rawLine: latest.encodedString()
+        ))
+        await harness.coordinator.handle(.notification(
+            method: "thread/tokenUsage/updated",
+            params: latest,
+            rawLine: latest.encodedString()
+        ))
+
+        let usage = try #require(
+            harness.coordinator.record.activity?.runs.last?.tokenUsage
+        )
+        #expect(usage.totalTokens == 600)
+        #expect(usage.inputTokens == 570)
+        #expect(usage.cachedInputTokens == 480)
+        #expect(usage.outputTokens == 30)
+        #expect(usage.reasoningOutputTokens == 7)
     }
 
     @Test
@@ -697,7 +921,8 @@ struct RepositoryCoordinatorRecoveryTests {
 
     private func repositoryRecord(
         activityStatus: ActivityStatus,
-        run: RunRecord
+        run: RunRecord,
+        resumeCheckpoint: ResumeCheckpoint? = nil
     ) -> RepositoryRecord {
         RepositoryRecord(
             canonicalPath: "/tmp/codeness-repository-\(UUID().uuidString)",
@@ -707,7 +932,8 @@ struct RepositoryCoordinatorRecoveryTests {
                 goal: "Recovery",
                 prompts: .builtInDefaults,
                 status: activityStatus,
-                runs: [run]
+                runs: [run],
+                resumeCheckpoint: resumeCheckpoint
             )
         )
     }
@@ -744,6 +970,32 @@ struct RepositoryCoordinatorRecoveryTests {
             ]),
             rawLine: "completed"
         )
+    }
+
+    private func tokenUsageParameters(
+        total: RunTokenUsage,
+        last: RunTokenUsage
+    ) -> JSONValue {
+        .object([
+            "threadId": .string("implementer-thread"),
+            "turnId": .string("turn-1"),
+            "tokenUsage": .object([
+                "total": tokenUsageValue(total),
+                "last": tokenUsageValue(last),
+                "modelContextWindow": .integer(258_400)
+            ])
+        ])
+    }
+
+    private func tokenUsageValue(_ usage: RunTokenUsage) -> JSONValue {
+        .object([
+            "totalTokens": .integer(usage.totalTokens),
+            "inputTokens": .integer(usage.inputTokens),
+            "cachedInputTokens": .integer(usage.cachedInputTokens),
+            "cacheWriteInputTokens": .integer(usage.cacheWriteInputTokens),
+            "outputTokens": .integer(usage.outputTokens),
+            "reasoningOutputTokens": .integer(usage.reasoningOutputTokens)
+        ])
     }
 
     private func temporaryRoot() -> URL {
@@ -813,6 +1065,30 @@ private actor DelayedBlockedRouter: HandoffRouting {
             sourceDisposition: .blocked,
             runLabel: "Blocked recovery"
         )
+    }
+}
+
+private actor RecordingSummaryRouter: HandoffRouting {
+    private(set) var summaryCallCount = 0
+
+    func route(_ context: HandoffContext, settings: RelaySettings) async throws -> HandoffEnvelope {
+        _ = context
+        _ = settings
+        return HandoffEnvelope(
+            handoffText: "Unused",
+            sourceDisposition: .implementationCheckpoint,
+            runLabel: "Unused route"
+        )
+    }
+
+    func summarizeWork(
+        _ context: WorkSummaryContext,
+        settings: RelaySettings
+    ) async throws -> String {
+        _ = context
+        _ = settings
+        summaryCallCount += 1
+        return "Parser foundation is complete."
     }
 }
 

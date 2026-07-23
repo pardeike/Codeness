@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RepositoryWindowHost: View {
     let coordinator: RepositoryCoordinator
+    @Environment(CodenessApplicationModel.self) private var applicationModel
 
     var body: some View {
         Group {
@@ -16,7 +17,7 @@ struct RepositoryWindowHost: View {
                 } actions: {
                     Button("Retry") {
                         coordinator.clearError()
-                        Task { await coordinator.load() }
+                        Task { await loadRepository() }
                     }
                     .buttonStyle(.borderedProminent)
                     .help("Try loading this repository's saved Codeness state again")
@@ -28,7 +29,12 @@ struct RepositoryWindowHost: View {
             }
         }
         .task(id: coordinator.record.canonicalPath) {
-            await coordinator.load()
+            await loadRepository()
         }
+    }
+
+    private func loadRepository() async {
+        await coordinator.load()
+        await applicationModel.resumeAfterSystemTerminationIfNeeded(coordinator)
     }
 }

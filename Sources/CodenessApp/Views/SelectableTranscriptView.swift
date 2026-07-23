@@ -68,6 +68,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
         private var didApplyInitialViewport = false
         private var isApplyingTextUpdate = false
         private var isPerformingProgrammaticScroll = false
+        private var isReportingViewport = false
         private var followRevision = 0
         private var lastScrollToEndRequest: Int
         private var lastReportedViewport: TranscriptViewportState?
@@ -272,10 +273,14 @@ struct SelectableTranscriptView: NSViewRepresentable {
         }
 
         private func reportViewportState() {
-            guard didApplyInitialViewport,
+            guard !isReportingViewport,
+                  didApplyInitialViewport,
                   let scrollView,
                   let textView else { return }
-            let viewport = viewportState(
+            isReportingViewport = true
+            defer { isReportingViewport = false }
+
+            let viewport = TranscriptViewportMapper.state(
                 scrollView: scrollView,
                 textView: textView,
                 followsOutput: isFollowingOutput
@@ -284,41 +289,6 @@ struct SelectableTranscriptView: NSViewRepresentable {
             lastReportedViewport = viewport
             let handler = onViewportChange
             Task { @MainActor in handler(viewport) }
-        }
-
-        private func viewportState(
-            scrollView: NSScrollView,
-            textView: NSTextView,
-            followsOutput: Bool
-        ) -> TranscriptViewportState {
-            ensureLayout(in: textView)
-            let textLength = (textView.string as NSString).length
-            guard textLength > 0,
-                  let layoutManager = unsafe textView.layoutManager else {
-                return TranscriptViewportState(followsOutput: followsOutput)
-            }
-
-            let visibleY = scrollView.contentView.bounds.minY
-            let insertionPoint = NSPoint(
-                x: textView.textContainerOrigin.x + 1,
-                y: visibleY + 1
-            )
-            let characterOffset = min(
-                max(textView.characterIndexForInsertion(at: insertionPoint), 0),
-                textLength - 1
-            )
-            let glyphIndex = layoutManager.glyphIndexForCharacter(at: characterOffset)
-            // Passing nil avoids exposing or dereferencing the optional effective-range pointer.
-            let lineRect = unsafe layoutManager.lineFragmentRect(
-                forGlyphAt: glyphIndex,
-                effectiveRange: nil
-            )
-            let lineY = lineRect.minY + textView.textContainerOrigin.y
-            return TranscriptViewportState(
-                topCharacterOffset: characterOffset,
-                verticalOffset: Double(visibleY - lineY),
-                followsOutput: followsOutput
-            )
         }
 
         private func ensureLayout(in textView: NSTextView) {
@@ -333,6 +303,55 @@ struct SelectableTranscriptView: NSViewRepresentable {
             let visibleMaxY = scrollView.contentView.bounds.maxY
             return documentView.bounds.maxY - visibleMaxY <= 40
         }
+    }
+}
+
+@MainActor
+enum TranscriptViewportMapper {
+    static func state(
+        scrollView: NSScrollView,
+        textView: NSTextView,
+        followsOutput: Bool
+    ) -> TranscriptViewportState {
+        let textLength = (textView.string as NSString).length
+        guard textLength > 0,
+              let layoutManager = unsafe textView.layoutManager,
+              let textContainer = unsafe textView.textContainer else {
+            return TranscriptViewportState(followsOutput: followsOutput)
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        guard layoutManager.numberOfGlyphs > 0 else {
+            return TranscriptViewportState(followsOutput: followsOutput)
+        }
+
+        let visibleY = scrollView.contentView.bounds.minY
+        let textContainerOrigin = textView.textContainerOrigin
+        let containerPoint = NSPoint(
+            x: 1,
+            y: max(0, visibleY - textContainerOrigin.y + 1)
+        )
+        // Passing nil avoids exposing or dereferencing the optional glyph-fraction pointer.
+        let locatedGlyphIndex = unsafe layoutManager.glyphIndex(
+            for: containerPoint,
+            in: textContainer,
+            fractionOfDistanceThroughGlyph: nil
+        )
+        let glyphIndex = min(max(locatedGlyphIndex, 0), layoutManager.numberOfGlyphs - 1)
+        let characterOffset = min(
+            max(layoutManager.characterIndexForGlyph(at: glyphIndex), 0),
+            textLength - 1
+        )
+        // Passing nil avoids exposing or dereferencing the optional effective-range pointer.
+        let lineRect = unsafe layoutManager.lineFragmentRect(
+            forGlyphAt: glyphIndex,
+            effectiveRange: nil
+        )
+        let lineY = lineRect.minY + textContainerOrigin.y
+        return TranscriptViewportState(
+            topCharacterOffset: characterOffset,
+            verticalOffset: Double(visibleY - lineY),
+            followsOutput: followsOutput
+        )
     }
 }
 

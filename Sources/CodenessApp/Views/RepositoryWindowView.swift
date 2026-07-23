@@ -28,9 +28,10 @@ struct RepositoryWindowView: View {
             NavigationSplitView(columnVisibility: $columnVisibility) {
                 runList
                     .navigationSplitViewColumnWidth(
-                        min: 275,
-                        ideal: coordinator.viewState.sidebarWidth ?? 330,
-                        max: 430
+                        min: RepositoryWindowMetrics.minimumSidebarWidth,
+                        ideal: coordinator.viewState.sidebarWidth
+                            ?? RepositoryWindowMetrics.idealSidebarWidth,
+                        max: RepositoryWindowMetrics.maximumSidebarWidth
                     )
             } detail: {
                 detailColumn
@@ -130,11 +131,7 @@ struct RepositoryWindowView: View {
             RunDetailView(coordinator: coordinator, run: run)
                 .id(run.id)
         } else {
-            ContentUnavailableView(
-                "No Run Selected",
-                systemImage: "terminal",
-                description: Text("Select an Implement, Review, or Fix row to inspect its transcript.")
-            )
+            WorkOverviewView(coordinator: coordinator)
         }
     }
 
@@ -176,28 +173,88 @@ struct RepositoryWindowView: View {
     }
 
     private var runList: some View {
-        List(selection: $coordinator.selectedRunID) {
-            if let activity = coordinator.activity {
-                ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
-                    Section {
-                        ForEach(group.runs) { run in
-                            RunRow(
-                                run: run,
-                                isActive: coordinator.activeActivity?.status == .running
-                                    && coordinator.liveRunID == run.id
-                            )
-                            .tag(run.id)
-                            .help(
-                                "Show \(run.handoff?.runLabel ?? run.kind.displayName) "
-                                    + "(\(run.status.rawValue)) transcript"
-                            )
+        VStack(spacing: 0) {
+            List(selection: $coordinator.selectedRunID) {
+                if let activity = coordinator.activity {
+                    ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
+                        Section {
+                            ForEach(group.runs) { run in
+                                RunRow(
+                                    run: run,
+                                    isActive: coordinator.activeActivity?.status == .running
+                                        && coordinator.liveRunID == run.id
+                                )
+                                .tag(run.id)
+                                .help(
+                                    "Show \(run.handoff?.runLabel ?? run.kind.displayName) "
+                                        + "(\(run.status.rawValue)) transcript"
+                                )
+                            }
+                        } header: {
+                            RunGroupHeader(group: group)
                         }
-                    } header: {
-                        RunGroupHeader(group: group)
                     }
                 }
             }
+            .background {
+                ListBackgroundDeselectionBridge {
+                    coordinator.selectedRunID = nil
+                }
+            }
+
+            if workflowControls.isVisible {
+                Divider()
+                workflowControlBar
+            }
         }
+    }
+
+    private var workflowControlBar: some View {
+        HStack(spacing: 8) {
+            Spacer()
+            if let transport = workflowControls.transport {
+                Button {
+                    perform(transport)
+                } label: {
+                    Image(systemName: transport.systemImage)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 30, height: 24)
+                .contentShape(Rectangle())
+                .accessibilityLabel(transport.title)
+                .accessibilityHint(transport.help)
+                .help(transport.help)
+            }
+
+            if workflowControls.showsInterrupt {
+                Button {
+                    Task { await coordinator.interrupt() }
+                } label: {
+                    Image(systemName: "stop.fill")
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 30, height: 24)
+                .contentShape(Rectangle())
+                .accessibilityLabel("Interrupt Active Turn")
+                .accessibilityHint(
+                    "Interrupt the active Codex turn and preserve a resumable checkpoint"
+                )
+                .help("Interrupt the active Codex turn and preserve a resumable checkpoint")
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.bar)
+    }
+
+    private var workflowControls: WorkflowControlPresentation {
+        WorkflowControlPresentation(
+            canResume: coordinator.canResume,
+            isActivityRunning: coordinator.activity?.status == .running,
+            pauseAfterCurrent: coordinator.pauseAfterCurrent,
+            canInterrupt: coordinator.canInterrupt
+        )
     }
 
     @ToolbarContentBuilder
@@ -223,73 +280,6 @@ struct RepositoryWindowView: View {
                 Label("Repository Settings", systemImage: "gearshape")
             }
             .help("Configure models, reasoning effort, and handoff credentials for this repository")
-        }
-
-        ToolbarItemGroup(placement: .primaryAction) {
-            if coordinator.activity != nil {
-                Button {
-                    showsStartOverConfirmation = true
-                } label: {
-                    Label("Start Over", systemImage: "arrow.counterclockwise")
-                }
-                .disabled(!coordinator.canStartOver)
-                .help(
-                    coordinator.canStartOver
-                        ? "Archive this Codeness activity and return to its editable Goal and prompts without changing repository files"
-                        : "Pause or finish the current work before starting over"
-                )
-            }
-
-            if let liveRunID = coordinator.liveRunID, coordinator.selectedRunID != liveRunID {
-                Button {
-                    coordinator.selectLiveRun()
-                } label: {
-                    Label("Jump to Live", systemImage: "dot.radiowaves.left.and.right")
-                }
-                .help("Select the currently active run and show its live transcript")
-            }
-
-            if coordinator.canResume {
-                Button {
-                    Task { await coordinator.resume() }
-                } label: {
-                    Label("Resume Automatically", systemImage: "play.fill")
-                }
-                .help("Resume from the saved checkpoint and continue subsequent phases automatically")
-            } else if coordinator.activeActivity != nil {
-                Button {
-                    coordinator.setPauseAfterCurrent(!coordinator.pauseAfterCurrent)
-                } label: {
-                    Label(
-                        coordinator.pauseAfterCurrent ? "Keep Running" : "Pause After Current",
-                        systemImage: coordinator.pauseAfterCurrent ? "arrow.forward.circle" : "pause.circle"
-                    )
-                }
-                .help(
-                    coordinator.pauseAfterCurrent
-                        ? "Cancel the pending pause and continue automatically after this run"
-                        : "Pause the workflow after the current run reaches a safe stopping point"
-                )
-            }
-
-            if coordinator.canAmendGoal {
-                Button {
-                    showsGoalAmendment = true
-                } label: {
-                    Label("Amend Goal", systemImage: "square.and.pencil")
-                }
-                .help("Revise the Goal used by subsequent workflow phases while retaining its change history")
-            }
-
-            if coordinator.canInterrupt {
-                Button {
-                    Task { await coordinator.interrupt() }
-                } label: {
-                    Label("Interrupt", systemImage: "stop.fill")
-                }
-                .help("Interrupt the active Codex turn and preserve a resumable checkpoint")
-            }
-
         }
     }
 
@@ -353,6 +343,17 @@ struct RepositoryWindowView: View {
         defer { isSendingSteer = false }
         if await coordinator.steer(message) {
             steerMessage = ""
+        }
+    }
+
+    private func perform(_ transport: WorkflowTransportControl) {
+        switch transport {
+        case .resume:
+            Task { await coordinator.resume() }
+        case .pauseAfterCurrent:
+            coordinator.setPauseAfterCurrent(true)
+        case .keepRunning:
+            coordinator.setPauseAfterCurrent(false)
         }
     }
 }

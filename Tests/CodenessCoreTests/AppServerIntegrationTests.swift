@@ -605,6 +605,18 @@ private actor SelectiveFailingStore: RepositoryWorkspaceStoring {
             runID: runID
         )
     }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
 }
 
 private actor CallCountingRouter: HandoffRouting {

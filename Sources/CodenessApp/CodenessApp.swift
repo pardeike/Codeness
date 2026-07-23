@@ -66,10 +66,29 @@ private struct RepositoryWindowCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: .command)
             .help("Persist the active repository's Codeness state")
+
+            Divider()
+
+            Button("Start Over…") {
+                state.requestStartOver()
+            }
+            .disabled(state.currentCoordinator?.canStartOver != true)
+            .help(
+                "Archive the current activity and return to its editable Goal and prompts"
+            )
         }
 
         CommandGroup(replacing: .printItem) {
             EmptyView()
+        }
+
+        CommandGroup(after: .toolbar) {
+            Picker("Detail Layout", selection: detailPresentationBinding) {
+                ForEach(RunDetailPresentation.allCases, id: \.self) { presentation in
+                    Text(presentation.displayName).tag(presentation)
+                }
+            }
+            .disabled(!canChooseDetailLayout)
         }
 
         CommandMenu("Repository") {
@@ -98,11 +117,15 @@ private struct RepositoryWindowCommands: Commands {
 
         CommandMenu("Workflow") {
             Button(resumeOrPauseTitle) {
-                guard let coordinator = state.currentCoordinator else { return }
-                if coordinator.canResume {
+                guard let coordinator = state.currentCoordinator,
+                      let transport = workflowControls.transport else { return }
+                switch transport {
+                case .resume:
                     Task { await coordinator.resume() }
-                } else if coordinator.activeActivity != nil {
-                    coordinator.setPauseAfterCurrent(!coordinator.pauseAfterCurrent)
+                case .pauseAfterCurrent:
+                    coordinator.setPauseAfterCurrent(true)
+                case .keepRunning:
+                    coordinator.setPauseAfterCurrent(false)
                 }
             }
             .keyboardShortcut(.space, modifiers: [.command, .option])
@@ -123,37 +146,53 @@ private struct RepositoryWindowCommands: Commands {
 
             Divider()
 
-            Button("Jump to Live Run") {
+            Button("Show Current Run") {
                 state.currentCoordinator?.selectLiveRun()
             }
             .keyboardShortcut("l", modifiers: [.command, .option])
-            .disabled(!canJumpToLive)
-
-            Divider()
-
-            Button("Start Over…") {
-                state.requestStartOver()
-            }
-            .disabled(state.currentCoordinator?.canStartOver != true)
+            .disabled(!canShowCurrentRun)
         }
     }
 
     private var canResumeOrPause: Bool {
-        guard let coordinator = state.currentCoordinator else { return false }
-        return coordinator.canResume || coordinator.activeActivity != nil
+        workflowControls.transport != nil
     }
 
     private var resumeOrPauseTitle: String {
-        guard let coordinator = state.currentCoordinator else { return "Resume Automatically" }
-        if coordinator.canResume {
-            return "Resume Automatically"
-        }
-        return coordinator.pauseAfterCurrent ? "Keep Running Automatically" : "Pause After Current"
+        workflowControls.transport?.title ?? "Resume Automatically"
     }
 
-    private var canJumpToLive: Bool {
+    private var canShowCurrentRun: Bool {
         guard let coordinator = state.currentCoordinator,
               let liveRunID = coordinator.liveRunID else { return false }
         return coordinator.selectedRunID != liveRunID
+    }
+
+    private var workflowControls: WorkflowControlPresentation {
+        guard let coordinator = state.currentCoordinator else {
+            return WorkflowControlPresentation(
+                canResume: false,
+                isActivityRunning: false,
+                pauseAfterCurrent: false,
+                canInterrupt: false
+            )
+        }
+        return WorkflowControlPresentation(
+            canResume: coordinator.canResume,
+            isActivityRunning: coordinator.activity?.status == .running,
+            pauseAfterCurrent: coordinator.pauseAfterCurrent,
+            canInterrupt: coordinator.canInterrupt
+        )
+    }
+
+    private var canChooseDetailLayout: Bool {
+        state.currentCoordinator?.selectedRun?.finalOutput?.isEmpty == false
+    }
+
+    private var detailPresentationBinding: Binding<RunDetailPresentation> {
+        Binding(
+            get: { state.currentCoordinator?.runDetailPresentation ?? .split },
+            set: { state.currentCoordinator?.updateRunDetailPresentation($0) }
+        )
     }
 }

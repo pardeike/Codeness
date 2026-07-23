@@ -40,5 +40,12 @@ struct RunSelectionPolicyTests {
                 activeRunIsAtBottom: true
             )
         )
+        #expect(
+            !RunSelectionPolicy.shouldSelectNextRun(
+                selectedRunID: nil,
+                activeRunID: active,
+                activeRunIsAtBottom: true
+            )
+        )
     }
 }

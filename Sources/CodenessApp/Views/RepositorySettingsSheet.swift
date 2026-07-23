@@ -63,9 +63,10 @@ struct RepositorySettingsSheet: View {
                                 Text(keyName).tag(keyName)
                             }
                         }
-                            .labelsHidden()
-                            .frame(maxWidth: 300)
-                            .help("Choose the JSON property whose value is the handoff API key")
+                        .labelsHidden()
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .help("Choose the JSON property whose value is the handoff API key")
                     }
                     HStack(spacing: 10) {
                         Button("Test Handoff") {

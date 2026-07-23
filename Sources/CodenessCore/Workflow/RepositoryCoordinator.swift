@@ -149,6 +149,7 @@ public final class RepositoryCoordinator {
         didSet {
             guard isLoaded, selectedRunID != oldValue else { return }
             viewState.selectedRunID = selectedRunID
+            viewState.runSelectionWasSaved = true
             scheduleViewStateSave()
         }
     }
@@ -162,6 +163,8 @@ public final class RepositoryCoordinator {
     public private(set) var isStartingOver = false
     public private(set) var pauseState: DocumentPauseState = .idle
     public private(set) var viewState = RepositoryViewState()
+    public private(set) var isGeneratingWorkOverviewSummary = false
+    public private(set) var workOverviewSummaryError: String?
 
     private let appServer: CodexAppServerClient
     private let router: any HandoffRouting
@@ -169,10 +172,13 @@ public final class RepositoryCoordinator {
     private let store: any RepositoryWorkspaceStoring
     private var sessionsPrepared = false
     private var itemsWithDeltas: [UUID: Set<String>] = [:]
+    private var tokenUsageBaselines: [UUID: RunTokenUsage] = [:]
     private var runIsAtBottom: [UUID: Bool] = [:]
     private var completingRunIDs: Set<UUID> = []
     private var routingTasks: [UUID: Task<Void, Never>] = [:]
     private var viewStateSaveTask: Task<Void, Never>?
+    private var workOverviewSummaryTask: Task<Void, Never>?
+    private var workOverviewSummaryTaskSignature: String?
     private var closeWaiter: CheckedContinuation<DocumentClosePreparationResult, Never>?
     private var isClosing = false
     private var pendingInteractions: [PendingServerInteraction] = []
@@ -199,7 +205,7 @@ public final class RepositoryCoordinator {
     public var activity: ActivityRecord? { record.activity }
 
     public var selectedRun: RunRecord? {
-        guard let selectedRunID else { return activeRun ?? record.activity?.runs.last }
+        guard let selectedRunID else { return nil }
         return record.activity?.runs.first(where: { $0.id == selectedRunID })
     }
 
@@ -285,6 +291,25 @@ public final class RepositoryCoordinator {
         viewState.detailPresentation ?? .split
     }
 
+    public var workOverviewSummarySourceSignature: String? {
+        workSummaryContext?.sourceSignature
+    }
+
+    public var workOverviewSummaryText: String? {
+        guard let signature = workOverviewSummarySourceSignature,
+              viewState.workOverviewSummary?.sourceSignature == signature else { return nil }
+        return viewState.workOverviewSummary?.text
+    }
+
+    public var workOverviewSummaryGeneratedAt: Date? {
+        guard workOverviewSummaryText != nil else { return nil }
+        return viewState.workOverviewSummary?.generatedAt
+    }
+
+    public var hasWorkOverviewSummarySource: Bool {
+        workOverviewSummarySourceSignature != nil
+    }
+
     public var requiresCloseConfirmation: Bool {
         activeActivity?.status == .running
     }
@@ -300,16 +325,23 @@ public final class RepositoryCoordinator {
             viewState = (try? await store.loadViewState(canonicalPath: record.canonicalPath))
                 ?? RepositoryViewState()
             await recoverAppendOnlyTranscripts()
+            await recoverAppendOnlyTokenUsage()
             recoverInterruptedState()
             migrateResumeCheckpointIfNeeded()
             pauseAfterCurrent = viewState.pauseAfterCurrent
             runIsAtBottom = viewState.transcriptViewports.mapValues(\.followsOutput)
-            if let restoredRunID = viewState.selectedRunID,
-               record.activity?.runs.contains(where: { $0.id == restoredRunID }) == true {
-                selectedRunID = restoredRunID
+            if viewState.runSelectionWasSaved {
+                if let restoredRunID = viewState.selectedRunID,
+                   record.activity?.runs.contains(where: { $0.id == restoredRunID }) == true {
+                    selectedRunID = restoredRunID
+                } else {
+                    selectedRunID = nil
+                    viewState.selectedRunID = nil
+                }
             } else {
                 selectedRunID = record.activity?.runs.last?.id
                 viewState.selectedRunID = selectedRunID
+                viewState.runSelectionWasSaved = true
             }
             isLoaded = true
             switch record.activity?.status {
@@ -453,10 +485,19 @@ public final class RepositoryCoordinator {
     }
 
     public func updateSidebar(width: Double?, isVisible: Bool) {
+        var changed = false
         if let width {
-            viewState.sidebarWidth = min(max(width, 275), 430)
+            let width = min(max(width, 220), 430)
+            if viewState.sidebarWidth.map({ abs($0 - width) >= 0.5 }) != false {
+                viewState.sidebarWidth = width
+                changed = true
+            }
         }
-        viewState.sidebarVisible = isVisible
+        if viewState.sidebarVisible != isVisible {
+            viewState.sidebarVisible = isVisible
+            changed = true
+        }
+        guard changed else { return }
         scheduleViewStateSave()
     }
 
@@ -464,6 +505,72 @@ public final class RepositoryCoordinator {
         guard viewState.detailPresentation != presentation else { return }
         viewState.detailPresentation = presentation
         scheduleViewStateSave()
+    }
+
+    public func updateRunDetailSplitFraction(_ fraction: Double) {
+        let fraction = min(max(fraction, 0.15), 0.85)
+        guard viewState.detailSplitFraction != fraction else { return }
+        viewState.detailSplitFraction = fraction
+        scheduleViewStateSave()
+    }
+
+    public func requestWorkOverviewSummary(force: Bool = false) {
+        guard !isClosing, let context = workSummaryContext else {
+            workOverviewSummaryError = nil
+            return
+        }
+        let signature = context.sourceSignature
+        if !force, viewState.workOverviewSummary?.sourceSignature == signature {
+            workOverviewSummaryError = nil
+            return
+        }
+        if !force,
+           workOverviewSummaryTask != nil,
+           workOverviewSummaryTaskSignature == signature {
+            return
+        }
+
+        workOverviewSummaryTask?.cancel()
+        workOverviewSummaryTaskSignature = signature
+        isGeneratingWorkOverviewSummary = true
+        workOverviewSummaryError = nil
+        let router = self.router
+        let settings = record.settings.relay
+        let store = self.store
+        let canonicalPath = record.canonicalPath
+
+        workOverviewSummaryTask = Task { @MainActor [weak self] in
+            do {
+                let text = try await router.summarizeWork(context, settings: settings)
+                try Task.checkCancellation()
+                if let self,
+                   self.workSummaryContext?.sourceSignature == signature,
+                   self.workOverviewSummaryTaskSignature == signature {
+                    self.viewState.workOverviewSummary = WorkOverviewSummaryCache(
+                        sourceSignature: signature,
+                        text: text
+                    )
+                    try? await store.saveViewState(
+                        self.viewState,
+                        canonicalPath: canonicalPath
+                    )
+                }
+            } catch is CancellationError {
+                // A newer set of handoffs superseded this request.
+            } catch {
+                if let self,
+                   self.workSummaryContext?.sourceSignature == signature,
+                   self.workOverviewSummaryTaskSignature == signature {
+                    self.workOverviewSummaryError = error.localizedDescription
+                }
+            }
+
+            guard let self,
+                  self.workOverviewSummaryTaskSignature == signature else { return }
+            self.isGeneratingWorkOverviewSummary = false
+            self.workOverviewSummaryTaskSignature = nil
+            self.workOverviewSummaryTask = nil
+        }
     }
 
     public func flushDocumentState() async -> Bool {
@@ -483,6 +590,33 @@ public final class RepositoryCoordinator {
             errorMessage = error.localizedDescription
             return false
         }
+    }
+
+    /// Persists a one-shot launch request only for checkpoints that can continue
+    /// without inspecting or replaying a possibly interrupted repository change.
+    @discardableResult
+    public func armResumeAfterSystemTerminationIfSafe() async -> Bool {
+        guard hasSafeAutomaticResumeCheckpoint else { return false }
+        viewState.resumeAfterSystemTermination = true
+        guard await flushDocumentState() else {
+            viewState.resumeAfterSystemTermination = nil
+            return false
+        }
+        return true
+    }
+
+    /// Clears the persisted request before returning it so a launch failure cannot
+    /// create an automatic-resume loop. A changed or interrupted checkpoint consumes
+    /// the stale request but remains paused for manual inspection.
+    public func consumeResumeAfterSystemTerminationRequest() async -> Bool {
+        guard viewState.resumeAfterSystemTermination == true else { return false }
+        let shouldResume = hasSafeAutomaticResumeCheckpoint
+        viewState.resumeAfterSystemTermination = nil
+        guard await flushDocumentState() else {
+            viewState.resumeAfterSystemTermination = true
+            return false
+        }
+        return shouldResume
     }
 
     public func resume() async {
@@ -662,6 +796,7 @@ public final class RepositoryCoordinator {
         isClosing = true
         viewStateSaveTask?.cancel()
         viewStateSaveTask = nil
+        cancelWorkOverviewSummaryRequest()
     }
 
     public func cancelClosePreparation() {
@@ -826,6 +961,7 @@ public final class RepositoryCoordinator {
         let pendingViewSave = viewStateSaveTask
         viewStateSaveTask?.cancel()
         viewStateSaveTask = nil
+        cancelWorkOverviewSummaryRequest()
         await pendingViewSave?.value
         await cancelRoutingTasks()
 
@@ -852,7 +988,8 @@ public final class RepositoryCoordinator {
             sidebarWidth: viewState.sidebarWidth,
             sidebarVisible: false,
             pauseAfterCurrent: false,
-            detailPresentation: viewState.detailPresentation
+            detailPresentation: viewState.detailPresentation,
+            detailSplitFraction: viewState.detailSplitFraction
         )
 
         do {
@@ -925,6 +1062,17 @@ public final class RepositoryCoordinator {
             updateRun(runID) {
                 $0.turnID = turnID
                 $0.status = .running
+            }
+        }
+
+        if method == "thread/tokenUsage/updated",
+           let usage = params["tokenUsage"],
+           let total = RunTokenUsage(appServerValue: usage["total"]),
+           let last = RunTokenUsage(appServerValue: usage["last"]) {
+            let baseline = tokenUsageBaselines[runID] ?? total.subtracting(last)
+            tokenUsageBaselines[runID] = baseline
+            updateRun(runID) {
+                $0.tokenUsage = total.subtracting(baseline)
             }
         }
 
@@ -1421,6 +1569,27 @@ public final class RepositoryCoordinator {
         }
     }
 
+    private func recoverAppendOnlyTokenUsage() async {
+        guard let activity = record.activity else { return }
+        for run in activity.runs {
+            let mayHaveUnpersistedUsage = [
+                RunStatus.queued,
+                .running,
+                .awaitingApproval,
+                .interrupted
+            ].contains(run.status)
+            guard run.tokenUsage == nil || mayHaveUnpersistedUsage else { continue }
+            guard let recovered = try? await store.recoveredTokenUsage(
+                repositoryPath: record.canonicalPath,
+                activityID: activity.id,
+                runID: run.id
+            ), recovered != run.tokenUsage else {
+                continue
+            }
+            updateRun(run.id) { $0.tokenUsage = recovered }
+        }
+    }
+
     private func presentInteraction(id: JSONValue, method: String, params: JSONValue) {
         let title: String
         let detail: String
@@ -1644,6 +1813,7 @@ public final class RepositoryCoordinator {
     private func persistDocumentState() async throws {
         guard isLoaded else { throw RepositoryCoordinatorError.documentNotLoaded }
         viewState.selectedRunID = selectedRunID
+        viewState.runSelectionWasSaved = true
         viewState.pauseAfterCurrent = pauseAfterCurrent
         try await persist()
         try await store.saveViewState(viewState, canonicalPath: record.canonicalPath)
@@ -1689,6 +1859,43 @@ public final class RepositoryCoordinator {
             }
         }
         record.activity = activity
+    }
+
+    private var workSummaryContext: WorkSummaryContext? {
+        guard let activity = record.activity else { return nil }
+        let handoffs = activity.runs.compactMap { run -> WorkSummaryHandoff? in
+            guard let handoff = run.handoff else { return nil }
+            return WorkSummaryHandoff(
+                runID: run.id,
+                sequence: run.sequence,
+                kind: run.kind,
+                label: handoff.runLabel,
+                disposition: handoff.sourceDisposition,
+                text: handoff.handoffText
+            )
+        }
+        guard !handoffs.isEmpty else { return nil }
+        return WorkSummaryContext(goal: activity.goal, handoffs: handoffs)
+    }
+
+    private func cancelWorkOverviewSummaryRequest() {
+        workOverviewSummaryTask?.cancel()
+        workOverviewSummaryTask = nil
+        workOverviewSummaryTaskSignature = nil
+        isGeneratingWorkOverviewSummary = false
+    }
+
+    private var hasSafeAutomaticResumeCheckpoint: Bool {
+        guard isLoaded,
+              let activity = record.activity,
+              activity.status == .paused,
+              let checkpoint = activity.resumeCheckpoint else { return false }
+        switch checkpoint {
+        case .routeCompletedRun, .perform:
+            return true
+        case .recoverRun:
+            return false
+        }
     }
 
     private func cancelRoutingTasks() async {

@@ -122,7 +122,22 @@ final class RepositoryWindowManager {
             return (existing, true)
         }
 
-        let windowController = makeWindowController(for: workspaceURL)
+        let initialWindowFrame = await applicationModel.storedWindowFrame(for: path)
+        // Loading the tiny view-state file yields the MainActor. Recheck so two
+        // concurrent open requests cannot create duplicate windows for one path.
+        if let existing = windowControllers[path] {
+            if display {
+                existing.showWindow(nil)
+                existing.window?.makeKeyAndOrderFront(nil)
+            }
+            await rememberRecentRepository(workspaceURL)
+            return (existing, true)
+        }
+
+        let windowController = makeWindowController(
+            for: workspaceURL,
+            initialWindowFrame: initialWindowFrame
+        )
         windowControllers[path] = windowController
         if display {
             windowController.showWindow(nil)
@@ -248,22 +263,33 @@ final class RepositoryWindowManager {
         }
     }
 
-    private func makeWindowController(for repositoryURL: URL) -> RepositoryWindowController {
+    private func makeWindowController(
+        for repositoryURL: URL,
+        initialWindowFrame: StoredWindowFrame?
+    ) -> RepositoryWindowController {
         let canonicalPath = repositoryURL.path
         let coordinator = applicationModel.coordinator(for: canonicalPath)
         let rootView = RepositoryWindowHost(coordinator: coordinator)
             .environment(applicationModel)
             .environment(commandState)
         let hostingController = NSHostingController(rootView: rootView)
+        // RepositoryWindowController owns this window's size policy. In particular,
+        // SwiftUI must not replace NSWindow.minSize with the current sidebar width
+        // plus the detail's fitting width, because that prevents the sidebar from
+        // yielding when the user continues to narrow the window.
+        hostingController.sizingOptions = []
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1_260, height: 820),
+            contentRect: NSRect(
+                origin: .zero,
+                size: RepositoryWindowMetrics.defaultContentSize
+            ),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.contentViewController = hostingController
-        window.setContentSize(NSSize(width: 1_260, height: 820))
-        window.minSize = NSSize(width: 840, height: 560)
+        window.setContentSize(RepositoryWindowMetrics.defaultContentSize)
+        window.minSize = RepositoryWindowMetrics.minimumWindowSize
         window.title = repositoryURL.lastPathComponent
         window.subtitle = repositoryURL.deletingLastPathComponent().abbreviatedPath
         window.representedURL = repositoryURL
@@ -273,12 +299,15 @@ final class RepositoryWindowManager {
         )
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
-        window.center()
-        stagger(window, relativeTo: windowControllers.values.compactMap(\.window))
+        if initialWindowFrame == nil {
+            window.center()
+            stagger(window, relativeTo: windowControllers.values.compactMap(\.window))
+        }
 
         let controller = RepositoryWindowController(
             window: window,
             coordinator: coordinator,
+            initialWindowFrame: initialWindowFrame,
             commandState: commandState,
             onClose: { [weak self] closedController in
                 self?.repositoryWindowDidClose(closedController)
@@ -364,12 +393,14 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     private var didClose = false
     private var isPresentingCloseAlert = false
     private var isApplyingRestoredFrame = false
+    private var isAwaitingInitialFrameRestoration = true
     private var pausePanel: NSPanel?
-    private var restorationTask: Task<Void, Never>?
+    private var loadCompletionTask: Task<Void, Never>?
 
     init(
         window: NSWindow,
         coordinator: RepositoryCoordinator,
+        initialWindowFrame: StoredWindowFrame? = nil,
         commandState: RepositoryWindowCommandState,
         onClose: @escaping @MainActor (RepositoryWindowController) -> Void
     ) {
@@ -377,16 +408,21 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         self.commandState = commandState
         self.onClose = onClose
         super.init(window: window)
+        restoreWindowFrame(initialWindowFrame, display: false)
         window.delegate = self
-        restorationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await removeDefaultSidebarToolbarItemWhenAvailable()
+        loadCompletionTask = Task { @MainActor [weak self] in
             while !coordinator.isLoaded, !Task.isCancelled {
-                if coordinator.errorMessage != nil { return }
+                if coordinator.errorMessage != nil {
+                    guard let self else { return }
+                    isAwaitingInitialFrameRestoration = false
+                    return
+                }
                 try? await Task.sleep(for: .milliseconds(25))
             }
-            guard !Task.isCancelled else { return }
-            restoreWindowFrame()
+            guard !Task.isCancelled, let self else { return }
+            isAwaitingInitialFrameRestoration = false
+            saveWindowFrame()
+            await hideDefaultSidebarToolbarItemWhenAvailable()
         }
     }
 
@@ -395,7 +431,7 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     }
 
     deinit {
-        restorationTask?.cancel()
+        loadCompletionTask?.cancel()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -439,27 +475,32 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         saveWindowFrame()
     }
 
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        enforceMinimumWindowSize(on: sender)
+        yieldSidebarIfNeeded(in: sender, forProposedFrameSize: frameSize)
+        return frameSize
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
+        enforceMinimumWindowSize()
         saveWindowFrame()
     }
 
     func windowDidResize(_ notification: Notification) {
+        enforceMinimumWindowSize()
         saveWindowFrame()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        enforceMinimumWindowSize()
         commandState.currentCoordinator = coordinator
-        removeDefaultSidebarToolbarItem()
-    }
-
-    func windowDidUpdate(_ notification: Notification) {
-        removeDefaultSidebarToolbarItem()
+        hideDefaultSidebarToolbarItem()
     }
 
     func windowWillClose(_ notification: Notification) {
         guard !didClose else { return }
         didClose = true
-        restorationTask?.cancel()
+        loadCompletionTask?.cancel()
         if commandState.currentCoordinator === coordinator {
             commandState.currentCoordinator = nil
         }
@@ -467,22 +508,28 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         onClose(self)
     }
 
-    private func removeDefaultSidebarToolbarItemWhenAvailable() async {
+    private func hideDefaultSidebarToolbarItemWhenAvailable() async {
         for attempt in 0..<8 where !Task.isCancelled {
             await Task.yield()
-            removeDefaultSidebarToolbarItem()
+            hideDefaultSidebarToolbarItem()
             if attempt < 7 {
                 try? await Task.sleep(for: .milliseconds(25))
             }
         }
     }
 
-    private func removeDefaultSidebarToolbarItem() {
+    private func hideDefaultSidebarToolbarItem() {
         guard let toolbar = window?.toolbar else { return }
-        for index in toolbar.items.indices.reversed()
-        where toolbar.items[index].itemIdentifier == .toggleSidebar
-            || toolbar.items[index].itemIdentifier == Self.swiftUISidebarToggleItemIdentifier {
-            toolbar.removeItem(at: index)
+        Self.hideSystemSidebarToolbarItems(in: toolbar.items)
+    }
+
+    static func hideSystemSidebarToolbarItems(in items: [NSToolbarItem]) {
+        for item in items
+        where item is NSTrackingSeparatorToolbarItem
+            || item.itemIdentifier == .toggleSidebar
+            || item.itemIdentifier == .sidebarTrackingSeparator
+            || item.itemIdentifier == Self.swiftUISidebarToggleItemIdentifier {
+            item.isHidden = true
         }
     }
 
@@ -520,9 +567,9 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         return panel
     }
 
-    private func restoreWindowFrame() {
-        guard let window,
-              let storedFrame = coordinator.viewState.windowFrame else { return }
+    private func restoreWindowFrame(_ storedFrame: StoredWindowFrame?, display: Bool) {
+        guard let window, let storedFrame else { return }
+        enforceMinimumWindowSize(on: window)
         let preferredScreen = NSScreen.screens.first {
             $0.localizedName == storedFrame.displayIdentifier
         } ?? window.screen ?? NSScreen.main
@@ -534,12 +581,75 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         let x = min(max(CGFloat(storedFrame.x), visible.minX), visible.maxX - width)
         let y = min(max(CGFloat(storedFrame.y), visible.minY), visible.maxY - height)
         isApplyingRestoredFrame = true
-        window.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        window.setFrame(NSRect(x: x, y: y, width: width, height: height), display: display)
         isApplyingRestoredFrame = false
+    }
+
+    private func enforceMinimumWindowSize(on candidate: NSWindow? = nil) {
+        guard let window = candidate ?? window else { return }
+        let minimumFrameSize = RepositoryWindowMetrics.minimumWindowSize
+        let minimumContentSize = window.contentRect(
+            forFrameRect: NSRect(origin: .zero, size: minimumFrameSize)
+        ).size
+        if window.contentMinSize != minimumContentSize {
+            window.contentMinSize = minimumContentSize
+        }
+        if window.minSize != minimumFrameSize {
+            window.minSize = minimumFrameSize
+        }
+    }
+
+    private func yieldSidebarIfNeeded(
+        in window: NSWindow,
+        forProposedFrameSize frameSize: NSSize
+    ) {
+        guard frameSize.width < window.frame.width - 0.5,
+              let contentView = window.contentView,
+              let splitView = findNavigationSplitView(in: contentView),
+              splitView.arrangedSubviews.count >= 2 else { return }
+
+        let proposedContentWidth = window.contentRect(
+            forFrameRect: NSRect(origin: .zero, size: frameSize)
+        ).width
+        let widthOutsideSplitView = max(0, contentView.bounds.width - splitView.frame.width)
+        let proposedSplitWidth = max(0, proposedContentWidth - widthOutsideSplitView)
+        let occupiedWidth = splitView.arrangedSubviews.reduce(CGFloat.zero) {
+            $0 + $1.frame.width
+        }
+        // NavigationSplitView uses an underlaying full-width detail wrapper, so
+        // its arranged widths intentionally overlap. Its divider does not consume
+        // horizontal layout space. Plain NSSplitViews use the remaining gap.
+        let dividerWidth = occupiedWidth > splitView.bounds.width + 0.5
+            ? 0
+            : max(0, splitView.bounds.width - occupiedWidth)
+        let sidebar = splitView.arrangedSubviews[0]
+        let proposedSidebarWidth = RepositoryWindowMetrics.sidebarWidth(
+            currentWidth: sidebar.frame.width,
+            forProposedSplitWidth: proposedSplitWidth,
+            dividerWidth: dividerWidth
+        )
+
+        guard proposedSidebarWidth < sidebar.frame.width - 0.5 else { return }
+        splitView.setPosition(proposedSidebarWidth, ofDividerAt: 0)
+    }
+
+    private func findNavigationSplitView(in view: NSView) -> NSSplitView? {
+        if let splitView = view as? NSSplitView,
+           splitView.isVertical,
+           splitView.arrangedSubviews.count >= 2 {
+            return splitView
+        }
+        for subview in view.subviews {
+            if let splitView = findNavigationSplitView(in: subview) {
+                return splitView
+            }
+        }
+        return nil
     }
 
     private func saveWindowFrame() {
         guard !isApplyingRestoredFrame,
+              !isAwaitingInitialFrameRestoration,
               coordinator.isLoaded,
               let window else { return }
         let frame = window.frame

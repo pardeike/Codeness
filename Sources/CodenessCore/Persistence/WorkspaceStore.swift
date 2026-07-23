@@ -20,6 +20,11 @@ public protocol RepositoryWorkspaceStoring: Sendable {
         runID: UUID
     ) async throws
     func recoveredTranscript(repositoryPath: String, activityID: UUID, runID: UUID) async throws -> String
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage?
 }
 
 public actor WorkspaceStore: RepositoryWorkspaceStoring {
@@ -139,6 +144,44 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
         )
         guard FileManager.default.fileExists(atPath: url.path) else { return "" }
         return String(decoding: try Data(contentsOf: url), as: UTF8.self)
+    }
+
+    public func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) throws -> RunTokenUsage? {
+        let url = logURL(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID,
+            suffix: "raw.jsonl"
+        )
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+
+        var baseline: RunTokenUsage?
+        var latestTotal: RunTokenUsage?
+        let contents = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        for line in contents.split(whereSeparator: \.isNewline) {
+            guard line.contains("tokenUsage"),
+                  let event = try? decoder.decode(
+                    JSONValue.self,
+                    from: Data(line.utf8)
+                  ),
+                  event["method"]?.stringValue == "thread/tokenUsage/updated",
+                  let usage = event["params"]?["tokenUsage"],
+                  let total = RunTokenUsage(appServerValue: usage["total"]),
+                  let last = RunTokenUsage(appServerValue: usage["last"]) else {
+                continue
+            }
+            if baseline == nil {
+                baseline = total.subtracting(last)
+            }
+            latestTotal = total
+        }
+
+        guard let baseline, let latestTotal else { return nil }
+        return latestTotal.subtracting(baseline)
     }
 
     public func repositoryDirectory(canonicalPath: String) -> URL {

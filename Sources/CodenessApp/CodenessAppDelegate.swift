@@ -25,10 +25,11 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !Self.isRunningUnitTests else { return }
-        Task { await applicationModel.bootstrap() }
         Task { @MainActor [weak self] in
+            guard let self else { return }
+            await applicationModel.bootstrap()
             await Task.yield()
-            guard let self, let windowManager else { return }
+            guard let windowManager else { return }
             await windowManager.loadRecentRepositories()
             windowManager.whenOpenRequestsFinish { [weak self, weak windowManager] in
                 guard let self, let windowManager, windowManager.isEmpty else { return }
@@ -80,8 +81,22 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
         guard !isTerminating else { return .terminateLater }
         isTerminating = true
         let activeCoordinators = applicationModel.activeCoordinators
+        let isSystemTermination = ApplicationTerminationPolicy.isCurrentTerminationSystemInitiated
         guard !activeCoordinators.isEmpty else {
-            finishTermination(sender, coordinatorsToPause: [])
+            finishTermination(
+                sender,
+                coordinatorsToPause: [],
+                resumeAfterSystemTermination: false
+            )
+            return .terminateLater
+        }
+
+        if isSystemTermination {
+            finishTermination(
+                sender,
+                coordinatorsToPause: activeCoordinators,
+                resumeAfterSystemTermination: true
+            )
             return .terminateLater
         }
 
@@ -148,7 +163,8 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
 
     private func finishTermination(
         _ sender: NSApplication,
-        coordinatorsToPause: [RepositoryCoordinator]
+        coordinatorsToPause: [RepositoryCoordinator],
+        resumeAfterSystemTermination: Bool = false
     ) {
         Task { [weak self] in
             guard let self else { return }
@@ -176,6 +192,11 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
             guard await applicationModel.shutdown() else {
                 cancelTermination(sender, message: "Could not save every repository before shutting down Codex.")
                 return
+            }
+            if resumeAfterSystemTermination {
+                for coordinator in coordinatorsToPause {
+                    _ = await coordinator.armResumeAfterSystemTerminationIfSafe()
+                }
             }
             dismissTerminationPanel()
             sender.reply(toApplicationShouldTerminate: true)

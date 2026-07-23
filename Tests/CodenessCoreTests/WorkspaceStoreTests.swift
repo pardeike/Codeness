@@ -36,6 +36,51 @@ struct WorkspaceStoreTests {
     }
 
     @Test
+    func recoversPerRunTokenUsageFromCumulativeThreadCounters() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkspaceStore(rootURL: root)
+        let repositoryPath = "/tmp/token-repository"
+        let activityID = UUID()
+        let runID = UUID()
+        let events = [
+            tokenUsageEvent(
+                total: usage(total: 5_100, input: 5_000, cached: 4_000, output: 100, reasoning: 20),
+                last: usage(total: 100, input: 90, cached: 80, output: 10, reasoning: 2)
+            ),
+            tokenUsageEvent(
+                total: usage(total: 5_600, input: 5_480, cached: 4_400, output: 120, reasoning: 25),
+                last: usage(total: 500, input: 480, cached: 400, output: 20, reasoning: 5)
+            ),
+            tokenUsageEvent(
+                total: usage(total: 5_600, input: 5_480, cached: 4_400, output: 120, reasoning: 25),
+                last: usage(total: 500, input: 480, cached: 400, output: 20, reasoning: 5)
+            )
+        ]
+        for event in events {
+            try await store.appendRawLine(
+                event,
+                repositoryPath: repositoryPath,
+                activityID: activityID,
+                runID: runID
+            )
+        }
+
+        let recovered = try #require(try await store.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        ))
+
+        #expect(recovered.totalTokens == 600)
+        #expect(recovered.inputTokens == 570)
+        #expect(recovered.cachedInputTokens == 480)
+        #expect(recovered.outputTokens == 30)
+        #expect(recovered.reasoningOutputTokens == 7)
+    }
+
+    @Test
     func archivesTheCompleteActivityRecordUnderApplicationSupport() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -110,7 +155,13 @@ struct WorkspaceStoreTests {
             ),
             sidebarWidth: 365,
             sidebarVisible: true,
-            pauseAfterCurrent: true
+            pauseAfterCurrent: true,
+            detailSplitFraction: 0.63,
+            workOverviewSummary: WorkOverviewSummaryCache(
+                sourceSignature: "summary-source",
+                text: "Completed the parser foundation.",
+                generatedAt: Date(timeIntervalSince1970: 1_000)
+            )
         )
 
         try await store.saveViewState(state, canonicalPath: "/tmp/repository")
@@ -157,6 +208,35 @@ struct WorkspaceStoreTests {
         #expect(legacyActivity.goal == "Legacy goal")
         #expect(legacyActivity.goalAmendments.isEmpty)
         #expect(viewState.detailPresentation == nil)
+        #expect(viewState.detailSplitFraction == nil)
+        #expect(viewState.workOverviewSummary == nil)
+        #expect(viewState.resumeAfterSystemTermination == nil)
+        #expect(viewState.runSelectionWasSaved)
+    }
+
+    @Test
+    func decodesRunRecordsSavedBeforeTokenUsageWasPersisted() throws {
+        let run = RunRecord(
+            sequence: 1,
+            role: .implementer,
+            kind: .implementation,
+            status: .completed,
+            threadID: "thread",
+            model: "model",
+            effort: "high",
+            prompt: "Implement"
+        )
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(run)) as? [String: Any]
+        )
+        object.removeValue(forKey: "tokenUsage")
+
+        let decoded = try JSONDecoder().decode(
+            RunRecord.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.tokenUsage == nil)
     }
 
     @Test
@@ -230,5 +310,42 @@ struct WorkspaceStoreTests {
 
         #expect(loaded == record)
         #expect(loaded.settings == originalSettings)
+    }
+
+    private func usage(
+        total: Int64,
+        input: Int64,
+        cached: Int64,
+        output: Int64,
+        reasoning: Int64
+    ) -> [String: Int64] {
+        [
+            "totalTokens": total,
+            "inputTokens": input,
+            "cachedInputTokens": cached,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": output,
+            "reasoningOutputTokens": reasoning
+        ]
+    }
+
+    private func tokenUsageEvent(
+        total: [String: Int64],
+        last: [String: Int64]
+    ) -> String {
+        let object: [String: Any] = [
+            "method": "thread/tokenUsage/updated",
+            "params": [
+                "threadId": "thread",
+                "turnId": "turn",
+                "tokenUsage": [
+                    "total": total,
+                    "last": last,
+                    "modelContextWindow": 258_400
+                ]
+            ]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
     }
 }

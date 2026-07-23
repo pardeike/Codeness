@@ -57,6 +57,76 @@ public enum RunStatus: String, Codable, Sendable {
     case failed
 }
 
+public struct RunTokenUsage: Codable, Sendable, Equatable {
+    public var totalTokens: Int64
+    public var inputTokens: Int64
+    public var cachedInputTokens: Int64
+    public var cacheWriteInputTokens: Int64
+    public var outputTokens: Int64
+    public var reasoningOutputTokens: Int64
+
+    public init(
+        totalTokens: Int64,
+        inputTokens: Int64,
+        cachedInputTokens: Int64 = 0,
+        cacheWriteInputTokens: Int64 = 0,
+        outputTokens: Int64,
+        reasoningOutputTokens: Int64 = 0
+    ) {
+        self.totalTokens = max(totalTokens, 0)
+        self.inputTokens = max(inputTokens, 0)
+        self.cachedInputTokens = max(cachedInputTokens, 0)
+        self.cacheWriteInputTokens = max(cacheWriteInputTokens, 0)
+        self.outputTokens = max(outputTokens, 0)
+        self.reasoningOutputTokens = max(reasoningOutputTokens, 0)
+    }
+
+    public static let zero = RunTokenUsage(
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0
+    )
+
+    public func adding(_ other: RunTokenUsage) -> RunTokenUsage {
+        RunTokenUsage(
+            totalTokens: totalTokens + other.totalTokens,
+            inputTokens: inputTokens + other.inputTokens,
+            cachedInputTokens: cachedInputTokens + other.cachedInputTokens,
+            cacheWriteInputTokens: cacheWriteInputTokens + other.cacheWriteInputTokens,
+            outputTokens: outputTokens + other.outputTokens,
+            reasoningOutputTokens: reasoningOutputTokens + other.reasoningOutputTokens
+        )
+    }
+
+    func subtracting(_ other: RunTokenUsage) -> RunTokenUsage {
+        RunTokenUsage(
+            totalTokens: totalTokens - other.totalTokens,
+            inputTokens: inputTokens - other.inputTokens,
+            cachedInputTokens: cachedInputTokens - other.cachedInputTokens,
+            cacheWriteInputTokens: cacheWriteInputTokens - other.cacheWriteInputTokens,
+            outputTokens: outputTokens - other.outputTokens,
+            reasoningOutputTokens: reasoningOutputTokens - other.reasoningOutputTokens
+        )
+    }
+
+    init?(appServerValue value: JSONValue?) {
+        guard let value,
+              let totalTokens = value["totalTokens"]?.integerValue,
+              let inputTokens = value["inputTokens"]?.integerValue,
+              let outputTokens = value["outputTokens"]?.integerValue else {
+            return nil
+        }
+        self.init(
+            totalTokens: totalTokens,
+            inputTokens: inputTokens,
+            cachedInputTokens: value["cachedInputTokens"]?.integerValue ?? 0,
+            cacheWriteInputTokens: value["cacheWriteInputTokens"]?.integerValue ?? 0,
+            outputTokens: outputTokens,
+            reasoningOutputTokens: value["reasoningOutputTokens"]?.integerValue ?? 0
+        )
+    }
+}
+
 public enum ActivityStatus: String, Codable, Sendable {
     case running
     case paused
@@ -393,36 +463,115 @@ public struct StoredWindowFrame: Codable, Sendable, Equatable {
     }
 }
 
+public struct WorkOverviewSummaryCache: Codable, Sendable, Equatable {
+    public let sourceSignature: String
+    public let text: String
+    public let generatedAt: Date
+
+    public init(sourceSignature: String, text: String, generatedAt: Date = .now) {
+        self.sourceSignature = sourceSignature
+        self.text = text
+        self.generatedAt = generatedAt
+    }
+}
+
 public struct RepositoryViewState: Codable, Sendable, Equatable {
     public static let currentSchemaVersion = 1
 
     public var schemaVersion: Int
     public var selectedRunID: UUID?
+    public var runSelectionWasSaved: Bool
     public var transcriptViewports: [UUID: TranscriptViewportState]
     public var windowFrame: StoredWindowFrame?
     public var sidebarWidth: Double?
     public var sidebarVisible: Bool
     public var pauseAfterCurrent: Bool
     public var detailPresentation: RunDetailPresentation?
+    public var detailSplitFraction: Double?
+    public var workOverviewSummary: WorkOverviewSummaryCache?
+    public var resumeAfterSystemTermination: Bool?
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
         selectedRunID: UUID? = nil,
+        runSelectionWasSaved: Bool? = nil,
         transcriptViewports: [UUID: TranscriptViewportState] = [:],
         windowFrame: StoredWindowFrame? = nil,
         sidebarWidth: Double? = nil,
         sidebarVisible: Bool = true,
         pauseAfterCurrent: Bool = false,
-        detailPresentation: RunDetailPresentation? = nil
+        detailPresentation: RunDetailPresentation? = nil,
+        detailSplitFraction: Double? = nil,
+        workOverviewSummary: WorkOverviewSummaryCache? = nil,
+        resumeAfterSystemTermination: Bool? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.selectedRunID = selectedRunID
+        self.runSelectionWasSaved = runSelectionWasSaved ?? (selectedRunID != nil)
         self.transcriptViewports = transcriptViewports
         self.windowFrame = windowFrame
         self.sidebarWidth = sidebarWidth
         self.sidebarVisible = sidebarVisible
         self.pauseAfterCurrent = pauseAfterCurrent
         self.detailPresentation = detailPresentation
+        self.detailSplitFraction = detailSplitFraction
+        self.workOverviewSummary = workOverviewSummary
+        self.resumeAfterSystemTermination = resumeAfterSystemTermination
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case selectedRunID
+        case runSelectionWasSaved
+        case transcriptViewports
+        case windowFrame
+        case sidebarWidth
+        case sidebarVisible
+        case pauseAfterCurrent
+        case detailPresentation
+        case detailSplitFraction
+        case workOverviewSummary
+        case resumeAfterSystemTermination
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            ?? Self.currentSchemaVersion
+        selectedRunID = try container.decodeIfPresent(UUID.self, forKey: .selectedRunID)
+        runSelectionWasSaved = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .runSelectionWasSaved
+        ) ?? container.contains(.selectedRunID)
+        transcriptViewports = try container.decodeIfPresent(
+            [UUID: TranscriptViewportState].self,
+            forKey: .transcriptViewports
+        ) ?? [:]
+        windowFrame = try container.decodeIfPresent(
+            StoredWindowFrame.self,
+            forKey: .windowFrame
+        )
+        sidebarWidth = try container.decodeIfPresent(Double.self, forKey: .sidebarWidth)
+        sidebarVisible = try container.decodeIfPresent(Bool.self, forKey: .sidebarVisible)
+            ?? true
+        pauseAfterCurrent = try container.decodeIfPresent(Bool.self, forKey: .pauseAfterCurrent)
+            ?? false
+        detailPresentation = try container.decodeIfPresent(
+            RunDetailPresentation.self,
+            forKey: .detailPresentation
+        )
+        detailSplitFraction = try container.decodeIfPresent(
+            Double.self,
+            forKey: .detailSplitFraction
+        )
+        workOverviewSummary = try container.decodeIfPresent(
+            WorkOverviewSummaryCache.self,
+            forKey: .workOverviewSummary
+        )
+        resumeAfterSystemTermination = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .resumeAfterSystemTermination
+        )
     }
 }
 
@@ -444,6 +593,7 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
     public let startedAt: Date
     public var completedAt: Date?
     public var durationMilliseconds: Int64?
+    public var tokenUsage: RunTokenUsage?
 
     public init(
         id: UUID = UUID(),
@@ -462,7 +612,8 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         relayError: String? = nil,
         startedAt: Date = .now,
         completedAt: Date? = nil,
-        durationMilliseconds: Int64? = nil
+        durationMilliseconds: Int64? = nil,
+        tokenUsage: RunTokenUsage? = nil
     ) {
         self.id = id
         self.sequence = sequence
@@ -481,6 +632,7 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         self.startedAt = startedAt
         self.completedAt = completedAt
         self.durationMilliseconds = durationMilliseconds
+        self.tokenUsage = tokenUsage
     }
 }
 

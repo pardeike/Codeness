@@ -135,6 +135,13 @@ final class CodenessApplicationModel {
         try await resolver.canonicalWorkspace(for: selectedURL)
     }
 
+    func storedWindowFrame(for canonicalPath: String) async -> StoredWindowFrame? {
+        guard let viewState = try? await store.loadViewState(canonicalPath: canonicalPath) else {
+            return nil
+        }
+        return viewState.windowFrame
+    }
+
     func releaseCoordinator(_ coordinator: RepositoryCoordinator) {
         let path = coordinator.record.canonicalPath
         guard coordinators[path] === coordinator else { return }
@@ -177,6 +184,13 @@ final class CodenessApplicationModel {
 
     func saveRecentRepositoryPaths(_ paths: [String]) async throws {
         try await store.saveRecentRepositoryPaths(paths)
+    }
+
+    func resumeAfterSystemTerminationIfNeeded(_ coordinator: RepositoryCoordinator) async {
+        guard coordinator.isLoaded else { return }
+        let shouldResume = await coordinator.consumeResumeAfterSystemTerminationRequest()
+        guard shouldResume, isReady else { return }
+        await coordinator.resume()
     }
 
     @discardableResult

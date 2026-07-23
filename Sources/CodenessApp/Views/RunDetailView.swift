@@ -43,6 +43,12 @@ struct RunDetailView: View {
                     )
                     .frame(minHeight: 120, idealHeight: 260)
                 }
+                .background {
+                    RunDetailSplitViewStateBridge(
+                        restoredFraction: coordinator.viewState.detailSplitFraction,
+                        onFractionChange: coordinator.updateRunDetailSplitFraction
+                    )
+                }
             case .transcript:
                 transcript
             case .result:
@@ -120,9 +126,6 @@ struct RunDetailView: View {
 
     private var expandedControls: some View {
         HStack(spacing: 8) {
-            if run.finalOutput?.isEmpty == false {
-                presentationPicker
-            }
             visibilityMenu
             jumpToEndButton
             if let handoff = run.handoff {
@@ -138,14 +141,6 @@ struct RunDetailView: View {
 
     private var compactControls: some View {
         Menu {
-            if run.finalOutput?.isEmpty == false {
-                Picker("Presentation", selection: presentationBinding) {
-                    ForEach(RunDetailPresentation.allCases, id: \.self) { presentation in
-                        Text(presentation.displayName).tag(presentation)
-                    }
-                }
-                Divider()
-            }
             transcriptVisibilityControls
             Divider()
             Button("Jump to End") {
@@ -161,19 +156,7 @@ struct RunDetailView: View {
             Label("Run Actions", systemImage: "ellipsis.circle")
         }
         .menuStyle(.borderlessButton)
-        .help("Choose presentation, transcript visibility, and run actions")
-    }
-
-    private var presentationPicker: some View {
-        Picker("Presentation", selection: presentationBinding) {
-            ForEach(RunDetailPresentation.allCases, id: \.self) { presentation in
-                Text(presentation.displayName).tag(presentation)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 230)
-        .help("Show the transcript, final result, or both")
+        .help("Choose transcript visibility and run actions")
     }
 
     private var visibilityMenu: some View {
@@ -212,13 +195,6 @@ struct RunDetailView: View {
         }
         .disabled(isAtBottom)
         .help(isAtBottom ? "Already at the end" : "Jump to the latest transcript output and resume following")
-    }
-
-    private var presentationBinding: Binding<RunDetailPresentation> {
-        Binding(
-            get: { coordinator.runDetailPresentation },
-            set: { coordinator.updateRunDetailPresentation($0) }
-        )
     }
 
     private func visibilityBinding(

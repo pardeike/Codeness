@@ -2,6 +2,8 @@ import AppKit
 import SwiftUI
 
 struct SettingsWindowCloseGuard: NSViewRepresentable {
+    private static let frameAutosaveName = "Codeness.ApplicationSettingsWindow"
+
     let isDirty: Bool
     let save: @MainActor () async -> Bool
     let discard: @MainActor () -> Void
@@ -49,6 +51,7 @@ struct SettingsWindowCloseGuard: NSViewRepresentable {
         func attach(to window: NSWindow?) {
             guard let window, self.window !== window else { return }
             detach()
+            _ = window.setFrameAutosaveName(SettingsWindowCloseGuard.frameAutosaveName)
             let proxy = SettingsWindowDelegateProxy(
                 originalDelegate: window.delegate,
                 isDirty: { [weak self] in self?.isDirty == true },

@@ -30,6 +30,75 @@ struct HandoffRouterTests {
     }
 
     @Test
+    func buildsWorkSummaryRequestFromTheGoalAndEveryHandoff() throws {
+        let context = WorkSummaryContext(
+            goal: "Ship the parser",
+            handoffs: [
+                WorkSummaryHandoff(
+                    runID: UUID(),
+                    sequence: 1,
+                    kind: .implementation,
+                    label: "Parser foundation",
+                    disposition: .implementationCheckpoint,
+                    text: "Implemented tokenization; parsing remains."
+                ),
+                WorkSummaryHandoff(
+                    runID: UUID(),
+                    sequence: 2,
+                    kind: .review,
+                    label: "Parser review",
+                    disposition: .reviewComplete,
+                    text: "Tokenization is sound; add malformed-input coverage."
+                )
+            ]
+        )
+
+        let request = try HandoffRouter.makeWorkSummaryRequest(
+            context: context,
+            settings: .init(),
+            key: "secret"
+        )
+        let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
+        let inputText = body["input"]?.arrayValue?
+            .flatMap { $0["content"]?.arrayValue ?? [] }
+            .compactMap { $0["text"]?.stringValue }
+            .joined(separator: "\n") ?? ""
+
+        #expect(request.url?.absoluteString == "https://api.openai.com/v1/responses")
+        #expect(body["store"]?.boolValue == false)
+        #expect(body["text"]?["format"]?["name"]?.stringValue == "codeness_work_summary")
+        #expect(body["text"]?["format"]?["schema"]?["properties"]?["summary"]?["minLength"]?.integerValue == 1)
+        #expect(inputText.contains("Ship the parser"))
+        #expect(inputText.contains("Implemented tokenization; parsing remains."))
+        #expect(inputText.contains("Tokenization is sound; add malformed-input coverage."))
+        #expect(inputText.contains("compact Markdown only"))
+        #expect(inputText.contains("### Completed"))
+        #expect(inputText.contains("### Current state"))
+        #expect(inputText.contains("### Remaining"))
+        #expect(inputText.contains("Never return prose paragraphs or a single wall of text."))
+        #expect(inputText.contains("at or below 120 words"))
+        #expect(inputText.contains("each bullet at or below 20 words"))
+    }
+
+    @Test
+    func workSummarySignatureChangesWithItsGoalOrHandoffs() {
+        let handoff = WorkSummaryHandoff(
+            runID: UUID(),
+            sequence: 1,
+            kind: .implementation,
+            label: "Parser foundation",
+            disposition: .implementationCheckpoint,
+            text: "Implemented tokenization."
+        )
+        let first = WorkSummaryContext(goal: "Ship parser", handoffs: [handoff])
+        let same = WorkSummaryContext(goal: "Ship parser", handoffs: [handoff])
+        let revised = WorkSummaryContext(goal: "Ship parser safely", handoffs: [handoff])
+
+        #expect(first.sourceSignature == same.sourceSignature)
+        #expect(first.sourceSignature != revised.sourceSignature)
+    }
+
+    @Test
     func restrictsStructuredOutputToEachKnownPhase() throws {
         let expectations: [(RunKind, [String])] = [
             (.implementation, ["implementationCheckpoint", "implementationComplete", "blocked", "failed", "unclear"]),
@@ -103,6 +172,17 @@ struct HandoffRouterTests {
         #expect(decoded.sourceDisposition == .reviewComplete)
         #expect(decoded.handoffText == "Keep Parser.swift:42 unchanged.")
         #expect(decoded.runLabel == "Parser review")
+    }
+
+    @Test
+    func decodesStructuredWorkSummary() throws {
+        let payload = #"{"summary":"Implemented tokenization. Parsing remains."}"#
+        let result = try response(containing: payload)
+
+        #expect(
+            try HandoffRouter.decodeWorkSummary(result)
+                == "Implemented tokenization. Parsing remains."
+        )
     }
 
     @Test
