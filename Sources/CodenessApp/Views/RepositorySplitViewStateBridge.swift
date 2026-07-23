@@ -3,11 +3,13 @@ import SwiftUI
 
 struct RepositorySplitViewStateBridge: NSViewRepresentable {
     let restoredSidebarWidth: CGFloat?
+    let allowsSidebarRestoration: Bool
     let onSidebarChange: (CGFloat, Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             restoredSidebarWidth: restoredSidebarWidth,
+            allowsSidebarRestoration: allowsSidebarRestoration,
             onSidebarChange: onSidebarChange
         )
     }
@@ -21,12 +23,15 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
     func updateNSView(_ nsView: ProbeView, context: Context) {
         context.coordinator.onSidebarChange = onSidebarChange
         context.coordinator.restoredSidebarWidth = restoredSidebarWidth
+        context.coordinator.allowsSidebarRestoration = allowsSidebarRestoration
         context.coordinator.attachIfPossible(from: nsView)
+        context.coordinator.applyRestoredWidthIfNeeded()
     }
 
     @MainActor
     final class Coordinator: NSObject {
         var restoredSidebarWidth: CGFloat?
+        var allowsSidebarRestoration: Bool
         var onSidebarChange: (CGFloat, Bool) -> Void
 
         private weak var splitView: NSSplitView?
@@ -35,9 +40,11 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
 
         init(
             restoredSidebarWidth: CGFloat?,
+            allowsSidebarRestoration: Bool,
             onSidebarChange: @escaping (CGFloat, Bool) -> Void
         ) {
             self.restoredSidebarWidth = restoredSidebarWidth
+            self.allowsSidebarRestoration = allowsSidebarRestoration
             self.onSidebarChange = onSidebarChange
         }
 
@@ -69,8 +76,9 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
             reportCurrentState()
         }
 
-        private func applyRestoredWidthIfNeeded() {
+        func applyRestoredWidthIfNeeded() {
             guard !appliedRestoredWidth,
+                  allowsSidebarRestoration,
                   let splitView,
                   splitView.subviews.count >= 2,
                   let restoredSidebarWidth else { return }
@@ -84,7 +92,7 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
             guard let splitView,
                   let sidebar = splitView.subviews.first else { return }
             let width = sidebar.frame.width
-            onSidebarChange(width, !sidebar.isHidden && width > 1)
+            onSidebarChange(width, allowsSidebarRestoration && !sidebar.isHidden && width > 1)
         }
 
         private func findNavigationSplitView(in view: NSView) -> NSSplitView? {

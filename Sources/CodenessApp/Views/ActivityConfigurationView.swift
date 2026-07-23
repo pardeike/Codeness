@@ -7,6 +7,10 @@ struct ActivityConfigurationView: View {
     @Environment(CodenessApplicationModel.self) private var application
     @State private var goal: String
     @State private var prompts: ActivityPrompts
+    @State private var showsAdvancedPrompts = false
+    @State private var isTestingHandoff = false
+    @State private var handoffTestMessage: String?
+    @State private var handoffTestSucceeded = false
 
     init(
         coordinator: RepositoryCoordinator,
@@ -44,7 +48,27 @@ struct ActivityConfigurationView: View {
                         )
                     }
 
-                    PromptTemplateFields(prompts: $prompts)
+                    GroupBox("Models") {
+                        HStack {
+                            Text(modelSummary)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.vertical, 2)
+                    }
+
+                    DisclosureGroup(isExpanded: $showsAdvancedPrompts) {
+                        PromptTemplateFields(prompts: $prompts)
+                            .padding(.top, 14)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Advanced Prompt Templates")
+                                .font(.headline)
+                            Text("The supplied defaults are ready for normal activities.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
 
                     if let validationMessage = prompts.validationMessage {
                         Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
@@ -58,10 +82,27 @@ struct ActivityConfigurationView: View {
 
             Divider()
             HStack {
-                Text("The Goal and prompts become read-only when the activity starts.")
+                if let handoffTestMessage {
+                    Label(
+                        handoffTestMessage,
+                        systemImage: handoffTestSucceeded
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(handoffTestSucceeded ? .green : .red)
+                    .lineLimit(2)
+                } else {
+                    Text("The Goal can be amended later whenever the workflow is paused.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
+                Button("Test Handoff") {
+                    Task { await testHandoffConfiguration() }
+                }
+                .disabled(isTestingHandoff)
+                .help("Verify handoff credentials and model access before starting an implementation turn")
                 if coordinator.isStartingActivity {
                     ProgressView()
                         .controlSize(.small)
@@ -89,6 +130,51 @@ struct ActivityConfigurationView: View {
         }
         .onChange(of: prompts) { _, _ in
             coordinator.updateActivityDraft(goal: goal, prompts: prompts)
+        }
+    }
+
+    private var modelSummary: String {
+        let settings = coordinator.record.settings
+        let phases = [
+            ("Implement", displayName(for: settings.implementer.model)),
+            ("Review", displayName(for: settings.reviewer.model)),
+            ("Fix", displayName(for: settings.fixer.model))
+        ]
+        var groups: [(model: String, phases: [String])] = []
+        for (phase, model) in phases {
+            if let index = groups.firstIndex(where: { $0.model == model }) {
+                groups[index].phases.append(phase)
+            } else {
+                groups.append((model, [phase]))
+            }
+        }
+        return groups.map { group in
+            "\(joinedPhases(group.phases)): \(group.model)"
+        }
+        .joined(separator: " · ")
+    }
+
+    private func joinedPhases(_ phases: [String]) -> String {
+        guard let last = phases.last else { return "" }
+        if phases.count == 1 { return last }
+        if phases.count == 2 { return phases.joined(separator: " and ") }
+        return phases.dropLast().joined(separator: ", ") + ", and " + last
+    }
+
+    private func displayName(for identifier: String) -> String {
+        application.models.first(where: { $0.model == identifier })?.displayName ?? identifier
+    }
+
+    private func testHandoffConfiguration() async {
+        isTestingHandoff = true
+        defer { isTestingHandoff = false }
+        do {
+            try await coordinator.testHandoffConfiguration(coordinator.record.settings.relay)
+            handoffTestSucceeded = true
+            handoffTestMessage = "Handoff configuration verified"
+        } catch {
+            handoffTestSucceeded = false
+            handoffTestMessage = error.localizedDescription
         }
     }
 }

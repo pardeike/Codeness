@@ -121,6 +121,45 @@ struct WorkspaceStoreTests {
     }
 
     @Test
+    func decodesPreAmendmentActivitiesAndPrePresentationViewState() throws {
+        let activity = ActivityRecord(
+            goal: "Legacy goal",
+            prompts: .builtInDefaults,
+            status: .paused,
+            goalAmendments: [
+                GoalAmendment(previousGoal: "Earlier", revisedGoal: "Legacy goal")
+            ]
+        )
+        let encodedActivity = try JSONEncoder().encode(activity)
+        var activityObject = try #require(
+            JSONSerialization.jsonObject(with: encodedActivity) as? [String: Any]
+        )
+        activityObject.removeValue(forKey: "goalAmendments")
+        let legacyActivity = try JSONDecoder().decode(
+            ActivityRecord.self,
+            from: JSONSerialization.data(withJSONObject: activityObject)
+        )
+
+        let legacyViewState = """
+        {
+          "schemaVersion": 1,
+          "selectedRunID": null,
+          "transcriptViewports": [],
+          "sidebarVisible": true,
+          "pauseAfterCurrent": false
+        }
+        """
+        let viewState = try JSONDecoder().decode(
+            RepositoryViewState.self,
+            from: Data(legacyViewState.utf8)
+        )
+
+        #expect(legacyActivity.goal == "Legacy goal")
+        #expect(legacyActivity.goalAmendments.isEmpty)
+        #expect(viewState.detailPresentation == nil)
+    }
+
+    @Test
     func corruptViewStateDoesNotAffectWorkspaceMetadata() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -25,7 +25,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
         scrollView.backgroundColor = .textBackgroundColor
         scrollView.scrollObserver = context.coordinator
 
-        let textView = NSTextView()
+        let textView = TranscriptTextView()
         textView.isEditable = false
         textView.isSelectable = true
         textView.usesFindBar = true
@@ -350,6 +350,20 @@ private final class TranscriptScrollView: NSScrollView {
         scrollObserver?.userWillScroll()
         super.scrollWheel(with: event)
         scrollObserver?.userDidScroll()
+    }
+}
+
+@MainActor
+private final class TranscriptTextView: NSTextView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "f" {
+            let action = NSMenuItem()
+            action.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+            performFindPanelAction(action)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 }
 

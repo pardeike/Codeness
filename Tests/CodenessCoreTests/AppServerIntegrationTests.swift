@@ -379,7 +379,8 @@ struct AppServerIntegrationTests {
             canonicalPath: repositoryPath,
             appServer: CodexAppServerClient(),
             router: SequencedTestRouter(),
-            store: store
+            store: store,
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         await coordinator.load()
         let original = coordinator.record.settings
@@ -650,6 +651,16 @@ private actor SequencedTestRouter: HandoffRouting {
             sourceDisposition: disposition,
             runLabel: label
         )
+    }
+}
+
+private struct AcceptingHandoffConfigurationValidator: HandoffConfigurationValidating {
+    func validateLocal(_ settings: RelaySettings) async throws {
+        _ = settings
+    }
+
+    func testRemote(_ settings: RelaySettings) async throws {
+        _ = settings
     }
 }
 

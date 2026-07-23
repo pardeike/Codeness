@@ -49,6 +49,76 @@ public struct JSONAPIKeyLoader: APIKeyLoading {
     }
 }
 
+public protocol HandoffConfigurationValidating: Sendable {
+    func validateLocal(_ settings: RelaySettings) async throws
+    func testRemote(_ settings: RelaySettings) async throws
+}
+
+public enum HandoffConfigurationError: LocalizedError, Sendable, Equatable {
+    case missingAPIKeyFile
+    case missingAPIKeyName
+    case missingModel
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingAPIKeyFile:
+            "Choose the JSON file containing the handoff API key."
+        case .missingAPIKeyName:
+            "Choose the JSON property containing the handoff API key."
+        case .missingModel:
+            "Choose a handoff model."
+        }
+    }
+}
+
+public actor HandoffConfigurationValidator: HandoffConfigurationValidating {
+    private static let modelsURL = URL(string: "https://api.openai.com/v1/models")!
+
+    private let transport: any HTTPTransport
+    private let keyLoader: any APIKeyLoading
+
+    public init(
+        transport: any HTTPTransport = URLSessionHTTPTransport(),
+        keyLoader: any APIKeyLoading = JSONAPIKeyLoader()
+    ) {
+        self.transport = transport
+        self.keyLoader = keyLoader
+    }
+
+    public func validateLocal(_ settings: RelaySettings) async throws {
+        let file = settings.apiKeyFile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = settings.apiKeyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = settings.selection.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !file.isEmpty else { throw HandoffConfigurationError.missingAPIKeyFile }
+        guard !name.isEmpty else { throw HandoffConfigurationError.missingAPIKeyName }
+        guard !model.isEmpty else { throw HandoffConfigurationError.missingModel }
+        _ = try await keyLoader.apiKey(file: file, name: name)
+    }
+
+    public func testRemote(_ settings: RelaySettings) async throws {
+        try await validateLocal(settings)
+        let key = try await keyLoader.apiKey(
+            file: settings.apiKeyFile.trimmingCharacters(in: .whitespacesAndNewlines),
+            name: settings.apiKeyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        let model = settings.selection.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        var request = URLRequest(url: Self.modelsURL.appending(path: model))
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+
+        let result = try await transport.send(request)
+        guard (200..<300).contains(result.statusCode) else {
+            let response = try? JSONDecoder().decode(JSONValue.self, from: result.data)
+            let rawDetail = String(decoding: result.data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = response?["error"]?["message"]?.stringValue
+                ?? (rawDetail.isEmpty ? "No response body" : rawDetail)
+            throw HandoffRouterError.httpStatus(result.statusCode, detail)
+        }
+    }
+}
+
 public protocol HandoffRouting: Sendable {
     func route(_ context: HandoffContext, settings: RelaySettings) async throws -> HandoffEnvelope
 }

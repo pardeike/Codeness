@@ -1,4 +1,5 @@
 import CodenessCore
+import Foundation
 import SwiftUI
 
 struct RepositorySettingsSheet: View {
@@ -7,6 +8,9 @@ struct RepositorySettingsSheet: View {
     @Environment(CodenessApplicationModel.self) private var application
     @Environment(\.dismiss) private var dismiss
     @State private var settings: RepositorySettings
+    @State private var isTestingHandoff = false
+    @State private var handoffTestMessage: String?
+    @State private var handoffTestSucceeded = false
 
     init(coordinator: RepositoryCoordinator) {
         self.coordinator = coordinator
@@ -43,18 +47,45 @@ struct RepositorySettingsSheet: View {
                     }
                 }
 
-                Section("Handoff API Key") {
-                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
-                        GridRow {
-                            settingsLabel("API-key JSON file")
-                            TextField("API-key JSON file", text: $settings.relay.apiKeyFile)
-                                .labelsHidden()
-                                .help("Enter the JSON file containing the handoff API key")
-                            settingsLabel("JSON key")
-                            TextField("JSON key", text: $settings.relay.apiKeyName)
-                                .labelsHidden()
-                                .frame(width: 170)
-                                .help("Enter the property name whose value is the handoff API key")
+                Section("Handoff") {
+                    LabeledContent("Credentials file") {
+                        FilePathField(
+                            path: $settings.relay.apiKeyFile,
+                            placeholder: "Choose a JSON credentials file",
+                            panelTitle: "Choose the API-key JSON File",
+                            prompt: "Choose"
+                        )
+                        .help("Choose or drop the JSON file containing the handoff API key; the advanced path menu also supports manual entry")
+                    }
+                    LabeledContent("Key in file") {
+                        Picker("Key in file", selection: $settings.relay.apiKeyName) {
+                            ForEach(availableAPIKeyNames, id: \.self) { keyName in
+                                Text(keyName).tag(keyName)
+                            }
+                        }
+                            .labelsHidden()
+                            .frame(maxWidth: 300)
+                            .help("Choose the JSON property whose value is the handoff API key")
+                    }
+                    HStack(spacing: 10) {
+                        Button("Test Handoff") {
+                            Task { await testHandoffConfiguration() }
+                        }
+                        .disabled(isTestingHandoff)
+                        .help("Verify the API-key file, JSON property, credentials, and selected handoff model")
+                        if isTestingHandoff {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if let handoffTestMessage {
+                            Label(
+                                handoffTestMessage,
+                                systemImage: handoffTestSucceeded
+                                    ? "checkmark.circle.fill"
+                                    : "exclamationmark.triangle.fill"
+                            )
+                            .foregroundStyle(handoffTestSucceeded ? .green : .red)
+                            .font(.caption)
+                            .textSelection(.enabled)
                         }
                     }
                     Text("The key is read at relay-call time and is never stored by Codeness.")
@@ -84,12 +115,43 @@ struct RepositorySettingsSheet: View {
             .padding(14)
         }
         .frame(width: 840, height: 640)
+        .onChange(of: settings.relay) {
+            handoffTestMessage = nil
+            handoffTestSucceeded = false
+        }
     }
 
-    private func settingsLabel(_ title: String) -> some View {
-        Text(title)
-            .fixedSize()
-            .frame(minWidth: 90, alignment: .leading)
+    private func testHandoffConfiguration() async {
+        isTestingHandoff = true
+        defer { isTestingHandoff = false }
+        do {
+            try await coordinator.testHandoffConfiguration(settings.relay)
+            handoffTestSucceeded = true
+            handoffTestMessage = "Configuration verified"
+        } catch {
+            handoffTestSucceeded = false
+            handoffTestMessage = error.localizedDescription
+        }
+    }
+
+    private var availableAPIKeyNames: [String] {
+        let configuredName = settings.relay.apiKeyName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let expandedPath = NSString(string: settings.relay.apiKeyFile)
+            .expandingTildeInPath
+        var names: Set<String> = configuredName.isEmpty ? [] : [configuredName]
+
+        if let data = FileManager.default.contents(atPath: expandedPath),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let dictionary = object as? [String: Any] {
+            names.formUnion(
+                dictionary.compactMap { key, value in
+                    value is String ? key : nil
+                }
+            )
+        }
+
+        return names.sorted()
     }
 }
 

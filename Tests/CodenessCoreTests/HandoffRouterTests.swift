@@ -288,6 +288,59 @@ struct HandoffRouterTests {
         #expect(await transport.callCount == 2)
     }
 
+    @Test
+    func validatesLocalCredentialsAndTestsTheSelectedModelWithoutGeneratingAResponse() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codeness-handoff-validation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let keyFile = root.appendingPathComponent("keys.json")
+        try Data(#"{"TEST_KEY":"secret"}"#.utf8).write(to: keyFile)
+        let transport = SequencedHTTPTransport(results: [
+            HTTPResult(data: Data(#"{"id":"gpt-test"}"#.utf8), statusCode: 200)
+        ])
+        let validator = HandoffConfigurationValidator(transport: transport)
+        let settings = RelaySettings(
+            apiKeyFile: keyFile.path,
+            apiKeyName: "TEST_KEY",
+            selection: .init(model: "gpt-test", effort: "low")
+        )
+
+        try await validator.validateLocal(settings)
+        try await validator.testRemote(settings)
+
+        let request = try #require(await transport.lastRequest)
+        #expect(request.httpMethod == "GET")
+        #expect(request.url?.absoluteString == "https://api.openai.com/v1/models/gpt-test")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+        #expect(request.httpBody == nil)
+    }
+
+    @Test
+    func rejectsAMissingJSONKeyBeforeAnyRemoteRequest() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codeness-handoff-validation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let keyFile = root.appendingPathComponent("keys.json")
+        try Data(#"{"OTHER_KEY":"secret"}"#.utf8).write(to: keyFile)
+        let transport = SequencedHTTPTransport(results: [])
+        let validator = HandoffConfigurationValidator(transport: transport)
+        let settings = RelaySettings(
+            apiKeyFile: keyFile.path,
+            apiKeyName: "TEST_KEY",
+            selection: .init(model: "gpt-test", effort: "low")
+        )
+
+        await #expect(throws: HandoffRouterError.apiKeyMissing(
+            name: "TEST_KEY",
+            path: keyFile.path
+        )) {
+            try await validator.validateLocal(settings)
+        }
+        #expect(await transport.callCount == 0)
+    }
+
     private func response(containing envelope: String) throws -> HTTPResult {
         let response: JSONValue = .object([
             "output": .array([.object([
@@ -304,13 +357,14 @@ struct HandoffRouterTests {
 private actor SequencedHTTPTransport: HTTPTransport {
     private var results: [HTTPResult]
     private(set) var callCount = 0
+    private(set) var lastRequest: URLRequest?
 
     init(results: [HTTPResult]) {
         self.results = results
     }
 
     func send(_ request: URLRequest) async throws -> HTTPResult {
-        _ = request
+        lastRequest = request
         callCount += 1
         return results.removeFirst()
     }

@@ -5,10 +5,14 @@ import SwiftUI
 struct RepositoryWindowView: View {
     @Bindable var coordinator: RepositoryCoordinator
     @Environment(CodenessApplicationModel.self) private var application
+    @Environment(RepositoryWindowCommandState.self) private var commandState
     @State private var showsSettings = false
-    @State private var showsSteer = false
+    @State private var showsGoalAmendment = false
     @State private var showsStartOverConfirmation = false
     @State private var columnVisibility: NavigationSplitViewVisibility
+    @State private var steerMessage = ""
+    @State private var isSendingSteer = false
+    @FocusState private var isSteerFieldFocused: Bool
 
     init(coordinator: RepositoryCoordinator) {
         self.coordinator = coordinator
@@ -29,11 +33,13 @@ struct RepositoryWindowView: View {
                         max: 430
                     )
             } detail: {
-                detail
+                detailColumn
             }
             .background {
                 RepositorySplitViewStateBridge(
                     restoredSidebarWidth: coordinator.viewState.sidebarWidth.map { CGFloat($0) },
+                    allowsSidebarRestoration: coordinator.activity != nil
+                        && columnVisibility != .detailOnly,
                     onSidebarChange: { width, isVisible in
                         coordinator.updateSidebar(width: Double(width), isVisible: isVisible)
                     }
@@ -61,8 +67,8 @@ struct RepositoryWindowView: View {
             RepositorySettingsSheet(coordinator: coordinator)
                 .environment(application)
         }
-        .sheet(isPresented: $showsSteer) {
-            SteerSheet(coordinator: coordinator)
+        .sheet(isPresented: $showsGoalAmendment) {
+            GoalAmendmentSheet(coordinator: coordinator)
         }
         .sheet(isPresented: interactionBinding) {
             if let interaction = coordinator.pendingInteraction {
@@ -94,10 +100,25 @@ struct RepositoryWindowView: View {
                 "Codeness will archive the current activity under Application Support, copy its Goal and prompts into editable fields, and discard the old session IDs. Repository files and per-repository model settings will not be changed."
             )
         }
+        .onChange(of: commandState.steerFocusRequest) {
+            guard commandState.steerFocusTargetPath == coordinator.record.canonicalPath,
+                  coordinator.canInterrupt else { return }
+            isSteerFieldFocused = true
+        }
+        .onChange(of: commandState.goalAmendmentRequest) {
+            guard commandState.goalAmendmentTargetPath == coordinator.record.canonicalPath,
+                  coordinator.canAmendGoal else { return }
+            showsGoalAmendment = true
+        }
+        .onChange(of: commandState.startOverRequest) {
+            guard commandState.startOverTargetPath == coordinator.record.canonicalPath,
+                  coordinator.canStartOver else { return }
+            showsStartOverConfirmation = true
+        }
     }
 
     @ViewBuilder
-    private var detail: some View {
+    private var detailContent: some View {
         if coordinator.activity == nil {
             ActivityConfigurationView(
                 coordinator: coordinator,
@@ -117,6 +138,43 @@ struct RepositoryWindowView: View {
         }
     }
 
+    private var detailColumn: some View {
+        VStack(spacing: 0) {
+            detailContent
+            if coordinator.canInterrupt {
+                Divider()
+                steerComposer
+            }
+        }
+    }
+
+    private var steerComposer: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Steer the active turn…", text: $steerMessage, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+                .focused($isSteerFieldFocused)
+                .submitLabel(.send)
+                .onSubmit {
+                    Task { await sendSteerMessage() }
+                }
+                .help("Send additional guidance to the currently running Codex turn")
+            Button {
+                Task { await sendSteerMessage() }
+            } label: {
+                Label("Send", systemImage: "arrow.up.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(
+                isSendingSteer
+                    || steerMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
+            .help("Send this guidance to the active turn")
+        }
+        .padding(10)
+        .background(.bar)
+    }
+
     private var runList: some View {
         List(selection: $coordinator.selectedRunID) {
             if let activity = coordinator.activity {
@@ -131,7 +189,7 @@ struct RepositoryWindowView: View {
                             .tag(run.id)
                             .help(
                                 "Show \(run.handoff?.runLabel ?? run.kind.displayName) "
-                                    + "(\(run.status.rawValue)) transcript · \(run.model) / \(run.effort)"
+                                    + "(\(run.status.rawValue)) transcript"
                             )
                         }
                     } header: {
@@ -144,16 +202,18 @@ struct RepositoryWindowView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Button {
-                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-            } label: {
-                Label(
-                    columnVisibility == .detailOnly ? "Show Run List" : "Hide Run List",
-                    systemImage: "list.bullet"
-                )
+        if coordinator.activity != nil {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                } label: {
+                    Label(
+                        columnVisibility == .detailOnly ? "Show Run List" : "Hide Run List",
+                        systemImage: "list.bullet"
+                    )
+                }
+                .help(columnVisibility == .detailOnly ? "Show run list" : "Hide run list")
             }
-            .help(columnVisibility == .detailOnly ? "Show run list" : "Hide run list")
         }
 
         ToolbarItem(placement: .navigation) {
@@ -163,22 +223,6 @@ struct RepositoryWindowView: View {
                 Label("Repository Settings", systemImage: "gearshape")
             }
             .help("Configure models, reasoning effort, and handoff credentials for this repository")
-        }
-
-        if #available(macOS 26.0, *) {
-            // Liquid Glass automatically combines adjacent toolbar items. The
-            // fixed break keeps only the two buttons together, while the title
-            // remains plain text outside their shared background.
-            ToolbarSpacer(.fixed, placement: .navigation)
-
-            ToolbarItem(placement: .navigation) {
-                repositoryTitle
-            }
-            .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .navigation) {
-                repositoryTitle
-            }
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
@@ -209,9 +253,9 @@ struct RepositoryWindowView: View {
                 Button {
                     Task { await coordinator.resume() }
                 } label: {
-                    Label("Resume", systemImage: "play.fill")
+                    Label("Resume Automatically", systemImage: "play.fill")
                 }
-                .help("Resume this workflow from its saved checkpoint")
+                .help("Resume from the saved checkpoint and continue subsequent phases automatically")
             } else if coordinator.activeActivity != nil {
                 Button {
                     coordinator.setPauseAfterCurrent(!coordinator.pauseAfterCurrent)
@@ -228,14 +272,16 @@ struct RepositoryWindowView: View {
                 )
             }
 
-            if coordinator.canInterrupt {
+            if coordinator.canAmendGoal {
                 Button {
-                    showsSteer = true
+                    showsGoalAmendment = true
                 } label: {
-                    Label("Steer", systemImage: "arrow.turn.up.right")
+                    Label("Amend Goal", systemImage: "square.and.pencil")
                 }
-                .help("Send additional guidance to the active Codex turn")
+                .help("Revise the Goal used by subsequent workflow phases while retaining its change history")
+            }
 
+            if coordinator.canInterrupt {
                 Button {
                     Task { await coordinator.interrupt() }
                 } label: {
@@ -245,13 +291,6 @@ struct RepositoryWindowView: View {
             }
 
         }
-    }
-
-    private var repositoryTitle: some View {
-        Text("\(coordinator.repositoryName) — Codeness")
-            .font(.headline)
-            .lineLimit(1)
-            .help(coordinator.record.canonicalPath)
     }
 
     private var statusBar: some View {
@@ -305,6 +344,17 @@ struct RepositoryWindowView: View {
             set: { if !$0 { application.clearError() } }
         )
     }
+
+    private func sendSteerMessage() async {
+        guard !isSendingSteer else { return }
+        let message = steerMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+        isSendingSteer = true
+        defer { isSendingSteer = false }
+        if await coordinator.steer(message) {
+            steerMessage = ""
+        }
+    }
 }
 
 private struct RunGroupHeader: View {
@@ -339,8 +389,7 @@ private struct RunRow: View {
                 HStack(spacing: 5) {
                     Text(run.kind.displayName)
                     Text("·")
-                    Text("\(run.model) / \(run.effort)")
-                        .lineLimit(1)
+                    Text(run.status.rawValue.capitalized)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

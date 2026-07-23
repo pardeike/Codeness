@@ -201,7 +201,8 @@ struct RepositoryCoordinatorRecoveryTests {
                 selectedRunID: firstRun.id,
                 transcriptViewports: [firstRun.id: viewport],
                 sidebarWidth: 380,
-                pauseAfterCurrent: true
+                pauseAfterCurrent: true,
+                detailPresentation: .result
             ),
             canonicalPath: record.canonicalPath
         )
@@ -219,6 +220,92 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(coordinator.transcriptViewport(for: firstRun.id) == viewport)
         #expect(coordinator.pauseAfterCurrent)
         #expect(coordinator.viewState.sidebarWidth == 380)
+        #expect(coordinator.runDetailPresentation == .result)
+    }
+
+    @Test
+    func resumeReturnsAPausedWorkflowToAutomaticContinuation() async throws {
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-auto-resume-\(UUID().uuidString)",
+            activity: ActivityRecord(
+                goal: "Finish",
+                prompts: .builtInDefaults,
+                status: .paused,
+                pendingAction: .complete,
+                resumeCheckpoint: .perform(.complete)
+            )
+        )
+        let harness = try await CoordinatorHarness(
+            record: record,
+            viewState: RepositoryViewState(pauseAfterCurrent: true)
+        )
+        defer { harness.remove() }
+        #expect(harness.coordinator.pauseAfterCurrent)
+
+        await harness.coordinator.resume()
+        #expect(await harness.coordinator.flushDocumentState())
+
+        #expect(!harness.coordinator.pauseAfterCurrent)
+        #expect(!harness.coordinator.viewState.pauseAfterCurrent)
+        let storedViewState = try await WorkspaceStore(rootURL: harness.root)
+            .loadViewState(canonicalPath: record.canonicalPath)
+        #expect(!storedViewState.pauseAfterCurrent)
+    }
+
+    @Test
+    func pausedActivityCanAmendItsGoalWithoutLosingHistoryOrSessions() async throws {
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-goal-amendment-\(UUID().uuidString)",
+            implementerThreadID: "implementer-thread",
+            reviewerThreadID: "reviewer-thread",
+            activity: ActivityRecord(
+                goal: "Original goal",
+                prompts: .builtInDefaults,
+                status: .paused,
+                pendingAction: .implement,
+                resumeCheckpoint: .perform(.implement)
+            )
+        )
+        let harness = try await CoordinatorHarness(record: record)
+        defer { harness.remove() }
+        #expect(harness.coordinator.canAmendGoal)
+
+        #expect(await harness.coordinator.amendGoal("Revised goal with an added constraint"))
+
+        let activity = try #require(harness.coordinator.activity)
+        let amendment = try #require(activity.goalAmendments.last)
+        #expect(activity.goal == "Revised goal with an added constraint")
+        #expect(amendment.previousGoal == "Original goal")
+        #expect(amendment.revisedGoal == activity.goal)
+        #expect(harness.coordinator.record.implementerThreadID == "implementer-thread")
+        #expect(harness.coordinator.record.reviewerThreadID == "reviewer-thread")
+
+        let persisted = try await WorkspaceStore(rootURL: harness.root)
+            .load(canonicalPath: record.canonicalPath)
+        #expect(persisted.activity?.goal == activity.goal)
+        #expect(persisted.activity?.goalAmendments == activity.goalAmendments)
+    }
+
+    @Test
+    func invalidHandoffCredentialsBlockTheFirstImplementationTurn() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkspaceStore(rootURL: root)
+        let path = "/tmp/codeness-invalid-handoff-\(UUID().uuidString)"
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: path,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store,
+            handoffConfigurationValidator: RejectingHandoffConfigurationValidator()
+        )
+        await coordinator.load()
+
+        await coordinator.startActivity(goal: "Do not start Codex yet", prompts: .builtInDefaults)
+
+        #expect(coordinator.activity == nil)
+        #expect(coordinator.errorMessage == "Fixture handoff credentials are invalid.")
+        #expect(coordinator.statusMessage == "Could not start activity")
     }
 
     @Test
@@ -268,7 +355,8 @@ struct RepositoryCoordinatorRecoveryTests {
                 windowFrame: frame,
                 sidebarWidth: 372,
                 sidebarVisible: true,
-                pauseAfterCurrent: true
+                pauseAfterCurrent: true,
+                detailPresentation: .transcript
             ),
             canonicalPath: record.canonicalPath
         )
@@ -299,6 +387,7 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(coordinator.viewState.windowFrame == frame)
         #expect(coordinator.viewState.sidebarWidth == 372)
         #expect(!coordinator.viewState.sidebarVisible)
+        #expect(coordinator.runDetailPresentation == .transcript)
         #expect(!coordinator.pauseAfterCurrent)
         #expect(coordinator.canStartActivity)
         #expect(coordinator.statusMessage == "Configure this activity")
@@ -631,11 +720,18 @@ private struct CoordinatorHarness {
     let coordinator: RepositoryCoordinator
     let root: URL
 
-    init(record: RepositoryRecord, router: any HandoffRouting = DelayedBlockedRouter()) async throws {
+    init(
+        record: RepositoryRecord,
+        router: any HandoffRouting = DelayedBlockedRouter(),
+        viewState: RepositoryViewState? = nil
+    ) async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("codeness-coordinator-\(UUID().uuidString)", isDirectory: true)
         let store = WorkspaceStore(rootURL: root)
         try await store.save(record)
+        if let viewState {
+            try await store.saveViewState(viewState, canonicalPath: record.canonicalPath)
+        }
         coordinator = RepositoryCoordinator(
             canonicalPath: record.canonicalPath,
             appServer: CodexAppServerClient(),
@@ -669,5 +765,23 @@ private actor DelayedBlockedRouter: HandoffRouting {
             sourceDisposition: .blocked,
             runLabel: "Blocked recovery"
         )
+    }
+}
+
+private struct RejectingHandoffConfigurationValidator: HandoffConfigurationValidating {
+    func validateLocal(_ settings: RelaySettings) async throws {
+        _ = settings
+        throw RejectedConfigurationError()
+    }
+
+    func testRemote(_ settings: RelaySettings) async throws {
+        _ = settings
+        throw RejectedConfigurationError()
+    }
+}
+
+private struct RejectedConfigurationError: LocalizedError {
+    var errorDescription: String? {
+        "Fixture handoff credentials are invalid."
     }
 }

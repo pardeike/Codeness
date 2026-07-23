@@ -165,6 +165,7 @@ public final class RepositoryCoordinator {
 
     private let appServer: CodexAppServerClient
     private let router: any HandoffRouting
+    private let handoffConfigurationValidator: any HandoffConfigurationValidating
     private let store: any RepositoryWorkspaceStoring
     private var sessionsPrepared = false
     private var itemsWithDeltas: [UUID: Set<String>] = [:]
@@ -181,11 +182,13 @@ public final class RepositoryCoordinator {
         appServer: CodexAppServerClient,
         router: any HandoffRouting,
         store: any RepositoryWorkspaceStoring,
+        handoffConfigurationValidator: any HandoffConfigurationValidating = HandoffConfigurationValidator(),
         initialSettings: RepositorySettings = .init()
     ) {
         record = RepositoryRecord(canonicalPath: canonicalPath, settings: initialSettings)
         self.appServer = appServer
         self.router = router
+        self.handoffConfigurationValidator = handoffConfigurationValidator
         self.store = store
     }
 
@@ -264,6 +267,24 @@ public final class RepositoryCoordinator {
         return run.status == .routing || (run.status == .paused && run.relayError != nil)
     }
 
+    public var canAmendGoal: Bool {
+        guard let activity = activeActivity,
+              activity.status == .paused,
+              !isStartingActivity,
+              !isStartingOver,
+              !isClosing,
+              !pauseState.isInProgress,
+              pendingInteractions.isEmpty,
+              routingTasks.isEmpty,
+              completingRunIDs.isEmpty else { return false }
+        guard let run = activeRun else { return true }
+        return ![.queued, .running, .routing, .awaitingApproval].contains(run.status)
+    }
+
+    public var runDetailPresentation: RunDetailPresentation {
+        viewState.detailPresentation ?? .split
+    }
+
     public var requiresCloseConfirmation: Bool {
         activeActivity?.status == .running
     }
@@ -327,6 +348,7 @@ public final class RepositoryCoordinator {
         defer { isStartingActivity = false }
 
         do {
+            try await handoffConfigurationValidator.validateLocal(record.settings.relay)
             try await ensureSessions(allowRecreate: true)
             guard !isClosing else { return }
             record.activityDraft = nil
@@ -438,6 +460,12 @@ public final class RepositoryCoordinator {
         scheduleViewStateSave()
     }
 
+    public func updateRunDetailPresentation(_ presentation: RunDetailPresentation) {
+        guard viewState.detailPresentation != presentation else { return }
+        viewState.detailPresentation = presentation
+        scheduleViewStateSave()
+    }
+
     public func flushDocumentState() async -> Bool {
         guard !isStartingOver else {
             errorMessage = "Wait for Start Over to finish before saving or closing this repository."
@@ -459,6 +487,12 @@ public final class RepositoryCoordinator {
 
     public func resume() async {
         guard record.activity?.status == .paused else { return }
+        // Resume means returning to the normal automatic workflow. Keeping the
+        // one-shot pause flag set made every subsequent phase require another click.
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        statusMessage = "Resuming automatic workflow…"
         if let checkpoint = record.activity?.resumeCheckpoint {
             do {
                 record.activity?.status = .running
@@ -639,14 +673,17 @@ public final class RepositoryCoordinator {
         }
     }
 
-    public func steer(_ message: String) async {
-        guard let run = activeRun, let threadID = run.threadID, let turnID = run.turnID else { return }
+    @discardableResult
+    public func steer(_ message: String) async -> Bool {
+        guard let run = activeRun, let threadID = run.threadID, let turnID = run.turnID else { return false }
         let cleanMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanMessage.isEmpty else { return }
+        guard !cleanMessage.isEmpty else { return false }
         do {
             try await appServer.steer(threadID: threadID, turnID: turnID, message: cleanMessage)
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -728,6 +765,12 @@ public final class RepositoryCoordinator {
 
     @discardableResult
     public func updateSettings(_ settings: RepositorySettings) async -> Bool {
+        do {
+            try await handoffConfigurationValidator.validateLocal(settings.relay)
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
         let previousSettings = record.settings
         record.settings = settings
         do {
@@ -736,6 +779,38 @@ public final class RepositoryCoordinator {
         } catch {
             record.settings = previousSettings
             errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    public func testHandoffConfiguration(_ settings: RelaySettings) async throws {
+        try await handoffConfigurationValidator.testRemote(settings)
+    }
+
+    @discardableResult
+    public func amendGoal(_ revisedGoal: String) async -> Bool {
+        guard canAmendGoal, var activity = record.activity else { return false }
+        let cleanGoal = revisedGoal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanGoal.isEmpty else {
+            errorMessage = "The goal is empty."
+            return false
+        }
+        guard cleanGoal != activity.goal else { return true }
+
+        let previousActivity = activity
+        activity.goalAmendments.append(GoalAmendment(
+            previousGoal: activity.goal,
+            revisedGoal: cleanGoal
+        ))
+        activity.goal = cleanGoal
+        record.activity = activity
+        do {
+            try await persist()
+            statusMessage = pausedStatusMessage
+            return true
+        } catch {
+            record.activity = previousActivity
+            errorMessage = "Could not save the revised goal: \(error.localizedDescription)"
             return false
         }
     }
@@ -776,7 +851,8 @@ public final class RepositoryCoordinator {
             windowFrame: viewState.windowFrame,
             sidebarWidth: viewState.sidebarWidth,
             sidebarVisible: false,
-            pauseAfterCurrent: false
+            pauseAfterCurrent: false,
+            detailPresentation: viewState.detailPresentation
         )
 
         do {

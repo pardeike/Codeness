@@ -8,6 +8,28 @@ import UniformTypeIdentifiers
 @Observable
 final class RepositoryWindowCommandState {
     fileprivate(set) var recentURLs: [URL] = []
+    fileprivate(set) var currentCoordinator: RepositoryCoordinator?
+    private(set) var steerFocusRequest = 0
+    private(set) var steerFocusTargetPath: String?
+    private(set) var goalAmendmentRequest = 0
+    private(set) var goalAmendmentTargetPath: String?
+    private(set) var startOverRequest = 0
+    private(set) var startOverTargetPath: String?
+
+    func requestSteerFocus() {
+        steerFocusTargetPath = currentCoordinator?.record.canonicalPath
+        steerFocusRequest &+= 1
+    }
+
+    func requestGoalAmendment() {
+        goalAmendmentTargetPath = currentCoordinator?.record.canonicalPath
+        goalAmendmentRequest &+= 1
+    }
+
+    func requestStartOver() {
+        startOverTargetPath = currentCoordinator?.record.canonicalPath
+        startOverRequest &+= 1
+    }
 }
 
 @MainActor
@@ -231,6 +253,7 @@ final class RepositoryWindowManager {
         let coordinator = applicationModel.coordinator(for: canonicalPath)
         let rootView = RepositoryWindowHost(coordinator: coordinator)
             .environment(applicationModel)
+            .environment(commandState)
         let hostingController = NSHostingController(rootView: rootView)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_260, height: 820),
@@ -241,8 +264,10 @@ final class RepositoryWindowManager {
         window.contentViewController = hostingController
         window.setContentSize(NSSize(width: 1_260, height: 820))
         window.minSize = NSSize(width: 840, height: 560)
-        window.title = "\(repositoryURL.lastPathComponent) — Codeness"
-        window.titleVisibility = .hidden
+        window.title = repositoryURL.lastPathComponent
+        window.subtitle = repositoryURL.deletingLastPathComponent().abbreviatedPath
+        window.representedURL = repositoryURL
+        window.titleVisibility = .visible
         window.identifier = NSUserInterfaceItemIdentifier(
             "repository-\(WorkspaceStore.pathKey(canonicalPath))"
         )
@@ -254,6 +279,7 @@ final class RepositoryWindowManager {
         let controller = RepositoryWindowController(
             window: window,
             coordinator: coordinator,
+            commandState: commandState,
             onClose: { [weak self] closedController in
                 self?.repositoryWindowDidClose(closedController)
             }
@@ -332,6 +358,7 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     )
 
     let coordinator: RepositoryCoordinator
+    private let commandState: RepositoryWindowCommandState
     private let onClose: @MainActor (RepositoryWindowController) -> Void
     private var bypassCloseGuard = false
     private var didClose = false
@@ -343,9 +370,11 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     init(
         window: NSWindow,
         coordinator: RepositoryCoordinator,
+        commandState: RepositoryWindowCommandState,
         onClose: @escaping @MainActor (RepositoryWindowController) -> Void
     ) {
         self.coordinator = coordinator
+        self.commandState = commandState
         self.onClose = onClose
         super.init(window: window)
         window.delegate = self
@@ -419,6 +448,7 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        commandState.currentCoordinator = coordinator
         removeDefaultSidebarToolbarItem()
     }
 
@@ -430,6 +460,9 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         guard !didClose else { return }
         didClose = true
         restorationTask?.cancel()
+        if commandState.currentCoordinator === coordinator {
+            commandState.currentCoordinator = nil
+        }
         coordinator.documentDidClose()
         onClose(self)
     }

@@ -24,9 +24,14 @@ struct ApplicationSettingsView: View {
                     Text("Codex")
                         .font(.title2.weight(.semibold))
                     LabeledContent("Executable") {
-                        TextField("Automatic discovery", text: $executablePath)
-                            .textFieldStyle(.roundedBorder)
-                            .help("Enter the Codex executable path, or leave this empty to discover it automatically")
+                        FilePathField(
+                            path: $executablePath,
+                            placeholder: "Automatic discovery",
+                            panelTitle: "Choose the Codex Executable",
+                            prompt: "Choose",
+                            requiresExecutable: true
+                        )
+                        .help("Choose or drop the Codex executable; use the advanced path menu for manual entry, or clear it for automatic discovery")
                     }
                     Text("This executable is shared by every repository window. Leave the field empty to discover Codex automatically; changing it restarts the shared App Server when no turn is active.")
                         .foregroundStyle(.secondary)
@@ -94,25 +99,12 @@ struct ApplicationSettingsView: View {
                 .help("Replace the edited prompt and model defaults with Codeness's built-in values")
                 Spacer()
                 Button("Revert") {
-                    prompts = application.promptDefaults
-                    modelDefaults = application.repositoryModelDefaults
-                    executablePath = application.configuredExecutablePath
-                    separatesRunTranscripts = application.separatesRunTranscripts
+                    revert()
                 }
                 .help("Discard unsaved changes and restore the currently saved preferences")
                 Button {
                     Task {
-                        isSaving = true
-                        defer { isSaving = false }
-                        let cleanPath = executablePath.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if needsExecutableRestart {
-                            let restarted = await application.restartServer(configuredPath: cleanPath)
-                            guard restarted else { return }
-                        }
-                        executablePath = cleanPath
-                        application.updatePromptDefaults(prompts)
-                        application.updateRepositoryModelDefaults(modelDefaults)
-                        application.setSeparatesRunTranscripts(separatesRunTranscripts)
+                        _ = await saveSettings()
                     }
                 } label: {
                     if isSaving {
@@ -128,15 +120,20 @@ struct ApplicationSettingsView: View {
                     isSaving
                         || serverIsStarting
                         || prompts.validationMessage != nil
-                        || (prompts == application.promptDefaults
-                            && modelDefaults == application.repositoryModelDefaults
-                            && separatesRunTranscripts == application.separatesRunTranscripts
-                            && !needsExecutableRestart)
+                        || !hasSavableChanges
                 )
             }
             .padding(14)
         }
         .frame(width: 900, height: 760)
+        .background {
+            SettingsWindowCloseGuard(
+                isDirty: isDirty,
+                save: { await saveSettings() },
+                discard: { revert() }
+            )
+            .frame(width: 0, height: 0)
+        }
         .alert(
             "Codeness",
             isPresented: Binding(
@@ -171,5 +168,40 @@ struct ApplicationSettingsView: View {
 
     private var serverIsStarting: Bool {
         application.serverState == .starting
+    }
+
+    private var isDirty: Bool {
+        prompts != application.promptDefaults
+            || modelDefaults != application.repositoryModelDefaults
+            || separatesRunTranscripts != application.separatesRunTranscripts
+            || cleanExecutablePath != application.configuredExecutablePath
+    }
+
+    private var hasSavableChanges: Bool {
+        isDirty || needsExecutableRestart
+    }
+
+    private func revert() {
+        prompts = application.promptDefaults
+        modelDefaults = application.repositoryModelDefaults
+        executablePath = application.configuredExecutablePath
+        separatesRunTranscripts = application.separatesRunTranscripts
+    }
+
+    @discardableResult
+    private func saveSettings() async -> Bool {
+        guard !isSaving, prompts.validationMessage == nil, !serverIsStarting else { return false }
+        isSaving = true
+        defer { isSaving = false }
+
+        if needsExecutableRestart {
+            let restarted = await application.restartServer(configuredPath: cleanExecutablePath)
+            guard restarted else { return false }
+        }
+        executablePath = cleanExecutablePath
+        application.updatePromptDefaults(prompts)
+        application.updateRepositoryModelDefaults(modelDefaults)
+        application.setSeparatesRunTranscripts(separatesRunTranscripts)
+        return true
     }
 }

@@ -29,7 +29,15 @@ struct RepositoryWindowLifecycleSafetyTests {
         await opened.coordinator.load()
         opened.window?.makeKeyAndOrderFront(nil)
         await Task.yield()
-        #expect(opened.window?.representedURL == nil)
+        #expect(opened.window?.representedURL?.standardizedFileURL == fixture.repositoryURL.standardizedFileURL)
+        #expect(opened.window?.title == fixture.repositoryURL.lastPathComponent)
+        #expect(
+            opened.window?.subtitle
+                == NSString(string: fixture.repositoryURL.deletingLastPathComponent().path)
+                    .abbreviatingWithTildeInPath
+        )
+        #expect(opened.window?.standardWindowButton(.documentIconButton) != nil)
+        #expect(NSDocumentController.shared.documents.isEmpty)
         NSDocumentController.shared.saveAllDocuments(nil)
         try original.assertUnchanged(at: fixture.repositoryURL, after: "AppKit Save All")
         #expect(await manager.saveCurrentRepositoryState())

@@ -10,6 +10,7 @@ final class CodenessApplicationModel {
     private static let promptDefaultsKey = "ActivityPromptDefaults"
     private static let repositoryModelDefaultsKey = "RepositoryModelDefaults"
     private static let separatesRunTranscriptsKey = "SeparatesRunTranscripts"
+    private static let transcriptVisibilityKey = "TranscriptVisibility"
     private static let appServerLogger = Logger(subsystem: "ap.codeness", category: "CodexAppServer")
 
     enum ServerState: Equatable {
@@ -36,6 +37,7 @@ final class CodenessApplicationModel {
     private(set) var promptDefaults: ActivityPrompts
     private(set) var repositoryModelDefaults: RepositoryModelDefaults
     private(set) var separatesRunTranscripts: Bool
+    private(set) var transcriptVisibility: TranscriptVisibility
     var applicationError: String?
 
     @ObservationIgnored private let appServer: CodexAppServerClient
@@ -74,6 +76,12 @@ final class CodenessApplicationModel {
             separatesRunTranscripts = true
         } else {
             separatesRunTranscripts = UserDefaults.standard.bool(forKey: Self.separatesRunTranscriptsKey)
+        }
+        if let data = UserDefaults.standard.data(forKey: Self.transcriptVisibilityKey),
+           let savedVisibility = try? JSONDecoder().decode(TranscriptVisibility.self, from: data) {
+            transcriptVisibility = savedVisibility
+        } else {
+            transcriptVisibility = .recommended
         }
     }
 
@@ -274,6 +282,18 @@ final class CodenessApplicationModel {
     func setSeparatesRunTranscripts(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: Self.separatesRunTranscriptsKey)
         separatesRunTranscripts = enabled
+    }
+
+    func setTranscriptVisibility(_ visibility: TranscriptVisibility) {
+        do {
+            UserDefaults.standard.set(
+                try JSONEncoder().encode(visibility),
+                forKey: Self.transcriptVisibilityKey
+            )
+            transcriptVisibility = visibility
+        } catch {
+            applicationError = "Could not save transcript visibility: \(error.localizedDescription)"
+        }
     }
 
     private func startServer(configuredPath: String) async {

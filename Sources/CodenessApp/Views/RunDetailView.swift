@@ -9,9 +9,6 @@ struct RunDetailView: View {
     @Environment(CodenessApplicationModel.self) private var application
     @State private var scrollToEndRequest = 0
     @State private var isAtBottom: Bool
-    @State private var showsReasoning = true
-    @State private var showsActions = false
-    @State private var showsDiagnostics = true
 
     init(coordinator: RepositoryCoordinator, run: RunRecord) {
         self.coordinator = coordinator
@@ -28,9 +25,6 @@ struct RunDetailView: View {
                 Divider()
                 RelayRecoveryView(coordinator: coordinator, run: run, error: relayError)
                     .frame(maxHeight: 270)
-            } else if let handoff = run.handoff {
-                Divider()
-                HandoffSummaryView(handoff: handoff)
             }
         }
     }
@@ -38,11 +32,24 @@ struct RunDetailView: View {
     @ViewBuilder
     private var transcriptAndFinalResult: some View {
         if let finalOutput = run.finalOutput, !finalOutput.isEmpty {
-            VSplitView {
+            switch coordinator.runDetailPresentation {
+            case .split:
+                VSplitView {
+                    transcript
+                        .frame(minHeight: 180)
+                    FinalResultView(
+                        text: finalOutput,
+                        repositoryPath: coordinator.record.canonicalPath
+                    )
+                    .frame(minHeight: 120, idealHeight: 260)
+                }
+            case .transcript:
                 transcript
-                    .frame(minHeight: 180)
-                FinalResultView(text: finalOutput)
-                    .frame(minHeight: 120, idealHeight: 220)
+            case .result:
+                FinalResultView(
+                    text: finalOutput,
+                    repositoryPath: coordinator.record.canonicalPath
+                )
             }
         } else {
             transcript
@@ -55,10 +62,10 @@ struct RunDetailView: View {
                 for: run,
                 separatesRuns: application.separatesRunTranscripts,
                 visibility: TranscriptVisibility(
-                    reasoning: showsReasoning,
-                    actions: showsActions,
+                    reasoning: application.transcriptVisibility.reasoning,
+                    actions: application.transcriptVisibility.actions,
                     results: run.finalOutput?.isEmpty != false,
-                    diagnostics: showsDiagnostics
+                    diagnostics: application.transcriptVisibility.diagnostics
                 )
             ),
             initialViewport: coordinator.transcriptViewport(for: run.id),
@@ -73,59 +80,158 @@ struct RunDetailView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 7) {
-                    Text(run.handoff?.runLabel ?? run.kind.displayName)
-                        .font(.headline)
-                    Text(run.status.rawValue.capitalized)
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(.quaternary, in: Capsule())
-                }
-                Text("\(run.kind.displayName) · \(run.model) · \(run.effort) reasoning\(durationText)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                runIdentity
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 12)
+                expandedControls
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            Spacer()
-            Menu {
-                Toggle("Reasoning", isOn: $showsReasoning)
-                    .help("Show or hide reasoning and plan updates")
-                Toggle("Actions", isOn: $showsActions)
-                    .help("Show or hide tool calls and action output")
-                Toggle("Diagnostics", isOn: $showsDiagnostics)
-                    .help("Show or hide warnings, errors, and diagnostic events")
-                Divider()
-                Button("Recommended") {
-                    applyVisibility(.recommended)
-                }
-                .help("Show reasoning and diagnostics while hiding routine actions")
-                Button("Show All") {
-                    applyVisibility(.all)
-                }
-                .help("Show reasoning, actions, and diagnostics")
-            } label: {
-                Label("Show", systemImage: "line.3.horizontal.decrease.circle")
+            HStack(spacing: 10) {
+                runIdentity
+                    .layoutPriority(1)
+                Spacer(minLength: 4)
+                compactControls
             }
-            .help("Choose which kinds of run history appear in the detail view")
-            Button {
-                scrollToEndRequest &+= 1
-            } label: {
-                Label("Jump to End", systemImage: "arrow.down.to.line")
+        }
+        .padding(12)
+    }
+
+    private var runIdentity: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 7) {
+                Text(run.handoff?.runLabel ?? run.kind.displayName)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(run.status.rawValue.capitalized)
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+                    .fixedSize()
             }
-            .disabled(isAtBottom)
-            .help(isAtBottom ? "Already at the end" : "Jump to the latest transcript output and resume following")
+            Text("\(run.kind.displayName) · \(run.effort.capitalized) reasoning\(durationText)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var expandedControls: some View {
+        HStack(spacing: 8) {
+            if run.finalOutput?.isEmpty == false {
+                presentationPicker
+            }
+            visibilityMenu
+            jumpToEndButton
             if let handoff = run.handoff {
                 Button {
                     copy(handoff.handoffText)
                 } label: {
                     Label("Copy Handoff", systemImage: "arrow.left.arrow.right")
                 }
-                .help("Copy the filtered handoff text passed to the next workflow phase")
+                .help("Copy the filtered context passed to the next workflow phase")
             }
         }
-        .padding(12)
+    }
+
+    private var compactControls: some View {
+        Menu {
+            if run.finalOutput?.isEmpty == false {
+                Picker("Presentation", selection: presentationBinding) {
+                    ForEach(RunDetailPresentation.allCases, id: \.self) { presentation in
+                        Text(presentation.displayName).tag(presentation)
+                    }
+                }
+                Divider()
+            }
+            transcriptVisibilityControls
+            Divider()
+            Button("Jump to End") {
+                scrollToEndRequest &+= 1
+            }
+            .disabled(isAtBottom)
+            if let handoff = run.handoff {
+                Button("Copy Handoff") {
+                    copy(handoff.handoffText)
+                }
+            }
+        } label: {
+            Label("Run Actions", systemImage: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .help("Choose presentation, transcript visibility, and run actions")
+    }
+
+    private var presentationPicker: some View {
+        Picker("Presentation", selection: presentationBinding) {
+            ForEach(RunDetailPresentation.allCases, id: \.self) { presentation in
+                Text(presentation.displayName).tag(presentation)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 230)
+        .help("Show the transcript, final result, or both")
+    }
+
+    private var visibilityMenu: some View {
+        Menu {
+            transcriptVisibilityControls
+        } label: {
+            Label("Show", systemImage: "line.3.horizontal.decrease.circle")
+        }
+        .help("Choose which kinds of run history appear in every run detail")
+    }
+
+    @ViewBuilder
+    private var transcriptVisibilityControls: some View {
+        Toggle("Reasoning", isOn: visibilityBinding(\.reasoning))
+            .help("Show or hide reasoning and plan updates")
+        Toggle("Actions", isOn: visibilityBinding(\.actions))
+            .help("Show or hide tool calls and action output")
+        Toggle("Diagnostics", isOn: visibilityBinding(\.diagnostics))
+            .help("Show or hide warnings, errors, and diagnostic events")
+        Divider()
+        Button("Recommended") {
+            application.setTranscriptVisibility(.recommended)
+        }
+        .help("Show reasoning and diagnostics while hiding routine actions")
+        Button("Show All") {
+            application.setTranscriptVisibility(.all)
+        }
+        .help("Show reasoning, actions, and diagnostics")
+    }
+
+    private var jumpToEndButton: some View {
+        Button {
+            scrollToEndRequest &+= 1
+        } label: {
+            Label("Jump to End", systemImage: "arrow.down.to.line")
+        }
+        .disabled(isAtBottom)
+        .help(isAtBottom ? "Already at the end" : "Jump to the latest transcript output and resume following")
+    }
+
+    private var presentationBinding: Binding<RunDetailPresentation> {
+        Binding(
+            get: { coordinator.runDetailPresentation },
+            set: { coordinator.updateRunDetailPresentation($0) }
+        )
+    }
+
+    private func visibilityBinding(
+        _ keyPath: WritableKeyPath<TranscriptVisibility, Bool>
+    ) -> Binding<Bool> {
+        Binding(
+            get: { application.transcriptVisibility[keyPath: keyPath] },
+            set: { value in
+                var visibility = application.transcriptVisibility
+                visibility[keyPath: keyPath] = value
+                application.setTranscriptVisibility(visibility)
+            }
+        )
     }
 
     private var durationText: String {
@@ -138,79 +244,68 @@ struct RunDetailView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
-
-    private func applyVisibility(_ visibility: TranscriptVisibility) {
-        showsReasoning = visibility.reasoning
-        showsActions = visibility.actions
-        showsDiagnostics = visibility.diagnostics
-    }
 }
 
 private struct FinalResultView: View {
+    enum Presentation: String, CaseIterable {
+        case rendered
+        case raw
+
+        var displayName: String {
+            rawValue.capitalized
+        }
+    }
+
     let text: String
+    let repositoryPath: String
+
+    @State private var presentation: Presentation = .rendered
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("Final Result")
                     .font(.headline)
-                Text("Source sent to the handoff model")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 Spacer()
+                Picker("Result presentation", selection: $presentation) {
+                    ForEach(Presentation.allCases, id: \.self) { value in
+                        Text(value.displayName).tag(value)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
+                .help("Switch between rendered Markdown and its exact source")
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                 } label: {
                     Label("Copy Final", systemImage: "doc.on.doc")
                 }
-                .help("Copy the final result supplied to the handoff model")
+                .help("Copy the exact final result")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(.bar)
             Divider()
-            ScrollView {
-                Text(text)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
+
+            if presentation == .rendered {
+                MarkdownResultView(text: text, repositoryPath: repositoryPath)
+                    .help("Select rendered Markdown or open one of its links")
+            } else {
+                ScrollView {
+                    Text(text)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                }
+                .help("Select or scroll the exact final-result source")
+                .background(Color(nsColor: .textBackgroundColor))
             }
-            .help("Select or scroll the final result supplied to the handoff model")
-            .background(Color(nsColor: .textBackgroundColor))
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Final result sent to the handoff model")
-    }
-}
-
-private struct HandoffSummaryView: View {
-    let handoff: HandoffEnvelope
-    @State private var expanded = false
-
-    var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            ScrollView {
-                Text(handoff.handoffText)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 6)
-            }
-            .frame(maxHeight: 180)
-        } label: {
-            HStack {
-                Text("Handoff")
-                Spacer()
-                Text(handoff.sourceDisposition.displayName)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .help(expanded ? "Collapse the handoff text" : "Expand the filtered handoff text")
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
+        .accessibilityLabel("Final result")
     }
 }
 
@@ -266,7 +361,11 @@ private struct RelayRecoveryView: View {
                 Spacer()
                 Button("Use This Handoff") {
                     Task {
-                        await coordinator.useHandoff(text: handoffText, disposition: disposition, label: label)
+                        await coordinator.useHandoff(
+                            text: handoffText,
+                            disposition: disposition,
+                            label: label
+                        )
                     }
                 }
                 .buttonStyle(.borderedProminent)

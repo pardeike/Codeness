@@ -334,6 +334,25 @@ public enum ResumeCheckpoint: Codable, Sendable, Equatable {
     case perform(PendingAction)
 }
 
+public struct GoalAmendment: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let previousGoal: String
+    public let revisedGoal: String
+    public let createdAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        previousGoal: String,
+        revisedGoal: String,
+        createdAt: Date = .now
+    ) {
+        self.id = id
+        self.previousGoal = previousGoal
+        self.revisedGoal = revisedGoal
+        self.createdAt = createdAt
+    }
+}
+
 public struct TranscriptViewportState: Codable, Sendable, Equatable {
     public var topCharacterOffset: Int
     public var verticalOffset: Double
@@ -382,6 +401,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
     public var sidebarWidth: Double?
     public var sidebarVisible: Bool
     public var pauseAfterCurrent: Bool
+    public var detailPresentation: RunDetailPresentation?
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -390,7 +410,8 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         windowFrame: StoredWindowFrame? = nil,
         sidebarWidth: Double? = nil,
         sidebarVisible: Bool = true,
-        pauseAfterCurrent: Bool = false
+        pauseAfterCurrent: Bool = false,
+        detailPresentation: RunDetailPresentation? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.selectedRunID = selectedRunID
@@ -399,6 +420,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         self.sidebarWidth = sidebarWidth
         self.sidebarVisible = sidebarVisible
         self.pauseAfterCurrent = pauseAfterCurrent
+        self.detailPresentation = detailPresentation
     }
 }
 
@@ -462,13 +484,14 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
 
 public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
     public let id: UUID
-    public let goal: String
+    public var goal: String
     public let prompts: ActivityPrompts
     public var status: ActivityStatus
     public var runs: [RunRecord]
     public var pendingAction: PendingAction?
     public var resumeCheckpoint: ResumeCheckpoint?
     public var implementationClaimedComplete: Bool
+    public var goalAmendments: [GoalAmendment]
     public let createdAt: Date
     public var completedAt: Date?
 
@@ -481,6 +504,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         pendingAction: PendingAction? = nil,
         resumeCheckpoint: ResumeCheckpoint? = nil,
         implementationClaimedComplete: Bool = false,
+        goalAmendments: [GoalAmendment] = [],
         createdAt: Date = .now,
         completedAt: Date? = nil
     ) {
@@ -492,8 +516,61 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         self.pendingAction = pendingAction
         self.resumeCheckpoint = resumeCheckpoint
         self.implementationClaimedComplete = implementationClaimedComplete
+        self.goalAmendments = goalAmendments
         self.createdAt = createdAt
         self.completedAt = completedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case goal
+        case prompts
+        case status
+        case runs
+        case pendingAction
+        case resumeCheckpoint
+        case implementationClaimedComplete
+        case goalAmendments
+        case createdAt
+        case completedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        goal = try container.decode(String.self, forKey: .goal)
+        prompts = try container.decode(ActivityPrompts.self, forKey: .prompts)
+        status = try container.decodeIfPresent(ActivityStatus.self, forKey: .status) ?? .paused
+        runs = try container.decodeIfPresent([RunRecord].self, forKey: .runs) ?? []
+        pendingAction = try container.decodeIfPresent(PendingAction.self, forKey: .pendingAction)
+        resumeCheckpoint = try container.decodeIfPresent(ResumeCheckpoint.self, forKey: .resumeCheckpoint)
+        implementationClaimedComplete = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .implementationClaimedComplete
+        ) ?? false
+        goalAmendments = try container.decodeIfPresent(
+            [GoalAmendment].self,
+            forKey: .goalAmendments
+        ) ?? []
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
+        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(goal, forKey: .goal)
+        try container.encode(prompts, forKey: .prompts)
+        try container.encode(status, forKey: .status)
+        try container.encode(runs, forKey: .runs)
+        try container.encodeIfPresent(pendingAction, forKey: .pendingAction)
+        try container.encodeIfPresent(resumeCheckpoint, forKey: .resumeCheckpoint)
+        try container.encode(implementationClaimedComplete, forKey: .implementationClaimedComplete)
+        if !goalAmendments.isEmpty {
+            try container.encode(goalAmendments, forKey: .goalAmendments)
+        }
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
     }
 }
 

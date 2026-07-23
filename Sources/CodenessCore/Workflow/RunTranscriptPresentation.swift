@@ -1,6 +1,6 @@
 import Foundation
 
-public struct TranscriptVisibility: Sendable, Equatable {
+public struct TranscriptVisibility: Codable, Sendable, Equatable {
     public var reasoning: Bool
     public var actions: Bool
     public var results: Bool
@@ -20,6 +20,20 @@ public struct TranscriptVisibility: Sendable, Equatable {
 
     public static let recommended = TranscriptVisibility()
     public static let all = TranscriptVisibility(actions: true)
+}
+
+public enum RunDetailPresentation: String, Codable, Sendable, CaseIterable {
+    case split
+    case transcript
+    case result
+
+    public var displayName: String {
+        switch self {
+        case .split: "Split"
+        case .transcript: "Transcript"
+        case .result: "Result"
+        }
+    }
 }
 
 public enum RunTranscriptPresentation {
