@@ -8,8 +8,7 @@ public enum WorkflowDecision: Sendable, Equatable {
 public enum WorkflowStateMachine {
     public static func decision(
         after kind: RunKind,
-        disposition: SourceDisposition,
-        implementationClaimedComplete: Bool
+        disposition: SourceDisposition
     ) -> WorkflowDecision {
         switch disposition {
         case .blocked:
@@ -27,8 +26,10 @@ public enum WorkflowStateMachine {
             return .continueWith(.review)
         case (.review, .reviewComplete):
             return .continueWith(.fix)
-        case (.fix, .fixComplete), (.fix, .implementationComplete):
-            return .continueWith(implementationClaimedComplete ? .complete : .implement)
+        case (.fix, .fixCheckpoint):
+            return .continueWith(.implement)
+        case (.fix, .fixComplete):
+            return .continueWith(.complete)
         default:
             return .pause("The relay state \(disposition.displayName) is not valid after \(kind.displayName).")
         }

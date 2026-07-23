@@ -69,6 +69,7 @@ public enum SourceDisposition: String, Codable, Sendable, CaseIterable {
     case implementationCheckpoint
     case implementationComplete
     case reviewComplete
+    case fixCheckpoint
     case fixComplete
     case blocked
     case failed
@@ -79,7 +80,8 @@ public enum SourceDisposition: String, Codable, Sendable, CaseIterable {
         case .implementationCheckpoint: "Implementation checkpoint"
         case .implementationComplete: "Implementation complete"
         case .reviewComplete: "Review complete"
-        case .fixComplete: "Fixes complete"
+        case .fixCheckpoint: "Fixes complete; work remains"
+        case .fixComplete: "Fixes and activity complete"
         case .blocked: "Blocked"
         case .failed: "Failed"
         case .unclear: "Unclear"
@@ -93,7 +95,7 @@ public enum SourceDisposition: String, Codable, Sendable, CaseIterable {
         case .review:
             [.reviewComplete, .blocked, .failed, .unclear]
         case .fix:
-            [.fixComplete, .blocked, .failed, .unclear]
+            [.fixCheckpoint, .fixComplete, .blocked, .failed, .unclear]
         }
     }
 

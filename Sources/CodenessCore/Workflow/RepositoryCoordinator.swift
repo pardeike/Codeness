@@ -1043,12 +1043,19 @@ public final class RepositoryCoordinator {
     private func applyWorkflowDecision(runID: UUID, for kind: RunKind, envelope: HandoffEnvelope) async {
         if kind == .implementation {
             record.activity?.implementationClaimedComplete = envelope.sourceDisposition == .implementationComplete
+        } else if kind == .fix {
+            switch envelope.sourceDisposition {
+            case .fixCheckpoint:
+                record.activity?.implementationClaimedComplete = false
+            case .fixComplete:
+                record.activity?.implementationClaimedComplete = true
+            default:
+                break
+            }
         }
-        let completionClaimed = record.activity?.implementationClaimedComplete ?? false
         switch WorkflowStateMachine.decision(
             after: kind,
-            disposition: envelope.sourceDisposition,
-            implementationClaimedComplete: completionClaimed
+            disposition: envelope.sourceDisposition
         ) {
         case .pause(let reason):
             updateRun(runID) {
@@ -1538,11 +1545,9 @@ public final class RepositoryCoordinator {
         case .fix:
             return .init(
                 sender: .implementer,
-                recipient: record.activity?.implementationClaimedComplete == true ? nil : .implementer,
+                recipient: .implementer,
                 runKind: run.kind,
-                recipientPurpose: record.activity?.implementationClaimedComplete == true
-                    ? "Store a faithful final fix result for supervision and activity history."
-                    : "Begin the next independent implementation work unit in the same persistent session.",
+                recipientPurpose: "Preserve the fixes and explicit whole-goal verdict so Codeness can either begin the next implementation work unit or finish the activity.",
                 source: source
             )
         }

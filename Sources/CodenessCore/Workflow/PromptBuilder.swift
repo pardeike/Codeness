@@ -26,8 +26,17 @@ public enum PromptBuilder {
     }
 
     public static func fix(goal: String, template: String, reviewOutput: String) -> String {
-        render(template, goal: goal)
+        let prompt = render(template, goal: goal)
             .replacingOccurrences(of: ActivityPrompts.reviewOutputPlaceholder, with: reviewOutput)
+        return """
+        \(prompt)
+
+        End your final response with exactly one of these sentences:
+        - The whole goal is complete.
+        - More implementation work remains.
+
+        Use the first sentence only if the review findings are addressed and the entire goal is now complete. Otherwise use the second sentence.
+        """
     }
 
     private static func render(_ template: String, goal: String) -> String {
@@ -81,7 +90,7 @@ public enum RelayPromptBuilder {
             return "Retain every material finding, severity or priority, evidence, affected locations, expected correction, verification gaps, and explicit no-findings conclusions."
         }
         if context.runKind == .fix {
-            return "Retain the fixes applied, affected files and symbols, verification performed, failures, remaining risks, and whether the review findings were fully addressed."
+            return "Retain the fixes applied, affected files and symbols, verification performed, failures, remaining risks, whether the review findings were fully addressed, and the explicit whole-goal completion verdict."
         }
         return "Retain the final change summary, verification performed, failures, remaining risks, and completion state."
     }
@@ -93,7 +102,7 @@ public enum RelayPromptBuilder {
         case .review:
             return "For a completed review, classify reviewComplete whether it contains findings or explicitly reports no material findings."
         case .fix:
-            return "Classify fixComplete only when the source explicitly reports that the review findings were addressed or that there were no actionable fixes."
+            return "Classify fixCheckpoint when the source explicitly says that more implementation or review work remains, or that the whole activity is not complete. Classify fixComplete only when the source explicitly reports both that the review findings were addressed (or there were no actionable fixes) and that the whole goal is complete. If the source does not explicitly resolve both questions, classify unclear."
         }
     }
 }

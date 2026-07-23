@@ -158,10 +158,14 @@ struct RepositorySettingsSheet: View {
 struct ModelSelectionGridHeader: View {
     var body: some View {
         GridRow {
-            Color.clear
-                .frame(width: 110, height: 1)
+            Text("Role")
+                .frame(width: 110, alignment: .leading)
             Text("Model")
+                .frame(minWidth: 300, maxWidth: .infinity, alignment: .trailing)
+                .gridColumnAlignment(.trailing)
             Text("Reasoning effort")
+                .frame(width: 180, alignment: .trailing)
+                .gridColumnAlignment(.trailing)
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -186,7 +190,8 @@ struct ModelSelectionGridRow: View {
                 }
             }
             .labelsHidden()
-            .frame(minWidth: 300, maxWidth: .infinity)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(minWidth: 300, maxWidth: .infinity, alignment: .trailing)
             .help("Choose the model used for the \(title.lowercased()) phase")
             Picker("Effort", selection: $selection.effort) {
                 ForEach(efforts, id: \.self) { effort in
@@ -194,7 +199,8 @@ struct ModelSelectionGridRow: View {
                 }
             }
             .labelsHidden()
-            .frame(width: 180)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(width: 180, alignment: .trailing)
             .help("Choose the reasoning effort used for the \(title.lowercased()) phase")
         }
     }

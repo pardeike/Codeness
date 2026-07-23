@@ -634,7 +634,7 @@ private actor SequencedTestRouter: HandoffRouting {
         case .review:
             disposition = .reviewComplete
         case .fix:
-            disposition = .fixComplete
+            disposition = labelIndex < 5 ? .fixCheckpoint : .fixComplete
         }
         let labels = [
             "Parser foundation",

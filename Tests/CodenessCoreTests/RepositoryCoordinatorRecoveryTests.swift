@@ -253,6 +253,54 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func fixCheckpointOverridesAnEarlierCompletionClaimAndQueuesMoreImplementation() async throws {
+        let fixRun = RunRecord(
+            sequence: 3,
+            role: .implementer,
+            kind: .fix,
+            status: .paused,
+            threadID: "implementer-thread",
+            turnID: "fix-turn",
+            model: "model",
+            effort: "high",
+            prompt: "Address review findings",
+            finalOutput: "The findings are addressed. More implementation work remains."
+        )
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-fix-checkpoint-\(UUID().uuidString)",
+            implementerThreadID: "implementer-thread",
+            reviewerThreadID: "reviewer-thread",
+            activity: ActivityRecord(
+                goal: "Finish the whole repository goal",
+                prompts: .builtInDefaults,
+                status: .paused,
+                runs: [fixRun],
+                implementationClaimedComplete: true
+            )
+        )
+        let harness = try await CoordinatorHarness(
+            record: record,
+            viewState: RepositoryViewState(pauseAfterCurrent: true)
+        )
+        defer { harness.remove() }
+
+        await harness.coordinator.useHandoff(
+            text: "The findings are addressed. More implementation work remains.",
+            disposition: .fixCheckpoint,
+            label: "Review fixes with remaining work"
+        )
+
+        let activity = try #require(harness.coordinator.record.activity)
+        #expect(activity.status == .paused)
+        #expect(activity.runs.last?.handoff?.sourceDisposition == .fixCheckpoint)
+        #expect(!activity.implementationClaimedComplete)
+        #expect(activity.pendingAction == .implement)
+        #expect(activity.resumeCheckpoint == .perform(.implement))
+        #expect(activity.completedAt == nil)
+        #expect(harness.coordinator.canResume)
+    }
+
+    @Test
     func pausedActivityCanAmendItsGoalWithoutLosingHistoryOrSessions() async throws {
         let record = RepositoryRecord(
             canonicalPath: "/tmp/codeness-goal-amendment-\(UUID().uuidString)",

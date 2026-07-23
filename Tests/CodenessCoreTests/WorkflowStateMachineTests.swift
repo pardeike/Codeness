@@ -7,42 +7,37 @@ struct WorkflowStateMachineTests {
         #expect(
             WorkflowStateMachine.decision(
                 after: .implementation,
-                disposition: .implementationCheckpoint,
-                implementationClaimedComplete: false
+                disposition: .implementationCheckpoint
             ) == .continueWith(.review)
         )
         #expect(
             WorkflowStateMachine.decision(
                 after: .implementation,
-                disposition: .implementationComplete,
-                implementationClaimedComplete: true
+                disposition: .implementationComplete
             ) == .continueWith(.review)
         )
         #expect(
             WorkflowStateMachine.decision(
                 after: .review,
-                disposition: .reviewComplete,
-                implementationClaimedComplete: false
+                disposition: .reviewComplete
             ) == .continueWith(.fix)
         )
     }
 
     @Test
-    func startsNextWorkUnitOnlyAfterCheckpointFixes() {
+    func startsNextWorkUnitWhenFixesExplicitlyLeaveWorkRemaining() {
         let decision = WorkflowStateMachine.decision(
             after: .fix,
-            disposition: .fixComplete,
-            implementationClaimedComplete: false
+            disposition: .fixCheckpoint
         )
         #expect(decision == .continueWith(.implement))
     }
 
     @Test
-    func completesOnlyAfterFixingACompletedImplementation() {
+    func completesOnlyWhenTheFinalFixConfirmsTheWholeGoal() {
         let decision = WorkflowStateMachine.decision(
             after: .fix,
-            disposition: .fixComplete,
-            implementationClaimedComplete: true
+            disposition: .fixComplete
         )
         #expect(decision == .continueWith(.complete))
     }
@@ -51,8 +46,7 @@ struct WorkflowStateMachineTests {
     func pausesOnNonActionableState(_ disposition: SourceDisposition) {
         guard case .pause = WorkflowStateMachine.decision(
             after: .implementation,
-            disposition: disposition,
-            implementationClaimedComplete: false
+            disposition: disposition
         ) else {
             Issue.record("Expected workflow to pause")
             return
@@ -63,8 +57,7 @@ struct WorkflowStateMachineTests {
     func rejectsAReviewDispositionAfterFixes() {
         guard case .pause = WorkflowStateMachine.decision(
             after: .fix,
-            disposition: .reviewComplete,
-            implementationClaimedComplete: false
+            disposition: .reviewComplete
         ) else {
             Issue.record("Expected invalid phase classification to pause")
             return

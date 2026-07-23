@@ -247,19 +247,10 @@ struct RunDetailView: View {
 }
 
 private struct FinalResultView: View {
-    enum Presentation: String, CaseIterable {
-        case rendered
-        case raw
-
-        var displayName: String {
-            rawValue.capitalized
-        }
-    }
-
     let text: String
     let repositoryPath: String
 
-    @State private var presentation: Presentation = .rendered
+    @State private var isFormatted = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -267,15 +258,9 @@ private struct FinalResultView: View {
                 Text("Final Result")
                     .font(.headline)
                 Spacer()
-                Picker("Result presentation", selection: $presentation) {
-                    ForEach(Presentation.allCases, id: \.self) { value in
-                        Text(value.displayName).tag(value)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 150)
-                .help("Switch between rendered Markdown and its exact source")
+                Toggle("Formatted", isOn: $isFormatted)
+                    .toggleStyle(.checkbox)
+                    .help("Show rendered Markdown; turn this off to show its exact source")
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
@@ -289,7 +274,7 @@ private struct FinalResultView: View {
             .background(.bar)
             Divider()
 
-            if presentation == .rendered {
+            if isFormatted {
                 MarkdownResultView(text: text, repositoryPath: repositoryPath)
                     .help("Select rendered Markdown or open one of its links")
             } else {
@@ -385,7 +370,7 @@ private struct RelayRecoveryView: View {
         switch kind {
         case .implementation: .implementationCheckpoint
         case .review: .reviewComplete
-        case .fix: .fixComplete
+        case .fix: .fixCheckpoint
         }
     }
 }

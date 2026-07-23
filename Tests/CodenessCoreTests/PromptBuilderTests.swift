@@ -40,13 +40,14 @@ struct PromptBuilderTests {
                 implementationOutput: "Changed tokenization."
             ).hasSuffix("Review the recent work:\nChanged tokenization.")
         )
-        #expect(
-            PromptBuilder.fix(
-                goal: goal,
-                template: prompts.fix,
-                reviewOutput: "Handle empty input."
-            ).hasSuffix("Fix these findings:\nHandle empty input.")
+        let fix = PromptBuilder.fix(
+            goal: goal,
+            template: prompts.fix,
+            reviewOutput: "Handle empty input."
         )
+        #expect(fix.contains("Fix these findings:\nHandle empty input."))
+        #expect(fix.contains("The whole goal is complete."))
+        #expect(fix.contains("More implementation work remains."))
     }
 
     @Test
@@ -58,6 +59,24 @@ struct PromptBuilderTests {
         #expect(prompts.review.contains(ActivityPrompts.implementationOutputPlaceholder))
         #expect(prompts.fix.contains(ActivityPrompts.reviewOutputPlaceholder))
         #expect(prompts.validationMessage == nil)
+    }
+
+    @Test
+    func fixRelayRequiresSeparateFixAndWholeGoalVerdicts() {
+        let context = HandoffContext(
+            sender: .implementer,
+            recipient: .implementer,
+            runKind: .fix,
+            recipientPurpose: "Continue or finish",
+            source: "The findings are addressed. More implementation work remains."
+        )
+
+        let prompt = RelayPromptBuilder.systemPrompt(for: context)
+
+        #expect(prompt.contains("Classify fixCheckpoint"))
+        #expect(prompt.contains("Classify fixComplete"))
+        #expect(prompt.contains("whole goal is complete"))
+        #expect(prompt.contains("classify unclear"))
     }
 
     @Test

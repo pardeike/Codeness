@@ -34,7 +34,7 @@ struct HandoffRouterTests {
         let expectations: [(RunKind, [String])] = [
             (.implementation, ["implementationCheckpoint", "implementationComplete", "blocked", "failed", "unclear"]),
             (.review, ["reviewComplete", "blocked", "failed", "unclear"]),
-            (.fix, ["fixComplete", "blocked", "failed", "unclear"])
+            (.fix, ["fixCheckpoint", "fixComplete", "blocked", "failed", "unclear"])
         ]
 
         for (runKind, expectedValues) in expectations {
