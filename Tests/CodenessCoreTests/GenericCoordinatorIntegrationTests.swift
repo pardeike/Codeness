@@ -1,0 +1,585 @@
+import Foundation
+import Testing
+@testable import CodenessCore
+
+@MainActor
+struct GenericCoordinatorIntegrationTests {
+    @Test
+    func executesConfiguredProvidersAcrossPrefixLoopAndPostfixWithSessionReuse() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(id: .codex, delay: .milliseconds(10))
+        let claude = ScriptedAgentProvider(id: .claude, delay: .milliseconds(10))
+        let providers = AgentProviderRegistry(providers: [codex, claude])
+        let router = IterationCompletingWorkflowRouter(completionIteration: 2)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-coordinator-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: providers,
+            workflowRouter: router
+        )
+        let workflow = fullWorkflow()
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: "Exercise every configured step", workflow: workflow)
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.map { $0.workflowStep?.name } == [
+            "Plan",
+            "Code",
+            "Review",
+            "Code",
+            "Review",
+            "Summarize"
+        ])
+        #expect(activity.runs.map { $0.workflowStep?.loopIteration } == [
+            1, 1, 1, 2, 2, 2
+        ])
+        #expect(activity.runs.map { $0.agentTarget?.providerID } == [
+            .codex, .claude, .codex, .claude, .codex, .claude
+        ])
+        #expect(activity.runs.allSatisfy { $0.status == .completed })
+        #expect(activity.runs.last?.workflowHandoff?.outcome == .continueWorkflow)
+        #expect(activity.stepSessions["code"]?.providerSessionID != nil)
+        #expect(activity.stepSessions["review"]?.providerSessionID != nil)
+        #expect(activity.stepSessions["code"]?.lineage == 1)
+
+        let claudeSessions = await claude.sessionRequests()
+        let codeRequests = claudeSessions.filter { $0.name.hasSuffix("— Code") }
+        #expect(codeRequests.count == 2)
+        #expect(codeRequests.first?.existingSessionID == nil)
+        #expect(codeRequests.last?.existingSessionID == activity.stepSessions["code"]?.providerSessionID)
+        let runs = await claude.runRequests()
+        #expect(runs.contains {
+            $0.target.model == "sonnet"
+                && $0.target.options.speed == .fast
+        })
+        #expect(await router.routeCount() == 6)
+
+        coordinator.requestWorkOverviewSummary()
+        try await waitUntil {
+            coordinator.workOverviewSummaryText != nil
+                && !coordinator.isGeneratingWorkOverviewSummary
+        }
+        #expect(
+            coordinator.workOverviewSummaryText
+                == "### Completed\n- Generic workflow summary."
+        )
+        #expect(await router.summaryCount() == 1)
+        #expect(await router.summaryConfigurations() == [workflow.coordinator])
+
+        let persisted = try await WorkspaceStore(rootURL: root).load(
+            canonicalPath: coordinator.record.canonicalPath
+        )
+        #expect(persisted.activity == activity)
+    }
+
+    @Test
+    func changingProviderModelOrModeAfterAPauseCreatesANewStepLineage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(id: .codex, delay: .milliseconds(120))
+        let claude = ScriptedAgentProvider(id: .claude, delay: .milliseconds(120))
+        let providers = AgentProviderRegistry(providers: [codex, claude])
+        let router = IterationCompletingWorkflowRouter(completionIteration: 99)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-lineage-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: providers,
+            workflowRouter: router
+        )
+        let original = loopWorkflow()
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: "Pause between cycles", workflow: original)
+        try await waitUntil {
+            coordinator.activeRun?.workflowStep?.id == "review"
+                && coordinator.activeRun?.status == .running
+        }
+        coordinator.setPauseAfterCurrent(true)
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.workflowCursor?.loopIteration == 2
+        }
+
+        var updated = try #require(coordinator.record.activity?.workflow)
+        let codeIndex = try #require(updated.steps.firstIndex { $0.id == "code" })
+        updated.steps[codeIndex].target = AgentTarget(
+            providerID: .claude,
+            model: "opus",
+            options: AgentExecutionOptions(
+                effort: "max",
+                mode: .plan,
+                speed: .fast
+            )
+        )
+
+        #expect(await coordinator.updateWorkflowTargets(updated))
+        let session = try #require(
+            coordinator.record.activity?.stepSessions["code"]
+        )
+        #expect(session.lineage == 2)
+        #expect(session.providerSessionID == nil)
+        #expect(session.target == updated.steps[codeIndex].target)
+        #expect(coordinator.record.activity?.stepSessions["review"]?.lineage == 1)
+    }
+
+    @Test
+    func neverStartsAProviderWhenTheQueuedGenericRunCannotBePersisted() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = WorkspaceStore(rootURL: root)
+        let store = FailingQueuedGenericStore(base: base)
+        let codex = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let providers = AgentProviderRegistry(providers: [codex])
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-durability-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: providers,
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+        let workflow = singleStepWorkflow()
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: "Persist before launch", workflow: workflow)
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.status == .paused)
+        #expect(activity.runs.isEmpty)
+        #expect(activity.workflowCursor == WorkflowCursor(section: .loop, stepIndex: 0))
+        #expect(activity.workflowResumeCheckpoint == .perform(
+            WorkflowCursor(section: .loop, stepIndex: 0)
+        ))
+        #expect(await codex.startCount() == 0)
+        #expect(coordinator.errorMessage?.contains("before starting it") == true)
+        let persisted = try await base.load(canonicalPath: coordinator.record.canonicalPath)
+        #expect(persisted.activity?.status == .paused)
+        #expect(persisted.activity?.runs.isEmpty == true)
+    }
+
+    @Test
+    func retryDoesNotResumeAProviderSessionThatNeverStarted() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            failuresBeforeStart: 1
+        )
+        let providers = AgentProviderRegistry(providers: [codex])
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-unstarted-session-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: providers,
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Recover without resuming a missing session",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.status == .failed
+        }
+
+        await coordinator.resume()
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+
+        let requests = await codex.sessionRequests()
+        #expect(requests.count == 2)
+        #expect(requests.map(\.existingSessionID) == [nil, nil])
+        #expect(
+            coordinator.record.activity?.stepSessions["work"]?.providerSessionID
+                == "codex-session-2"
+        )
+    }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(5),
+        _ condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition(), clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(condition())
+    }
+
+    private func fullWorkflow() -> WorkflowTemplate {
+        let codex = AgentTarget(
+            providerID: .codex,
+            model: "gpt-test",
+            options: .init(effort: "high", mode: .plan)
+        )
+        let claude = AgentTarget(
+            providerID: .claude,
+            model: "sonnet",
+            options: .init(effort: "high", speed: .fast)
+        )
+        return WorkflowTemplate(
+            id: "full",
+            name: "Full",
+            summary: "All sections and providers",
+            steps: [
+                step("plan", "Plan", .prefix, codex),
+                step("code", "Code", .loop, claude),
+                step("review", "Review", .loop, codex),
+                step("summary", "Summarize", .postfix, claude)
+            ],
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: codex,
+                instructions: "Route results."
+            )
+        )
+    }
+
+    private func loopWorkflow() -> WorkflowTemplate {
+        let codex = AgentTarget(providerID: .codex, model: "gpt-test")
+        return WorkflowTemplate(
+            id: "loop",
+            name: "Loop",
+            summary: "Lineage test",
+            steps: [
+                step("code", "Code", .loop, codex),
+                step("review", "Review", .loop, codex)
+            ],
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: codex,
+                instructions: "Route results."
+            )
+        )
+    }
+
+    private func singleStepWorkflow() -> WorkflowTemplate {
+        let target = AgentTarget(providerID: .codex, model: "gpt-test")
+        return WorkflowTemplate(
+            id: "single",
+            name: "Single",
+            summary: "One step",
+            steps: [step("work", "Work", .loop, target)],
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: target,
+                instructions: "Route results."
+            )
+        )
+    }
+
+    private func step(
+        _ id: String,
+        _ name: String,
+        _ section: WorkflowSection,
+        _ target: AgentTarget
+    ) -> WorkflowStep {
+        WorkflowStep(
+            id: id,
+            name: name,
+            section: section,
+            instructions: "Perform \(name) for {{goal}} in cycle {{loop_iteration}}.",
+            target: target
+        )
+    }
+}
+
+private actor ScriptedAgentProvider: AgentProviding {
+    nonisolated let id: AgentProviderID
+
+    private let delay: Duration
+    private let failuresBeforeStart: Int
+    private var prepared: [AgentSessionRequest] = []
+    private var started: [AgentRunRequest] = []
+    private var sessionCounter = 0
+    private var startAttempts = 0
+
+    init(
+        id: AgentProviderID,
+        delay: Duration,
+        failuresBeforeStart: Int = 0
+    ) {
+        self.id = id
+        self.delay = delay
+        self.failuresBeforeStart = failuresBeforeStart
+    }
+
+    func prepareSession(_ request: AgentSessionRequest) -> AgentSession {
+        prepared.append(request)
+        let sessionID: String
+        if let existing = request.existingSessionID {
+            sessionID = existing
+        } else {
+            sessionCounter += 1
+            sessionID = "\(id.rawValue)-session-\(sessionCounter)"
+        }
+        return AgentSession(providerID: id, id: sessionID, target: request.target)
+    }
+
+    func startRun(_ request: AgentRunRequest) throws -> AgentRunHandle {
+        startAttempts += 1
+        if startAttempts <= failuresBeforeStart {
+            throw AgentProviderError.processExited(
+                provider: id,
+                status: 1,
+                detail: "Injected pre-start failure"
+            )
+        }
+        started.append(request)
+        let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
+        let executionID = "\(id.rawValue)-execution-\(started.count)"
+        let delay = delay
+        Task {
+            if delay > .zero {
+                try? await Task.sleep(for: delay)
+            }
+            pair.continuation.yield(.started(executionID: executionID))
+            pair.continuation.yield(.transcript("Provider \(id.rawValue) completed the step."))
+            pair.continuation.yield(.tokenUsage(
+                RunTokenUsage(totalTokens: 20, inputTokens: 15, outputTokens: 5)
+            ))
+            pair.continuation.yield(
+                .completed(
+                    output: "Completed \(request.target.model).",
+                    durationMilliseconds: 10,
+                    tokenUsage: RunTokenUsage(
+                        totalTokens: 20,
+                        inputTokens: 15,
+                        outputTokens: 5
+                    )
+                )
+            )
+            pair.continuation.finish()
+        }
+        return AgentRunHandle(
+            runID: request.runID,
+            providerID: id,
+            sessionID: request.session.id,
+            executionID: executionID,
+            events: pair.stream
+        )
+    }
+
+    func steer(runID: UUID, message: String) throws {
+        _ = runID
+        _ = message
+    }
+
+    func interrupt(runID: UUID) throws {
+        _ = runID
+    }
+
+    func resolveInteraction(
+        runID: UUID,
+        interactionID: String,
+        resolution: AgentInteractionResolution
+    ) throws {
+        _ = runID
+        _ = interactionID
+        _ = resolution
+    }
+
+    func runUtility(_ request: AgentUtilityRequest) -> AgentUtilityResult {
+        _ = request
+        return AgentUtilityResult(
+            output: """
+            {"handoffText":"Continue.","outcome":"continueWorkflow","runLabel":"Step"}
+            """
+        )
+    }
+
+    func shutdown() {}
+
+    func sessionRequests() -> [AgentSessionRequest] {
+        prepared
+    }
+
+    func runRequests() -> [AgentRunRequest] {
+        started
+    }
+
+    func startCount() -> Int {
+        started.count
+    }
+}
+
+private actor IterationCompletingWorkflowRouter: WorkflowHandoffRouting {
+    private let completionIteration: Int
+    private var calls: [WorkflowHandoffContext] = []
+    private var summaryCalls: [WorkflowCoordinatorConfiguration] = []
+
+    init(completionIteration: Int) {
+        self.completionIteration = completionIteration
+    }
+
+    func route(
+        _ context: WorkflowHandoffContext,
+        configuration: WorkflowCoordinatorConfiguration,
+        cwd: String
+    ) -> WorkflowHandoff {
+        _ = configuration
+        _ = cwd
+        calls.append(context)
+        let outcome: WorkflowOutcome = context.makesLoopDecision
+            && context.sourceStep.loopIteration >= completionIteration
+            ? .complete
+            : .continueWorkflow
+        return WorkflowHandoff(
+            text: "\(context.sourceStep.name) completed.",
+            outcome: outcome,
+            runLabel: "\(context.sourceStep.name) \(context.sourceStep.loopIteration)"
+        )
+    }
+
+    func routeCount() -> Int {
+        calls.count
+    }
+
+    func summarizeWork(
+        _ context: WorkSummaryContext,
+        configuration: WorkflowCoordinatorConfiguration,
+        cwd: String
+    ) -> String {
+        _ = context
+        _ = cwd
+        summaryCalls.append(configuration)
+        return "### Completed\n- Generic workflow summary."
+    }
+
+    func summaryCount() -> Int {
+        summaryCalls.count
+    }
+
+    func summaryConfigurations() -> [WorkflowCoordinatorConfiguration] {
+        summaryCalls
+    }
+}
+
+private actor NoopLegacyRouter: HandoffRouting {
+    func route(
+        _ context: HandoffContext,
+        settings: RelaySettings
+    ) -> HandoffEnvelope {
+        _ = context
+        _ = settings
+        return HandoffEnvelope(
+            handoffText: "Unused",
+            sourceDisposition: .unclear,
+            runLabel: "Unused"
+        )
+    }
+}
+
+private actor FailingQueuedGenericStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private var hasFailed = false
+
+    init(base: WorkspaceStore) {
+        self.base = base
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(
+            canonicalPath: canonicalPath,
+            defaultSettings: defaultSettings
+        )
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        if !hasFailed, record.activity?.runs.last?.status == .queued {
+            hasFailed = true
+            throw GenericStoreFailure()
+        }
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendRawLine(
+            line,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+}
+
+private struct GenericStoreFailure: LocalizedError {
+    var errorDescription: String? { "Injected generic queued-save failure" }
+}

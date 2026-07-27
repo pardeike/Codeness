@@ -373,6 +373,8 @@ public struct CodexModel: Codable, Sendable, Equatable, Identifiable {
     public let defaultEffort: String
     public let efforts: [String]
     public let hidden: Bool
+    public let serviceTiers: [CodexServiceTier]
+    public let defaultServiceTier: String?
 
     public init(
         id: String,
@@ -381,7 +383,9 @@ public struct CodexModel: Codable, Sendable, Equatable, Identifiable {
         description: String,
         defaultEffort: String,
         efforts: [String],
-        hidden: Bool
+        hidden: Bool,
+        serviceTiers: [CodexServiceTier] = [],
+        defaultServiceTier: String? = nil
     ) {
         self.id = id
         self.model = model
@@ -390,6 +394,20 @@ public struct CodexModel: Codable, Sendable, Equatable, Identifiable {
         self.defaultEffort = defaultEffort
         self.efforts = efforts
         self.hidden = hidden
+        self.serviceTiers = serviceTiers
+        self.defaultServiceTier = defaultServiceTier
+    }
+}
+
+public struct CodexServiceTier: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let description: String
+
+    public init(id: String, name: String, description: String) {
+        self.id = id
+        self.name = name
+        self.description = description
     }
 }
 
@@ -594,6 +612,10 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
     public var completedAt: Date?
     public var durationMilliseconds: Int64?
     public var tokenUsage: RunTokenUsage?
+    public var workflowStep: WorkflowStepSnapshot?
+    public var agentTarget: AgentTarget?
+    public var sessionLineage: Int?
+    public var workflowHandoff: WorkflowHandoff?
 
     public init(
         id: UUID = UUID(),
@@ -613,7 +635,11 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         startedAt: Date = .now,
         completedAt: Date? = nil,
         durationMilliseconds: Int64? = nil,
-        tokenUsage: RunTokenUsage? = nil
+        tokenUsage: RunTokenUsage? = nil,
+        workflowStep: WorkflowStepSnapshot? = nil,
+        agentTarget: AgentTarget? = nil,
+        sessionLineage: Int? = nil,
+        workflowHandoff: WorkflowHandoff? = nil
     ) {
         self.id = id
         self.sequence = sequence
@@ -633,6 +659,22 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         self.completedAt = completedAt
         self.durationMilliseconds = durationMilliseconds
         self.tokenUsage = tokenUsage
+        self.workflowStep = workflowStep
+        self.agentTarget = agentTarget
+        self.sessionLineage = sessionLineage
+        self.workflowHandoff = workflowHandoff
+    }
+
+    public var displayName: String {
+        workflowHandoff?.runLabel
+            ?? workflowStep?.name
+            ?? handoff?.runLabel
+            ?? kind.displayName
+    }
+
+    public var providerDisplayValue: String {
+        guard let agentTarget else { return model }
+        return "\(agentTarget.providerID.rawValue):\(agentTarget.model)"
     }
 }
 
@@ -646,6 +688,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
     public var resumeCheckpoint: ResumeCheckpoint?
     public var implementationClaimedComplete: Bool
     public var goalAmendments: [GoalAmendment]
+    public var workflow: WorkflowTemplate?
+    public var workflowCursor: WorkflowCursor?
+    public var workflowResumeCheckpoint: WorkflowResumeCheckpoint?
+    public var stepSessions: [String: WorkflowSessionState]
     public let createdAt: Date
     public var completedAt: Date?
 
@@ -659,6 +705,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         resumeCheckpoint: ResumeCheckpoint? = nil,
         implementationClaimedComplete: Bool = false,
         goalAmendments: [GoalAmendment] = [],
+        workflow: WorkflowTemplate? = nil,
+        workflowCursor: WorkflowCursor? = nil,
+        workflowResumeCheckpoint: WorkflowResumeCheckpoint? = nil,
+        stepSessions: [String: WorkflowSessionState] = [:],
         createdAt: Date = .now,
         completedAt: Date? = nil
     ) {
@@ -671,6 +721,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         self.resumeCheckpoint = resumeCheckpoint
         self.implementationClaimedComplete = implementationClaimedComplete
         self.goalAmendments = goalAmendments
+        self.workflow = workflow
+        self.workflowCursor = workflowCursor
+        self.workflowResumeCheckpoint = workflowResumeCheckpoint
+        self.stepSessions = stepSessions
         self.createdAt = createdAt
         self.completedAt = completedAt
     }
@@ -685,6 +739,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         case resumeCheckpoint
         case implementationClaimedComplete
         case goalAmendments
+        case workflow
+        case workflowCursor
+        case workflowResumeCheckpoint
+        case stepSessions
         case createdAt
         case completedAt
     }
@@ -706,6 +764,16 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
             [GoalAmendment].self,
             forKey: .goalAmendments
         ) ?? []
+        workflow = try container.decodeIfPresent(WorkflowTemplate.self, forKey: .workflow)
+        workflowCursor = try container.decodeIfPresent(WorkflowCursor.self, forKey: .workflowCursor)
+        workflowResumeCheckpoint = try container.decodeIfPresent(
+            WorkflowResumeCheckpoint.self,
+            forKey: .workflowResumeCheckpoint
+        )
+        stepSessions = try container.decodeIfPresent(
+            [String: WorkflowSessionState].self,
+            forKey: .stepSessions
+        ) ?? [:]
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
         completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
     }
@@ -723,6 +791,12 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         if !goalAmendments.isEmpty {
             try container.encode(goalAmendments, forKey: .goalAmendments)
         }
+        try container.encodeIfPresent(workflow, forKey: .workflow)
+        try container.encodeIfPresent(workflowCursor, forKey: .workflowCursor)
+        try container.encodeIfPresent(workflowResumeCheckpoint, forKey: .workflowResumeCheckpoint)
+        if !stepSessions.isEmpty {
+            try container.encode(stepSessions, forKey: .stepSessions)
+        }
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
     }
@@ -736,10 +810,16 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
 public struct ActivityConfigurationDraft: Codable, Sendable, Equatable {
     public var goal: String
     public var prompts: ActivityPrompts
+    public var workflow: WorkflowTemplate?
 
-    public init(goal: String, prompts: ActivityPrompts) {
+    public init(
+        goal: String,
+        prompts: ActivityPrompts,
+        workflow: WorkflowTemplate? = nil
+    ) {
         self.goal = goal
         self.prompts = prompts
+        self.workflow = workflow
     }
 }
 

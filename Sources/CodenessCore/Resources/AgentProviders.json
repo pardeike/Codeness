@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "providers": [
+    {
+      "id": "codex",
+      "displayName": "Codex",
+      "executableName": "codex",
+      "minimumVersion": "0.145.0",
+      "executableSearchPaths": [
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex"
+      ],
+      "knownModels": [],
+      "supportsPlanMode": true,
+      "supportsFastMode": true
+    },
+    {
+      "id": "claude",
+      "displayName": "Claude",
+      "executableName": "claude",
+      "minimumVersion": "2.1.220",
+      "executableSearchPaths": [
+        "~/.local/bin/claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude"
+      ],
+      "knownModels": [
+        {
+          "id": "default",
+          "displayName": "Default (recommended)",
+          "description": "Claude Code's current recommended model.",
+          "supportedEfforts": ["low", "medium", "high", "xhigh", "max"],
+          "defaultEffort": "high",
+          "supportsPlanMode": true,
+          "supportsFastMode": true,
+          "isAlias": true
+        },
+        {
+          "id": "opus[1m]",
+          "displayName": "Opus (1M context)",
+          "description": "Claude Code's current long-context Opus alias.",
+          "supportedEfforts": ["low", "medium", "high", "xhigh", "max"],
+          "defaultEffort": "high",
+          "supportsPlanMode": true,
+          "supportsFastMode": true,
+          "isAlias": true
+        },
+        {
+          "id": "claude-fable-5[1m]",
+          "displayName": "Fable",
+          "description": "Claude Code's current Fable model.",
+          "supportedEfforts": ["low", "medium", "high", "xhigh", "max"],
+          "defaultEffort": "high",
+          "supportsPlanMode": true,
+          "supportsFastMode": false,
+          "isAlias": true
+        },
+        {
+          "id": "sonnet",
+          "displayName": "Sonnet",
+          "description": "Claude Code's current Sonnet alias.",
+          "supportedEfforts": ["low", "medium", "high", "xhigh", "max"],
+          "defaultEffort": "high",
+          "supportsPlanMode": true,
+          "supportsFastMode": false,
+          "isAlias": true
+        },
+        {
+          "id": "haiku",
+          "displayName": "Haiku",
+          "description": "Claude Code's current Haiku alias.",
+          "supportedEfforts": [],
+          "defaultEffort": null,
+          "supportsPlanMode": true,
+          "supportsFastMode": false,
+          "isAlias": true
+        }
+      ],
+      "supportsPlanMode": true,
+      "supportsFastMode": true
+    }
+  ]
+}

@@ -190,7 +190,10 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
             }
 
             guard await applicationModel.shutdown() else {
-                cancelTermination(sender, message: "Could not save every repository before shutting down Codex.")
+                cancelTermination(
+                    sender,
+                    message: "Could not save every repository before shutting down the agent providers."
+                )
                 return
             }
             if resumeAfterSystemTermination {

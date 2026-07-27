@@ -120,22 +120,6 @@ public actor HandoffConfigurationValidator: HandoffConfigurationValidating {
     }
 }
 
-private enum WorkSummaryPrompt {
-    static let cacheVersion = "compact-markdown-v1"
-    static let system = """
-    Write the “Work so far” section of a software-workflow dashboard. Use only the supplied goal and handoffs. Reconcile older statements with later handoffs and report the net current state instead of retelling the chronology. Do not invent repository facts.
-
-    The summary string must contain compact Markdown only:
-    - Use these level-three headings when applicable, in this order: `### Completed`, `### Current state`, `### Remaining`.
-    - Put one to four short bullet points under each heading.
-    - Never return prose paragraphs or a single wall of text.
-    - Keep the entire summary at or below 120 words and each bullet at or below 20 words.
-    - Prefer direct, terse wording. Omit introductions, repeated goal text, and superseded implementation details.
-    - Omit `Remaining` when the handoffs contain no unfinished work or material risk.
-    - Do not add a separate “Work so far” title.
-    """
-}
-
 public struct WorkSummaryHandoff: Sendable, Equatable {
     public let runID: UUID
     public let sequence: Int
@@ -373,34 +357,6 @@ public actor HandoffRouter: HandoffRouting {
         settings: RelaySettings,
         key: String
     ) throws -> URLRequest {
-        let schema: JSONValue = .object([
-            "type": .string("object"),
-            "additionalProperties": .bool(false),
-            "required": .array([.string("summary")]),
-            "properties": .object([
-                "summary": .object([
-                    "type": .string("string"),
-                    "minLength": .integer(1)
-                ])
-            ])
-        ])
-        let handoffs = context.handoffs.map { handoff in
-            """
-            ### \(handoff.sequence). \(handoff.kind.displayName) — \(handoff.label)
-            Disposition: \(handoff.disposition.displayName)
-
-            \(handoff.text)
-            """
-        }
-        let userPrompt = """
-        GOAL
-
-        \(context.goal)
-
-        HANDOFFS IN CHRONOLOGICAL ORDER
-
-        \(handoffs.joined(separator: "\n\n"))
-        """
         let body = JSONValue.object([
             "model": .string(settings.selection.model),
             "store": .bool(false),
@@ -417,7 +373,7 @@ public actor HandoffRouter: HandoffRouting {
                     "role": .string("user"),
                     "content": .array([.object([
                         "type": .string("input_text"),
-                        "text": .string(userPrompt)
+                        "text": .string(WorkSummaryPrompt.user(context))
                     ])])
                 ])
             ]),
@@ -426,7 +382,7 @@ public actor HandoffRouter: HandoffRouting {
                     "type": .string("json_schema"),
                     "name": .string("codeness_work_summary"),
                     "strict": .bool(true),
-                    "schema": schema
+                    "schema": WorkSummaryPrompt.outputSchema
                 ])
             ])
         ])

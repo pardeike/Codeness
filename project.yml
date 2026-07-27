@@ -20,7 +20,9 @@ targets:
     type: library.static
     platform: macOS
     sources:
-      - Sources/CodenessCore
+      - path: Sources/CodenessCore
+        excludes:
+          - Resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ap.codeness.core
@@ -30,6 +32,8 @@ targets:
     platform: macOS
     sources:
       - Sources/CodenessApp
+      - path: Sources/CodenessCore/Resources
+        buildPhase: resources
     dependencies:
       - target: CodenessCore
     settings:
@@ -48,6 +52,8 @@ targets:
     platform: macOS
     sources:
       - Tests/CodenessCoreTests
+      - path: Sources/CodenessCore/Resources
+        buildPhase: resources
     dependencies:
       - target: CodenessCore
     settings:

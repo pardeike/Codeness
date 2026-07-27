@@ -77,7 +77,7 @@ struct WorkOverviewView: View {
                     Button("Retry Summary") {
                         coordinator.requestWorkOverviewSummary(force: true)
                     }
-                    .help("Ask the configured handoff model to generate the work overview again")
+                    .help("Ask the configured workflow coordinator to generate the work overview again")
                 } else {
                     Label(
                         "A narrative summary will appear after the first completed handoff.",
@@ -113,7 +113,9 @@ struct WorkOverviewView: View {
     }
 
     private var handoffCountText: String {
-        let count = record.activity?.runs.count(where: { $0.handoff != nil }) ?? 0
+        let count = record.activity?.runs.count(where: {
+            $0.handoff != nil || $0.workflowHandoff != nil
+        }) ?? 0
         return count == 1 ? "handoff" : "\(count) handoffs"
     }
 
@@ -173,9 +175,11 @@ struct WorkOverviewView: View {
                 symbol: "terminal"
             )
             OverviewMetricCard(
-                title: "Work units",
+                title: metrics.usesGenericWorkflow ? "Cycles" : "Work units",
                 value: "\(metrics.workUnitCount)",
-                detail: metrics.workUnitCount == 1 ? "review cycle" : "review cycles",
+                detail: metrics.usesGenericWorkflow
+                    ? (metrics.workUnitCount == 1 ? "workflow cycle" : "workflow cycles")
+                    : (metrics.workUnitCount == 1 ? "review cycle" : "review cycles"),
                 symbol: "square.stack.3d.up"
             )
             OverviewMetricCard(
@@ -214,15 +218,15 @@ struct WorkOverviewView: View {
                 Divider()
                     .gridCellColumns(4)
 
-                ForEach(metrics.phases) { phase in
+                ForEach(Array(metrics.phases.enumerated()), id: \.element.id) { index, phase in
                     GridRow {
-                        Label(phase.kind.displayName, systemImage: phaseSymbol(phase.kind))
+                        Label(phase.name, systemImage: phaseSymbol(phase))
                             .frame(minWidth: 105, alignment: .leading)
                         ProgressView(
                             value: Double(phase.durationMilliseconds),
                             total: Double(max(metrics.totalRunMilliseconds, 1))
                         )
-                        .tint(phaseColor(phase.kind))
+                        .tint(phaseColor(phase, index: index))
                         .frame(minWidth: 90, maxWidth: .infinity)
                         Text(
                             phase.runCount == 0
@@ -266,15 +270,15 @@ struct WorkOverviewView: View {
                     Divider()
                         .gridCellColumns(5)
 
-                    ForEach(metrics.phases) { phase in
+                    ForEach(Array(metrics.phases.enumerated()), id: \.element.id) { index, phase in
                         GridRow {
-                            Label(phase.kind.displayName, systemImage: phaseSymbol(phase.kind))
+                            Label(phase.name, systemImage: phaseSymbol(phase))
                                 .frame(minWidth: 90, alignment: .leading)
                             ProgressView(
                                 value: Double(phase.tokenUsage?.totalTokens ?? 0),
                                 total: Double(max(metrics.totalTokenUsage?.totalTokens ?? 0, 1))
                             )
-                            .tint(phaseColor(phase.kind))
+                            .tint(phaseColor(phase, index: index))
                             .frame(minWidth: 70, maxWidth: .infinity)
                             tokenCell(
                                 phase.tokenUsage?.inputTokens,
@@ -338,6 +342,13 @@ struct WorkOverviewView: View {
             spacing: 12
         ) {
             OverviewInfoCard(title: "Activity", symbol: "calendar") {
+                if let workflow = activity.workflow {
+                    OverviewInfoRow(title: "Workflow", value: workflow.name)
+                    OverviewInfoRow(
+                        title: "Topology",
+                        value: workflowTopology(workflow)
+                    )
+                }
                 OverviewInfoRow(
                     title: "Started",
                     value: WorkOverviewFormatting.date(activity.createdAt)
@@ -359,14 +370,24 @@ struct WorkOverviewView: View {
             }
 
             OverviewInfoCard(title: "Sessions", symbol: "person.2") {
-                OverviewInfoRow(
-                    title: "Implementer",
-                    value: record.implementerThreadID == nil ? "Not created" : "Ready"
-                )
-                OverviewInfoRow(
-                    title: "Reviewer",
-                    value: record.reviewerThreadID == nil ? "Not created" : "Ready"
-                )
+                if let workflow = activity.workflow {
+                    ForEach(workflow.steps) { step in
+                        let session = activity.stepSessions[step.id]
+                        OverviewInfoRow(
+                            title: step.name,
+                            value: sessionDescription(session)
+                        )
+                    }
+                } else {
+                    OverviewInfoRow(
+                        title: "Implementer",
+                        value: record.implementerThreadID == nil ? "Not created" : "Ready"
+                    )
+                    OverviewInfoRow(
+                        title: "Reviewer",
+                        value: record.reviewerThreadID == nil ? "Not created" : "Ready"
+                    )
+                }
                 OverviewInfoRow(
                     title: "Repository added",
                     value: WorkOverviewFormatting.date(record.createdAt)
@@ -374,28 +395,70 @@ struct WorkOverviewView: View {
             }
 
             OverviewInfoCard(title: "Models", symbol: "cpu") {
-                OverviewInfoRow(
-                    title: "Implement",
-                    value: modelDescription(record.settings.implementer)
-                )
-                OverviewInfoRow(
-                    title: "Review",
-                    value: modelDescription(record.settings.reviewer)
-                )
-                OverviewInfoRow(
-                    title: "Fix",
-                    value: modelDescription(record.settings.fixer)
-                )
-                OverviewInfoRow(
-                    title: "Handoff",
-                    value: modelDescription(record.settings.relay.selection)
-                )
+                if let workflow = activity.workflow {
+                    ForEach(workflow.steps) { step in
+                        OverviewInfoRow(
+                            title: step.name,
+                            value: targetDescription(step.target)
+                        )
+                    }
+                    OverviewInfoRow(
+                        title: "Coordinator",
+                        value: targetDescription(workflow.coordinator.target)
+                    )
+                } else {
+                    OverviewInfoRow(
+                        title: "Implement",
+                        value: modelDescription(record.settings.implementer)
+                    )
+                    OverviewInfoRow(
+                        title: "Review",
+                        value: modelDescription(record.settings.reviewer)
+                    )
+                    OverviewInfoRow(
+                        title: "Fix",
+                        value: modelDescription(record.settings.fixer)
+                    )
+                    OverviewInfoRow(
+                        title: "Handoff",
+                        value: modelDescription(record.settings.relay.selection)
+                    )
+                }
             }
         }
     }
 
     private func modelDescription(_ selection: ModelSelection) -> String {
         "\(selection.model) · \(selection.effort)"
+    }
+
+    private func targetDescription(_ target: AgentTarget) -> String {
+        var values = [
+            target.providerID.rawValue.capitalized,
+            target.model
+        ]
+        if let effort = target.options.effort, !effort.isEmpty {
+            values.append(effort)
+        }
+        values.append(target.options.mode.displayName)
+        if target.options.speed == .fast {
+            values.append("Fast")
+        }
+        return values.joined(separator: " · ")
+    }
+
+    private func workflowTopology(_ workflow: WorkflowTemplate) -> String {
+        WorkflowSection.allCases.compactMap { section in
+            let count = workflow.steps(in: section).count
+            guard count > 0 else { return nil }
+            return "\(section.displayName): \(count)"
+        }.joined(separator: " · ")
+    }
+
+    private func sessionDescription(_ session: WorkflowSessionState?) -> String {
+        guard let session else { return "Not created" }
+        let readiness = session.providerSessionID == nil ? "Pending" : "Ready"
+        return session.lineage == 1 ? readiness : "\(readiness) · lineage \(session.lineage)"
     }
 
     private func statusSymbol(_ status: ActivityStatus) -> String {
@@ -418,33 +481,46 @@ struct WorkOverviewView: View {
         }
     }
 
-    private func phaseSymbol(_ kind: RunKind) -> String {
-        switch kind {
-        case .implementation: "hammer"
-        case .review: "checklist"
-        case .fix: "wrench.and.screwdriver"
+    private func phaseSymbol(_ phase: WorkOverviewMetrics.Phase) -> String {
+        if let kind = phase.kind {
+            return switch kind {
+            case .implementation: "hammer"
+            case .review: "checklist"
+            case .fix: "wrench.and.screwdriver"
+            }
+        }
+        return switch phase.section {
+        case .some(.prefix): "arrow.right.to.line"
+        case .some(.loop): "repeat"
+        case .some(.postfix): "checkmark.seal"
+        case nil: "terminal"
         }
     }
 
-    private func phaseColor(_ kind: RunKind) -> Color {
-        switch kind {
-        case .implementation: .blue
-        case .review: .purple
-        case .fix: .orange
+    private func phaseColor(_ phase: WorkOverviewMetrics.Phase, index: Int) -> Color {
+        if let kind = phase.kind {
+            return switch kind {
+            case .implementation: .blue
+            case .review: .purple
+            case .fix: .orange
+            }
         }
+        let colors: [Color] = [.blue, .purple, .orange, .teal, .indigo, .pink]
+        return colors[index % colors.count]
     }
 }
 
 struct WorkOverviewMetrics: Equatable {
     struct Phase: Equatable, Identifiable {
-        let kind: RunKind
+        let id: String
+        let name: String
+        let kind: RunKind?
+        let section: WorkflowSection?
         let runCount: Int
         let completedRunCount: Int
         let durationMilliseconds: Int64
         let tokenRunCount: Int
         let tokenUsage: RunTokenUsage?
-
-        var id: RunKind { kind }
     }
 
     let phases: [Phase]
@@ -457,35 +533,45 @@ struct WorkOverviewMetrics: Equatable {
     let isFinished: Bool
     let recordedTokenRunCount: Int
     let totalTokenUsage: RunTokenUsage?
+    let usesGenericWorkflow: Bool
 
     init(
         activity: ActivityRecord,
         repositoryUpdatedAt: Date,
         now: Date
     ) {
-        phases = [
-            RunKind.implementation,
-            RunKind.review,
-            RunKind.fix
-        ].map { kind in
-            let runs = activity.runs.filter { $0.kind == kind }
-            let recordedUsage = runs.compactMap(\.tokenUsage)
-            return Phase(
-                kind: kind,
-                runCount: runs.count,
-                completedRunCount: runs.count(where: { $0.status == .completed }),
-                durationMilliseconds: runs.reduce(0) {
-                    $0 + Self.measuredDuration(for: $1, now: now)
-                },
-                tokenRunCount: recordedUsage.count,
-                tokenUsage: recordedUsage.isEmpty
-                    ? nil
-                    : recordedUsage.reduce(.zero) { $0.adding($1) }
-            )
+        if let workflow = activity.workflow {
+            phases = workflow.steps.map { step in
+                Self.phase(
+                    id: step.id,
+                    name: step.name,
+                    kind: nil,
+                    section: step.section,
+                    runs: activity.runs.filter { $0.workflowStep?.id == step.id },
+                    now: now
+                )
+            }
+            usesGenericWorkflow = true
+        } else {
+            phases = [
+                RunKind.implementation,
+                RunKind.review,
+                RunKind.fix
+            ].map { kind in
+                Self.phase(
+                    id: kind.rawValue,
+                    name: kind.displayName,
+                    kind: kind,
+                    section: nil,
+                    runs: activity.runs.filter { $0.kind == kind },
+                    now: now
+                )
+            }
+            usesGenericWorkflow = false
         }
         totalRunCount = activity.runs.count
         completedRunCount = activity.runs.count(where: { $0.status == .completed })
-        workUnitCount = RunGroupingPolicy.workUnits(for: activity.runs).count
+        workUnitCount = RunGroupingPolicy.loopIterationCount(for: activity.runs)
         totalRunMilliseconds = phases.reduce(0) { $0 + $1.durationMilliseconds }
         let endDate = activity.completedAt ?? now
         elapsedMilliseconds = Self.milliseconds(from: activity.createdAt, to: endDate)
@@ -496,6 +582,32 @@ struct WorkOverviewMetrics: Equatable {
         totalTokenUsage = recordedUsage.isEmpty
             ? nil
             : recordedUsage.reduce(.zero) { $0.adding($1) }
+    }
+
+    private static func phase(
+        id: String,
+        name: String,
+        kind: RunKind?,
+        section: WorkflowSection?,
+        runs: [RunRecord],
+        now: Date
+    ) -> Phase {
+        let recordedUsage = runs.compactMap(\.tokenUsage)
+        return Phase(
+            id: id,
+            name: name,
+            kind: kind,
+            section: section,
+            runCount: runs.count,
+            completedRunCount: runs.count(where: { $0.status == .completed }),
+            durationMilliseconds: runs.reduce(0) {
+                $0 + measuredDuration(for: $1, now: now)
+            },
+            tokenRunCount: recordedUsage.count,
+            tokenUsage: recordedUsage.isEmpty
+                ? nil
+                : recordedUsage.reduce(.zero) { $0.adding($1) }
+        )
     }
 
     private static func measuredDuration(for run: RunRecord, now: Date) -> Int64 {

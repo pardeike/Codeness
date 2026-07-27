@@ -8,6 +8,7 @@ struct RepositorySettingsSheet: View {
     @Environment(CodenessApplicationModel.self) private var application
     @Environment(\.dismiss) private var dismiss
     @State private var settings: RepositorySettings
+    @State private var workflow: WorkflowTemplate?
     @State private var isTestingHandoff = false
     @State private var handoffTestMessage: String?
     @State private var handoffTestSucceeded = false
@@ -15,87 +16,16 @@ struct RepositorySettingsSheet: View {
     init(coordinator: RepositoryCoordinator) {
         self.coordinator = coordinator
         _settings = State(initialValue: coordinator.record.settings)
+        _workflow = State(initialValue: coordinator.record.activity?.workflow)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section("Models") {
-                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
-                        ModelSelectionGridHeader()
-
-                        ModelSelectionGridRow(
-                            title: "Implement",
-                            selection: $settings.implementer,
-                            models: application.models
-                        )
-                        ModelSelectionGridRow(
-                            title: "Review",
-                            selection: $settings.reviewer,
-                            models: application.models
-                        )
-                        ModelSelectionGridRow(
-                            title: "Fix",
-                            selection: $settings.fixer,
-                            models: application.models
-                        )
-                        ModelSelectionGridRow(
-                            title: "Handoff",
-                            selection: $settings.relay.selection,
-                            models: application.models
-                        )
-                    }
-                }
-
-                Section("Handoff") {
-                    LabeledContent("Credentials file") {
-                        FilePathField(
-                            path: $settings.relay.apiKeyFile,
-                            placeholder: "Choose a JSON credentials file",
-                            panelTitle: "Choose the API-key JSON File",
-                            prompt: "Choose"
-                        )
-                        .help("Choose or drop the JSON file containing the handoff API key; the advanced path menu also supports manual entry")
-                    }
-                    LabeledContent("Key in file") {
-                        Picker("Key in file", selection: $settings.relay.apiKeyName) {
-                            ForEach(availableAPIKeyNames, id: \.self) { keyName in
-                                Text(keyName).tag(keyName)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .help("Choose the JSON property whose value is the handoff API key")
-                    }
-                    HStack(spacing: 10) {
-                        Button("Test Handoff") {
-                            Task { await testHandoffConfiguration() }
-                        }
-                        .disabled(isTestingHandoff)
-                        .help("Verify the API-key file, JSON property, credentials, and selected handoff model")
-                        if isTestingHandoff {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else if let handoffTestMessage {
-                            Label(
-                                handoffTestMessage,
-                                systemImage: handoffTestSucceeded
-                                    ? "checkmark.circle.fill"
-                                    : "exclamationmark.triangle.fill"
-                            )
-                            .foregroundStyle(handoffTestSucceeded ? .green : .red)
-                            .font(.caption)
-                            .textSelection(.enabled)
-                        }
-                    }
-                    Text("The key is read at relay-call time and is never stored by Codeness.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
+            if workflow != nil {
+                genericWorkflowSettings
+            } else {
+                legacyRepositorySettings
             }
-            .formStyle(.grouped)
 
             Divider()
             HStack {
@@ -104,22 +34,166 @@ struct RepositorySettingsSheet: View {
                     .help("Discard repository-setting changes and close this sheet")
                 Button("Save") {
                     Task {
-                        if await coordinator.updateSettings(settings) {
+                        if await save() {
                             dismiss()
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .help("Save these model, reasoning, and handoff settings for this repository")
-                .disabled(settings == coordinator.record.settings)
+                .help(saveHelp)
+                .disabled(!canSave)
             }
             .padding(14)
         }
-        .frame(width: 840, height: 640)
+        .frame(width: workflow == nil ? 840 : 920, height: workflow == nil ? 640 : 760)
         .onChange(of: settings.relay) {
             handoffTestMessage = nil
             handoffTestSucceeded = false
         }
+    }
+
+    private var legacyRepositorySettings: some View {
+        Form {
+            Section("Models") {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
+                    ModelSelectionGridHeader()
+
+                    ModelSelectionGridRow(
+                        title: "Implement",
+                        selection: $settings.implementer,
+                        models: application.models
+                    )
+                    ModelSelectionGridRow(
+                        title: "Review",
+                        selection: $settings.reviewer,
+                        models: application.models
+                    )
+                    ModelSelectionGridRow(
+                        title: "Fix",
+                        selection: $settings.fixer,
+                        models: application.models
+                    )
+                    ModelSelectionGridRow(
+                        title: "Handoff",
+                        selection: $settings.relay.selection,
+                        models: application.models
+                    )
+                }
+            }
+
+            Section("Handoff") {
+                LabeledContent("Credentials file") {
+                    FilePathField(
+                        path: $settings.relay.apiKeyFile,
+                        placeholder: "Choose a JSON credentials file",
+                        panelTitle: "Choose the API-key JSON File",
+                        prompt: "Choose"
+                    )
+                    .help("Choose or drop the JSON file containing the handoff API key; the advanced path menu also supports manual entry")
+                }
+                LabeledContent("Key in file") {
+                    Picker("Key in file", selection: $settings.relay.apiKeyName) {
+                        ForEach(availableAPIKeyNames, id: \.self) { keyName in
+                            Text(keyName).tag(keyName)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help("Choose the JSON property whose value is the handoff API key")
+                }
+                HStack(spacing: 10) {
+                    Button("Test Handoff") {
+                        Task { await testHandoffConfiguration() }
+                    }
+                    .disabled(isTestingHandoff)
+                    .help("Verify the API-key file, JSON property, credentials, and selected handoff model")
+                    if isTestingHandoff {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else if let handoffTestMessage {
+                        Label(
+                            handoffTestMessage,
+                            systemImage: handoffTestSucceeded
+                                ? "checkmark.circle.fill"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(handoffTestSucceeded ? .green : .red)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                    }
+                }
+                Text("The key is read at relay-call time and is never stored by Codeness.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var genericWorkflowSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let workflow {
+                    Text(workflow.name)
+                        .font(.title2.weight(.semibold))
+                    Text(
+                        "The workflow definition is frozen for this activity. While paused, you can change each step's provider, model, effort, mode, and speed; provider, model, or mode changes start a new session lineage."
+                    )
+                    .foregroundStyle(.secondary)
+                    if coordinator.record.activity?.status != .paused {
+                        Label(
+                            "Pause the activity before changing its agent targets.",
+                            systemImage: "pause.circle"
+                        )
+                        .foregroundStyle(.orange)
+                    }
+                    WorkflowTemplateFields(
+                        workflow: workflowBinding,
+                        allowsDefinitionEditing: false
+                    )
+                    .disabled(coordinator.record.activity?.status != .paused)
+                    if let message = workflow.validationMessage {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .padding(24)
+        }
+    }
+
+    private var workflowBinding: Binding<WorkflowTemplate> {
+        Binding(
+            get: {
+                workflow ?? coordinator.record.activity?.workflow
+                    ?? application.workflowCatalog.defaultTemplate!
+            },
+            set: { workflow = $0 }
+        )
+    }
+
+    private var canSave: Bool {
+        if let workflow {
+            return coordinator.record.activity?.status == .paused
+                && workflow.validationMessage == nil
+                && application.workflowCompatibilityMessage(workflow) == nil
+                && workflow != coordinator.record.activity?.workflow
+        }
+        return settings != coordinator.record.settings
+    }
+
+    private var saveHelp: String {
+        workflow == nil
+            ? "Save these model, reasoning, and handoff settings for this repository"
+            : "Save provider, model, effort, mode, and speed for future workflow steps"
+    }
+
+    private func save() async -> Bool {
+        if let workflow {
+            return await coordinator.updateWorkflowTargets(workflow)
+        }
+        return await coordinator.updateSettings(settings)
     }
 
     private func testHandoffConfiguration() async {

@@ -117,7 +117,7 @@ struct RunDetailView: View {
                     .background(.quaternary, in: Capsule())
                     .fixedSize()
             }
-            Text("\(run.kind.displayName) · \(run.effort.capitalized) reasoning\(durationText)")
+            Text(runConfigurationText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -135,6 +135,13 @@ struct RunDetailView: View {
                     Label("Copy Handoff", systemImage: "arrow.left.arrow.right")
                 }
                 .help("Copy the filtered context passed to the next workflow phase")
+            } else if let handoff = run.workflowHandoff {
+                Button {
+                    copy(handoff.text)
+                } label: {
+                    Label("Copy Handoff", systemImage: "arrow.left.arrow.right")
+                }
+                .help("Copy the filtered context passed to the next workflow step")
             }
         }
     }
@@ -150,6 +157,10 @@ struct RunDetailView: View {
             if let handoff = run.handoff {
                 Button("Copy Handoff") {
                     copy(handoff.handoffText)
+                }
+            } else if let handoff = run.workflowHandoff {
+                Button("Copy Handoff") {
+                    copy(handoff.text)
                 }
             }
         } label: {
@@ -216,6 +227,24 @@ struct RunDetailView: View {
         return " · \(seconds)s"
     }
 
+    private var runConfigurationText: String {
+        guard let target = run.agentTarget else {
+            return "\(run.kind.displayName) · \(run.effort.capitalized) reasoning\(durationText)"
+        }
+        var values = [
+            target.providerID.rawValue.capitalized,
+            target.model
+        ]
+        if let effort = target.options.effort, !effort.isEmpty {
+            values.append("\(effort.capitalized) effort")
+        }
+        values.append(target.options.mode.displayName)
+        if target.options.speed == .fast {
+            values.append("Fast")
+        }
+        return values.joined(separator: " · ") + durationText
+    }
+
     private func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -277,6 +306,7 @@ private struct RelayRecoveryView: View {
 
     @State private var handoffText: String
     @State private var disposition: SourceDisposition
+    @State private var workflowOutcome: WorkflowOutcome
     @State private var label = "Unfiltered handoff"
 
     init(coordinator: RepositoryCoordinator, run: RunRecord, error: String) {
@@ -285,6 +315,7 @@ private struct RelayRecoveryView: View {
         self.error = error
         _handoffText = State(initialValue: run.finalOutput ?? "")
         _disposition = State(initialValue: Self.defaultDisposition(for: run.kind))
+        _workflowOutcome = State(initialValue: .continueWorkflow)
     }
 
     var body: some View {
@@ -304,12 +335,21 @@ private struct RelayRecoveryView: View {
                 .help("Retry filtering and routing this run's final result through the handoff model")
             }
             HStack {
-                Picker("Source state", selection: $disposition) {
-                    ForEach(validDispositions, id: \.self) { value in
-                        Text(value.displayName).tag(value)
+                if run.workflowStep != nil {
+                    Picker("Outcome", selection: $workflowOutcome) {
+                        ForEach(WorkflowOutcome.allCases, id: \.self) { value in
+                            Text(value.displayName).tag(value)
+                        }
                     }
+                    .help("Choose whether the configured workflow should continue, finish, or pause")
+                } else {
+                    Picker("Source state", selection: $disposition) {
+                        ForEach(validDispositions, id: \.self) { value in
+                            Text(value.displayName).tag(value)
+                        }
+                    }
+                    .help("Choose how the preceding run ended so Codeness can select the next phase")
                 }
-                .help("Choose how the preceding run ended so Codeness can select the next phase")
                 TextField("Run label", text: $label)
                     .help("Enter the short label shown for this run in the sidebar")
             }
@@ -322,11 +362,19 @@ private struct RelayRecoveryView: View {
                 Spacer()
                 Button("Use This Handoff") {
                     Task {
-                        await coordinator.useHandoff(
-                            text: handoffText,
-                            disposition: disposition,
-                            label: label
-                        )
+                        if run.workflowStep != nil {
+                            await coordinator.useWorkflowHandoff(
+                                text: handoffText,
+                                outcome: workflowOutcome,
+                                label: label
+                            )
+                        } else {
+                            await coordinator.useHandoff(
+                                text: handoffText,
+                                disposition: disposition,
+                                label: label
+                            )
+                        }
                     }
                 }
                 .buttonStyle(.borderedProminent)

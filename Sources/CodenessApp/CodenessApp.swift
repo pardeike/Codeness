@@ -17,6 +17,7 @@ struct CodenessApp: App {
 
         Settings {
             ApplicationSettingsView(application: appDelegate.applicationModel)
+                .environment(appDelegate.applicationModel)
         }
     }
 }

@@ -27,6 +27,35 @@ public protocol RepositoryWorkspaceStoring: Sendable {
     ) async throws -> RunTokenUsage?
 }
 
+public extension RepositoryWorkspaceStoring {
+    func appendTokenUsage(
+        _ usage: RunTokenUsage,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        let value = JSONValue.object([
+            "method": .string("codeness/agentTokenUsage/updated"),
+            "params": .object([
+                "tokenUsage": .object([
+                    "totalTokens": .integer(usage.totalTokens),
+                    "inputTokens": .integer(usage.inputTokens),
+                    "cachedInputTokens": .integer(usage.cachedInputTokens),
+                    "cacheWriteInputTokens": .integer(usage.cacheWriteInputTokens),
+                    "outputTokens": .integer(usage.outputTokens),
+                    "reasoningOutputTokens": .integer(usage.reasoningOutputTokens)
+                ])
+            ])
+        ])
+        try await appendRawLine(
+            value.encodedString(),
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+}
+
 public actor WorkspaceStore: RepositoryWorkspaceStoring {
     private let rootURL: URL
     private let encoder: JSONEncoder
@@ -161,14 +190,24 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
 
         var baseline: RunTokenUsage?
         var latestTotal: RunTokenUsage?
+        var latestAgentUsage: RunTokenUsage?
         let contents = String(decoding: try Data(contentsOf: url), as: UTF8.self)
         for line in contents.split(whereSeparator: \.isNewline) {
             guard line.contains("tokenUsage"),
                   let event = try? decoder.decode(
                     JSONValue.self,
                     from: Data(line.utf8)
-                  ),
-                  event["method"]?.stringValue == "thread/tokenUsage/updated",
+                  ) else {
+                continue
+            }
+            if event["method"]?.stringValue == "codeness/agentTokenUsage/updated",
+               let usage = RunTokenUsage(
+                appServerValue: event["params"]?["tokenUsage"]
+               ) {
+                latestAgentUsage = usage
+                continue
+            }
+            guard event["method"]?.stringValue == "thread/tokenUsage/updated",
                   let usage = event["params"]?["tokenUsage"],
                   let total = RunTokenUsage(appServerValue: usage["total"]),
                   let last = RunTokenUsage(appServerValue: usage["last"]) else {
@@ -180,6 +219,9 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
             latestTotal = total
         }
 
+        if let latestAgentUsage {
+            return latestAgentUsage
+        }
         guard let baseline, let latestTotal else { return nil }
         return latestTotal.subtracting(baseline)
     }

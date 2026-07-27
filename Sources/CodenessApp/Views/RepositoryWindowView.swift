@@ -98,7 +98,7 @@ struct RepositoryWindowView: View {
             .help("Archive the current Codeness activity and return to editable configuration")
         } message: {
             Text(
-                "Codeness will archive the current activity under Application Support, copy its Goal and prompts into editable fields, and discard the old session IDs. Repository files and per-repository model settings will not be changed."
+                "Codeness will archive the current activity under Application Support, copy its goal and workflow into editable fields, and discard its old agent sessions. Repository files will not be changed."
             )
         }
         .onChange(of: commandState.steerFocusRequest) {
@@ -121,12 +121,20 @@ struct RepositoryWindowView: View {
     @ViewBuilder
     private var detailContent: some View {
         if coordinator.activity == nil {
-            ActivityConfigurationView(
-                coordinator: coordinator,
-                suggestedGoal: coordinator.record.activityDraft?.goal ?? "",
-                suggestedPrompts: coordinator.record.activityDraft?.prompts
-                    ?? application.promptDefaults
-            )
+            if let workflow = coordinator.record.activityDraft?.workflow
+                ?? application.workflowCatalog.defaultTemplate {
+                ActivityConfigurationView(
+                    coordinator: coordinator,
+                    suggestedGoal: coordinator.record.activityDraft?.goal ?? "",
+                    suggestedWorkflow: workflow
+                )
+            } else {
+                ContentUnavailableView(
+                    "Workflow Library Unavailable",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text("Restore the bundled workflow resources, then reopen this repository.")
+                )
+            }
         } else if let run = coordinator.selectedRun {
             RunDetailView(coordinator: coordinator, run: run)
                 .id(run.id)
@@ -155,7 +163,7 @@ struct RepositoryWindowView: View {
                 .onSubmit {
                     Task { await sendSteerMessage() }
                 }
-                .help("Send additional guidance to the currently running Codex turn")
+                .help("Send additional guidance to the currently running agent turn")
             Button {
                 Task { await sendSteerMessage() }
             } label: {
@@ -186,7 +194,7 @@ struct RepositoryWindowView: View {
                                 )
                                 .tag(run.id)
                                 .help(
-                                    "Show \(run.handoff?.runLabel ?? run.kind.displayName) "
+                                    "Show \(run.displayName) "
                                         + "(\(run.status.rawValue)) transcript"
                                 )
                             }
@@ -237,9 +245,9 @@ struct RepositoryWindowView: View {
                 .contentShape(Rectangle())
                 .accessibilityLabel("Interrupt Active Turn")
                 .accessibilityHint(
-                    "Interrupt the active Codex turn and preserve a resumable checkpoint"
+                    "Interrupt the active agent turn and preserve a resumable checkpoint"
                 )
-                .help("Interrupt the active Codex turn and preserve a resumable checkpoint")
+                .help("Interrupt the active agent turn and preserve a resumable checkpoint")
             }
             Spacer()
         }
@@ -279,7 +287,7 @@ struct RepositoryWindowView: View {
             } label: {
                 Label("Repository Settings", systemImage: "gearshape")
             }
-            .help("Configure models, reasoning effort, and handoff credentials for this repository")
+            .help("Configure provider, model, effort, mode, and speed for future steps")
         }
     }
 
@@ -292,8 +300,11 @@ struct RepositoryWindowView: View {
             Text(coordinator.statusMessage)
                 .help("Workflow status: \(coordinator.statusMessage)")
             Spacer()
-            Text(application.serverState.label)
-                .help("Codex App Server status: \(application.serverState.label)")
+            Text("Codex: \(application.serverState.label)")
+                .help("Codex status: \(application.serverState.label)")
+            Text("·")
+            Text("Claude: \(application.claudeState.label)")
+                .help("Claude status: \(application.claudeState.label)")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -362,7 +373,7 @@ private struct RunGroupHeader: View {
     let group: RunWorkUnit
 
     var body: some View {
-        Text("Work Unit \(group.number)")
+        Text(group.title)
     }
 }
 
@@ -377,7 +388,7 @@ private struct RunRow: View {
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(run.handoff?.runLabel ?? run.kind.displayName)
+                    Text(run.displayName)
                         .lineLimit(1)
                     Spacer()
                     if isActive {
@@ -388,7 +399,9 @@ private struct RunRow: View {
                     }
                 }
                 HStack(spacing: 5) {
-                    Text(run.kind.displayName)
+                    Text(run.agentTarget.map {
+                        "\($0.providerID.rawValue.capitalized) · \($0.model)"
+                    } ?? run.kind.displayName)
                     Text("·")
                     Text(run.status.rawValue.capitalized)
                 }
