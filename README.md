@@ -1,19 +1,170 @@
-# Codeness
+<div align="center">
+  <img src="Sources/CodenessApp/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" width="112" height="112" alt="Codeness app icon">
+  <h1>Codeness</h1>
+  <p><strong>Supervise repeatable Codex and Claude workflows from one native macOS window.</strong></p>
+  <p>Give Codeness a goal, choose a workflow, and let specialized agent sessions implement, review, and refine the work until the whole goal is complete.</p>
+</div>
 
-Codeness is a native macOS supervisor for configurable coding-agent workflows in a Git repository window. Every step can independently use Codex or Claude, choose that provider’s model and reasoning effort, run in native read-only Plan mode, and request the provider’s Fast mode. A configured coordinator prepares conservative handoffs and decides when a repeating workflow has satisfied its full goal.
+![A completed Implement, Review, and Fix workflow in Codeness](Documentation/codeness-workflow.png)
 
-## Requirements
+Codeness is a workflow supervisor—not another coding agent. It coordinates your locally installed Codex and Claude Code CLIs inside the repository folder you choose, keeps each step's session alive across cycles, and gives you one place to follow, pause, steer, and resume the work.
+
+## Why Codeness?
+
+- **Use the right agent for each step.** Mix Codex and Claude, models, reasoning effort, native read-only Plan mode, and Fast mode within one workflow.
+- **Build review into the process.** Run an implementation/review/fix loop until a coordinator determines that the complete goal—not merely the latest task—is finished.
+- **Keep the work observable.** Inspect reasoning, actions, diagnostics, final answers, handoffs, timing, and token usage for every run.
+- **Pause without losing the thread.** Persistent step sessions, saved checkpoints, and crash recovery make long-running work practical.
+- **Stay in control of the repository.** Codeness does not create worktrees, stash, commit, reset, or add orchestration files to your project.
+
+## How it works
+
+A workflow has up to three ordered sections:
+
+```text
+Before loop (once)     Repeating loop                         After completion (once)
+┌───────────────┐      ┌───────────────────────────────┐      ┌───────────────────────┐
+│ Plan          │ ───▶ │ Implement → Review → Fix  ↻   │ ───▶ │ Finalize, report, …   │
+└───────────────┘      └───────────────────────────────┘      └───────────────────────┘
+```
+
+After every step, a configurable coordinator creates a conservative handoff for the next agent. At the end of a repeating cycle, it decides whether the full goal is complete, another cycle is needed, or the workflow should pause for your input.
+
+Codeness includes three ready-to-use workflows:
+
+| Workflow | Shape | Good for |
+| --- | --- | --- |
+| **Implement / Review / Fix** | Implement → Review → Fix ↻ | Careful, iterative development with a dedicated correction pass |
+| **Code / Review** | Code → Review ↻ | A leaner alternation between implementation and read-only inspection |
+| **Plan + Implement / Review / Fix** | Plan → (Implement → Review → Fix) ↻ | Larger work that benefits from a read-only planning pass first |
+
+Every bundled workflow can be edited, duplicated, or used as the starting point for a custom workflow.
+
+## Get started
+
+### Requirements
+
+To run Codeness:
 
 - macOS 15 or newer on Apple silicon
-- Xcode 27
-- XcodeGen
-- At least one of:
-  - `codex` CLI 0.145.0 or later, with App Server support
-  - Claude Code CLI 2.1.220 or later
+- At least one supported, authenticated agent CLI:
+  - `codex` 0.145.0 or newer, with App Server support
+  - Claude Code 2.1.220 or newer
 
-OpenAI API credentials are not required for new configurable workflows. They remain supported only so activities created by older Codeness versions can resume their legacy relay.
+To build Codeness from source, you also need Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer.
 
-## Build
+Codeness uses the existing authentication of each CLI. New configurable workflows do not require separate OpenAI API credentials.
+
+### Build and install
+
+```sh
+git clone https://github.com/pardeike/Codeness.git
+cd Codeness
+./scripts/build-quiet.sh
+open /Applications/Codeness.app
+```
+
+The build script generates the Xcode project, creates and verifies a signed Release build, and installs it at `/Applications/Codeness.app`. The generated `.xcodeproj` is intentionally ignored; project settings live in `project.yml`.
+
+### Run your first workflow
+
+1. Open Codeness and choose the repository folder in which the agents should work.
+2. Describe the complete outcome in **Goal**. You can also point to a specification file or folder.
+3. Pick a bundled workflow.
+4. Optionally expand **Customize This Workflow** to change steps, providers, models, modes, effort, or speed.
+5. Select **Start** and follow the runs in the sidebar.
+
+The folder you select is used exactly as chosen—it is not silently replaced by a parent Git root. This makes it possible to open different subfolders of the same working tree as independent Codeness workspaces.
+
+## During a run
+
+Each workflow step owns a persistent provider session. When the step repeats, its existing lineage resumes with the context it has already accumulated.
+
+- The sidebar groups runs by **Before Loop**, cycle, and **After Completion**.
+- Each run exposes a reasoning-first transcript with independently hideable reasoning, actions, and diagnostics.
+- The final answer appears in a separate pane and is the source passed to the coordinator.
+- **Pause After Current** stops cleanly after the current handoff.
+- You can steer or interrupt an active turn, then resume from the saved checkpoint.
+- While paused, you can adjust the provider, model, effort, mode, and speed of future steps.
+- Approval and input requests from both providers appear in the same native interaction sheet.
+
+Changing only effort or speed preserves a step's session lineage. Changing its provider, model, or mode starts a new lineage so incompatible context is never silently resumed.
+
+## Customize workflows
+
+Open **Codeness → Settings** to manage the reusable workflow library and agent executable paths. Automatic CLI discovery is used when an executable path is empty; a configured path is authoritative after Codeness verifies it and restarts that provider.
+
+Every step and coordinator target can independently configure:
+
+| Setting | Options |
+| --- | --- |
+| Provider | Codex or Claude |
+| Model | A discovered model or an explicit model identifier |
+| Effort | Any effort level supported by that model |
+| Mode | Standard or native read-only Plan mode |
+| Speed | Standard or provider-supported Fast mode |
+
+Codex models and service tiers come from the running App Server's model catalog. Claude aliases, resolved models, effort levels, and Fast eligibility are discovered through Claude Code's initialization handshake.
+
+## Repository and data boundaries
+
+Codeness itself does not create worktrees, stash changes, commit, reset, or write orchestration files into the selected repository. Agent steps can, of course, edit the repository when their configured mode and instructions allow it.
+
+Workflow state, transcripts, recovery logs, and window state are stored under:
+
+```text
+~/Library/Application Support/Codeness
+```
+
+App-wide preferences use the standard macOS preferences system. **File → Save** flushes Codeness metadata only; it never treats the repository as a document to replace or safe-save.
+
+## Recovery and lifecycle
+
+Codeness continuously saves enough state to recover long-running activities:
+
+- Closing a window with active work first asks the provider to stop at the nearest coherent point.
+- **Interrupt Now** provides an eager stop when waiting is not appropriate.
+- A window closes only after the terminal turn state and resume checkpoint are saved.
+- Quitting applies the same process to all active repository windows and stops app-owned providers; work never continues invisibly in the background.
+- Reopened activities remain paused until you explicitly resume them.
+- **Start Over** archives the old activity, clears its agent sessions, and returns to an editable copy of the previous goal and workflow. Repository files remain untouched.
+
+Repository windows, sidebar geometry, selected runs, transcript reading positions, and follow-at-bottom state are restored between launches.
+
+<details>
+<summary><strong>Coordinator and handoff details</strong></summary>
+
+The coordinator can use either Codex or Claude with its own model, effort, mode, and speed. It receives the completed step's final answer together with the full goal and next-step context, then returns a structured result containing:
+
+- a conservatively filtered handoff;
+- the workflow outcome; and
+- a concrete label for the completed run.
+
+A completion result is honored only after the final repeating step. Coordination failures and Blocked, Failed, or Unclear outcomes pause the workflow so you can retry or provide an edited handoff.
+
+</details>
+
+<details>
+<summary><strong>Provider and transcript details</strong></summary>
+
+Codex communicates through its shared App Server. Claude uses its streaming JSON CLI protocol, including session resume, partial output, usage, approvals, questions, steering, and interruption.
+
+Successful tool chatter is suppressed by default while failures remain visible. Append-only transcripts and token-usage checkpoints are retained for crash recovery. Selecting an older run or scrolling away from the bottom disables automatic following until you return to the live transcript.
+
+Fast mode is resolved from current provider capabilities at run time. Codeness does not persist a hidden service-tier identifier or silently substitute a different model.
+
+</details>
+
+<details>
+<summary><strong>Compatibility with older activities</strong></summary>
+
+Activities created by older Codeness versions retain their original Implement / Review / Fix state machine, two Codex threads, and OpenAI Responses API relay configuration. That compatibility path exists only for recovery and is not used for new activities.
+
+</details>
+
+## Development
+
+Generate the project, build, and run the test suite:
 
 ```sh
 xcodegen generate
@@ -21,52 +172,10 @@ xcodebuild -project Codeness.xcodeproj -scheme Codeness -destination 'platform=m
 xcodebuild -project Codeness.xcodeproj -scheme Codeness -destination 'platform=macOS' test
 ```
 
-The canonical completion build is deliberately quiet and installs the verified Release bundle locally:
+Before considering a change complete, run the canonical Release build:
 
 ```sh
 ./scripts/build-quiet.sh
 ```
 
-It stages and verifies the signed product, replaces `/Applications/Codeness.app`, and verifies the installed bundle before reporting success.
-
-The generated Xcode project is intentionally ignored. Project settings live in `project.yml`.
-
-## Workflow
-
-On launch, Codeness restores the repository folders that were open when it quit. If there are none, it immediately presents the standard folder Open panel; cancelling leaves the app running without an otherwise-empty launcher window. File > Open Repository and Open Recent create and manage ordinary repository windows, and reopening an already-open folder focuses its existing window.
-
-The exact folder selected in the Open panel is the Codeness workspace and the working directory for every configured agent step. Selecting a nested folder does not silently replace it with the parent Git root. Different subfolders of one Git working tree can therefore be opened as independent Codeness windows with separate sessions and histories.
-
-Repository folders are never opened as `NSDocument` file URLs. Codeness owns ordinary `NSWindow` controllers plus its own Open Recent and restoration state, so AppKit's document autosave and safe-save machinery has no repository document it could write, replace, move, or delete. File > Save persists only Codeness metadata under Application Support.
-
-An unstarted repository window shows a multiline Goal and a reusable workflow. The Goal may describe work directly, point the agents at a specification file or folder, or combine both. Codeness supplies the complete text to every turn in a clearly delimited `THE GOAL` context block. The selected library workflow is copied into the activity, where its steps and targets can be customized without changing the reusable original.
-
-Application Settings owns independently optional Codex and Claude executable paths. Empty values enable automatic discovery. A non-empty value is authoritative and is applied only after the CLI has been verified and its provider has restarted successfully; active turns for that provider prevent a restart. Codex-only and Claude-only installations remain usable when the other CLI is absent.
-
-Workflows have three ordered sections:
-
-- **Before loop** steps run once. A read-only Plan step normally belongs here.
-- **Repeating loop** steps all run in order. Only after its final step does the coordinator decide whether the full goal is complete or another complete cycle is required.
-- **After completion** steps run once after the loop is declared complete.
-
-The bundled workflow library contains **Implement / Review / Fix**, **Code / Review**, and **Plan + Implement / Review / Fix** presets. Application Settings can edit or reset a bundled preset, duplicate it, or create and delete custom workflows. Each workflow stores its step names, instructions, topology, coordinator instructions, and all agent targets. A target consists of provider, arbitrary model identifier or known alias, optional effort, Standard or read-only Plan mode, and Standard or Fast speed.
-
-Each step owns a persistent provider session lineage. Its session is reused each time that step repeats. Changing effort or speed while an activity is paused keeps the lineage; changing provider, model, or mode starts a new lineage so incompatible context is never silently resumed. The workflow’s topology, names, and instructions are frozen after the activity starts. A paused or completed activity remains visible so every run transcript can be revisited. **Start Over** archives the activity under Application Support, clears its old agent sessions, and returns the same window to editable configuration with the previous Goal and workflow prefilled. Repository files are unchanged.
-
-The configured coordinator target can itself be Codex or Claude with its own model, effort, mode, and speed. It receives only a completed step’s final answer plus the full-goal and next-step context. It returns a strict structured envelope containing a conservatively filtered handoff, an explicit workflow outcome, and a concrete run label. Completion returned anywhere except the last repeating step is normalized to Continue. If coordination fails or reports Blocked, Failed, or Unclear, the workflow pauses and lets the user retry or supply an edited handoff.
-
-Codex runs through its shared App Server. Claude runs through its streaming JSON CLI protocol, including session resume, partial output, usage, approvals, questions, steering, and interruption. Plan mode uses each CLI’s native read-only behavior. Fast mode is resolved from provider capabilities at run time: Codeness does not persist a hidden service-tier identifier or silently substitute another model.
-
-Codex models and service tiers come from App Server’s live model catalog. Claude model aliases, resolved model names, supported effort levels, and Fast eligibility come from Claude’s initialize handshake. The bundled Claude entries are only a startup fallback if that read-only discovery handshake is unavailable.
-
-The sidebar groups runs as Before Loop, Cycle N, and After Completion; retries remain in their original cycle. Only run rows are selectable. The current live row carries a spinner. Selecting a run shows a reasoning-first semantic transcript. Reasoning, Actions, and Diagnostics can be shown or hidden independently; the recommended default hides successful action chatter while retaining failures. Once the exact final answer exists, it moves into a separate, independently scrollable lower pane—the source sent to the coordinator—so it remains readable while earlier reasoning is inspected. Successful tool output remains suppressed, while append-only transcripts and token-usage checkpoints are stored for crash recovery. When the selected live transcript is still at the bottom, Codeness follows automatically to the next run. Selecting an older run or scrolling upward disables that automatic switch until the live transcript’s bottom is restored.
-
-Closing a window with active work asks Codeness to steer the active provider toward the nearest coherent stopping point. A progress sheet lets you keep waiting or use **Interrupt Now**, the eager equivalent of Ctrl-C. The window closes only after the terminal turn state and a typed resume checkpoint have been saved. Quitting applies the same foreground-only process to all active repository windows and then stops all app-owned providers; nothing continues in the background. Reopened windows remain paused until Resume is explicitly selected. Codeness reconnects the saved step session, recovers an interrupted run without blindly replaying completed edits, retries only a pending handoff, or starts the already-known next step as appropriate.
-
-Each repository also restores its window frame, sidebar geometry and visibility, selected run, per-run transcript reading position, follow-at-bottom state, and Pause After Current setting. **File > Save** (`⌘S`) explicitly flushes this state, although normal changes are autosaved continuously.
-
-Activities saved by older Codeness versions retain their original Implement / Review / Fix state machine, two Codex threads, and OpenAI Responses API relay configuration. This compatibility path is preserved for recovery but is no longer used when creating an activity.
-
-The toolbar can pause after the current handoff, steer or interrupt a running turn, jump back to the live run without disturbing an older selected run, and—while paused—change provider, model, effort, mode, and speed for future steps. Codex and Claude approval and user-input requests are surfaced through the same repository interaction sheet and queued if more than one arrives before the first is answered or resolved.
-
-Codeness does not create worktrees, stash changes, commit, reset, or write its own files into the target repository. It stores orchestration metadata, open-window restoration, window and transcript view state, transcripts, and raw recovery logs under `~/Library/Application Support/Codeness`. App-wide preferences remain ordinary macOS preferences.
+It must finish by installing and verifying `/Applications/Codeness.app`.
