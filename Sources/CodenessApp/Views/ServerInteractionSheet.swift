@@ -36,13 +36,13 @@ struct ServerInteractionSheet: View {
                     Button("Cancel Turn Request") {
                         Task { await coordinator.cancelInteraction() }
                     }
-                    .help("Cancel this request and interrupt the Codex turn that issued it")
+                    .help("Cancel this request and interrupt the agent turn that issued it")
                     Button("Submit") {
                         let values = answers.mapValues { [$0] }
                         Task { await coordinator.resolveQuestions(values) }
                     }
                     .buttonStyle(.borderedProminent)
-                    .help("Submit these answers to the waiting Codex turn")
+                    .help("Submit these answers to the waiting agent turn")
                     .disabled(interaction.questions.contains { answers[$0.id, default: ""].isEmpty })
                 }
             } else {
@@ -57,7 +57,7 @@ struct ServerInteractionSheet: View {
                 }
                 .frame(maxHeight: 150)
             }
-            .help("Expand or collapse the raw App Server request parameters")
+            .help("Expand or collapse the raw provider request parameters")
         }
         .padding(20)
         .frame(width: 660)
@@ -66,14 +66,16 @@ struct ServerInteractionSheet: View {
     }
 
     private var isApproval: Bool {
-        interaction.method == "item/commandExecution/requestApproval" ||
-            interaction.method == "item/fileChange/requestApproval"
+        !interaction.approvalDecisions.isEmpty
+            || interaction.method.hasSuffix("/approval")
+            || interaction.method == "item/commandExecution/requestApproval"
+            || interaction.method == "item/fileChange/requestApproval"
     }
 
     private var approvalActions: some View {
         VStack(alignment: .leading, spacing: 8) {
             if interaction.approvalDecisions.isEmpty {
-                Text("Codex did not offer a valid decision for this request.")
+                Text("The agent did not offer a valid decision for this request.")
                     .foregroundStyle(.secondary)
                 HStack {
                     Spacer()
@@ -147,18 +149,18 @@ struct ServerInteractionSheet: View {
                 .font(.system(.body, design: .monospaced))
                 .frame(minHeight: 130)
                 .border(Color(nsColor: .separatorColor))
-                .help("Edit the JSON response returned to the waiting App Server request")
+                .help("Edit the JSON response returned to the waiting provider request")
             HStack {
                 Spacer()
                 Button("Cancel Request") {
                     Task { await coordinator.cancelInteraction() }
                 }
-                .help("Cancel this request and interrupt the Codex turn that issued it")
+                .help("Cancel this request and interrupt the agent turn that issued it")
                 Button("Respond") {
                     Task { await coordinator.resolveRawInteraction(rawResponse) }
                 }
                 .buttonStyle(.borderedProminent)
-                .help("Send this JSON response to the waiting App Server request")
+                .help("Send this JSON response to the waiting provider request")
             }
         }
     }

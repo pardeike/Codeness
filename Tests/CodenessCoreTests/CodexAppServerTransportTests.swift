@@ -62,6 +62,37 @@ struct CodexAppServerTransportTests {
         }
     }
 
+    @Test
+    func sendsNativePlanSandboxFastTierAndOutputSchemaParameters() async throws {
+        let fixture = try TransportFixture(script: Self.planParameterServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        let threadID = try await client.startThread(
+            cwd: "/tmp",
+            model: "fixture",
+            developerInstructions: "Plan only.",
+            ephemeral: true,
+            readOnly: true,
+            approvalPolicy: "never"
+        )
+        let turnID = try await client.startTurn(
+            threadID: threadID,
+            prompt: "Plan.",
+            cwd: "/tmp",
+            model: "fixture",
+            effort: "high",
+            mode: .plan,
+            serviceTier: "dynamic-fast",
+            outputSchema: .object(["type": .string("object")])
+        )
+
+        #expect(threadID == "thread-plan")
+        #expect(turnID == "turn-plan")
+        await client.shutdown()
+    }
+
     private static let chunkedServer = #"""
 import json
 import os
@@ -117,6 +148,56 @@ for line in sys.stdin:
         os._exit(7)
     elif identifier is not None:
         os.write(sys.stdout.fileno(), emit({"id": identifier, "result": {}}))
+"""#
+
+    private static let planParameterServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "parameter-fixture"}})
+    elif method == "thread/start":
+        params = message["params"]
+        assert params["ephemeral"] is True
+        assert params["sandbox"] == "read-only"
+        assert params["approvalPolicy"] == "never"
+        emit({"id": identifier, "result": {"thread": {"id": "thread-plan"}}})
+    elif method == "turn/start":
+        params = message["params"]
+        assert params["collaborationMode"] == {
+            "mode": "plan",
+            "settings": {
+                "model": "fixture",
+                "reasoning_effort": "high",
+                "developer_instructions": None
+            }
+        }
+        assert params["sandboxPolicy"] == {
+            "type": "readOnly",
+            "networkAccess": False
+        }
+        assert params["serviceTier"] == "dynamic-fast"
+        assert params["outputSchema"] == {"type": "object"}
+        emit({
+            "id": identifier,
+            "result": {
+                "turn": {
+                    "id": "turn-plan",
+                    "items": [],
+                    "status": "inProgress"
+                }
+            }
+        })
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
 """#
 }
 

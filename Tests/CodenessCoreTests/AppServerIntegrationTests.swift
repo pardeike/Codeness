@@ -48,6 +48,90 @@ struct AppServerIntegrationTests {
         await client.shutdown()
     }
 
+    @Test
+    func codexProviderMapsAppServerEventsAndResolvesDynamicFastTier() async throws {
+        let fixture = try FakeAppServerFixture()
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        let model = CodexModel(
+            id: "gpt-5.6-sol",
+            model: "gpt-5.6-sol",
+            displayName: "GPT-5.6 Sol",
+            description: "Fixture",
+            defaultEffort: "high",
+            efforts: ["high", "max"],
+            hidden: false,
+            serviceTiers: [
+                CodexServiceTier(
+                    id: "fixture-fast-tier",
+                    name: "Fast",
+                    description: "Fixture dynamic tier"
+                )
+            ]
+        )
+        let provider = CodexAgentProvider(appServer: client, models: [model])
+        let stream = await client.events()
+        let consumer = Task {
+            for await event in stream {
+                await provider.receive(event)
+            }
+        }
+        defer { consumer.cancel() }
+        try await client.start(configuration: fixture.configuration)
+        let target = AgentTarget(
+            providerID: .codex,
+            model: model.model,
+            options: AgentExecutionOptions(
+                effort: nil,
+                mode: .plan,
+                speed: .fast
+            )
+        )
+        let session = try await provider.prepareSession(
+            AgentSessionRequest(
+                existingSessionID: nil,
+                name: "Provider fixture",
+                cwd: "/tmp/repository",
+                target: target,
+                developerInstructions: "Inspect without changing files."
+            )
+        )
+        let handle = try await provider.startRun(
+            AgentRunRequest(
+                runID: UUID(),
+                session: session,
+                cwd: "/tmp/repository",
+                prompt: "Review the repository.",
+                target: target
+            )
+        )
+        var events: [AgentEvent] = []
+        for await event in handle.events {
+            events.append(event)
+        }
+
+        #expect(events.contains {
+            if case .started(let identifier) = $0 {
+                return identifier == "turn-1"
+            }
+            return false
+        })
+        #expect(events.contains {
+            if case .transcript(let text) = $0 {
+                return text.contains("IMPLEMENTATION CHECKPOINT")
+            }
+            return false
+        })
+        #expect(events.contains {
+            if case .completed(let output, let duration, _) = $0 {
+                return output.contains("Changed Parser.swift") && duration == 10
+            }
+            return false
+        })
+        await provider.shutdown()
+        await client.shutdown()
+    }
+
     @MainActor
     @Test
     func coordinatorRunsStrictImplementReviewFixGroupsUntilComplete() async throws {

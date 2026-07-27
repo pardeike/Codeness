@@ -17,7 +17,7 @@ struct GoalAmendmentSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Amend Goal")
                 .font(.title2.weight(.semibold))
-            Text("The revised Goal is supplied to subsequent Implement, Review, and Fix turns. Codeness keeps the previous text and timestamp in the activity history.")
+            Text("The revised Goal is supplied to all subsequent workflow steps. Codeness keeps the previous text and timestamp in the activity history.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 

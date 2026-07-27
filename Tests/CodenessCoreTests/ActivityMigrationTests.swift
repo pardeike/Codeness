@@ -91,4 +91,81 @@ struct ActivityMigrationTests {
         #expect(decoded.transcript == "Result")
         #expect(migrated["rawEventLog"] == nil)
     }
+
+    @Test
+    func roundTripsGenericWorkflowTargetsSessionsAndResumeCheckpoint() throws {
+        let target = AgentTarget(
+            providerID: .claude,
+            model: "sonnet",
+            options: AgentExecutionOptions(
+                effort: "high",
+                mode: .plan,
+                speed: .fast
+            )
+        )
+        let step = WorkflowStep(
+            id: "plan",
+            name: "Plan",
+            section: .loop,
+            instructions: "Plan the next change.",
+            target: target
+        )
+        let workflow = WorkflowTemplate(
+            id: "custom",
+            name: "Custom",
+            summary: "Migration fixture",
+            steps: [step],
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: target,
+                instructions: "Route the result."
+            )
+        )
+        let run = RunRecord(
+            sequence: 1,
+            role: .reviewer,
+            kind: .review,
+            status: .interrupted,
+            threadID: "claude-session",
+            model: target.model,
+            effort: "high",
+            prompt: "Plan",
+            workflowStep: WorkflowStepSnapshot(step: step, loopIteration: 3),
+            agentTarget: target,
+            sessionLineage: 2,
+            workflowHandoff: WorkflowHandoff(
+                text: "Continue from the plan.",
+                outcome: .continueWorkflow,
+                runLabel: "Plan checkpoint"
+            )
+        )
+        let cursor = WorkflowCursor(section: .loop, stepIndex: 0, loopIteration: 3)
+        let activity = ActivityRecord(
+            goal: "Generic migration",
+            prompts: .builtInDefaults,
+            status: .paused,
+            runs: [run],
+            workflow: workflow,
+            workflowCursor: cursor,
+            workflowResumeCheckpoint: .recoverRun(run.id),
+            stepSessions: [
+                step.id: WorkflowSessionState(
+                    stepID: step.id,
+                    lineage: 2,
+                    target: target,
+                    providerSessionID: "claude-session"
+                )
+            ]
+        )
+
+        let decoded = try JSONDecoder().decode(
+            ActivityRecord.self,
+            from: JSONEncoder().encode(activity)
+        )
+
+        #expect(decoded == activity)
+        #expect(decoded.runs.first?.agentTarget?.options.mode == .plan)
+        #expect(decoded.runs.first?.agentTarget?.options.speed == .fast)
+        #expect(decoded.runs.first?.workflowStep?.loopIteration == 3)
+        #expect(decoded.stepSessions["plan"]?.lineage == 2)
+    }
 }

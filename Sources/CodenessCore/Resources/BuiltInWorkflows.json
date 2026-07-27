@@ -1,0 +1,198 @@
+{
+  "schemaVersion": 1,
+  "defaultTemplateID": "implement-review-fix",
+  "templates": [
+    {
+      "id": "implement-review-fix",
+      "name": "Implement / Review / Fix",
+      "summary": "The current Codeness cycle: implement a useful unit, review it, fix the findings, then repeat until complete.",
+      "steps": [
+        {
+          "id": "implement",
+          "name": "Implement",
+          "section": "loop",
+          "instructions": "Start or continue implementing the goal. Stop when a review is useful. If the whole goal is implemented, say so clearly. Inspect the repository and leave it in a coherent, tested state.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "high",
+              "mode": "standard",
+              "speed": "standard"
+            }
+          }
+        },
+        {
+          "id": "review",
+          "name": "Review",
+          "section": "loop",
+          "instructions": "Review the preceding implementation against the full goal. Inspect the actual repository, tests, and diff. Do not modify files. Report concrete findings and also say whether the entire goal is now complete.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "max",
+              "mode": "plan",
+              "speed": "standard"
+            }
+          }
+        },
+        {
+          "id": "fix",
+          "name": "Fix",
+          "section": "loop",
+          "instructions": "Address the preceding review findings in the context of the full goal. Do not start an unrelated next work unit. Test the resulting repository and say clearly whether more goal work remains.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "high",
+              "mode": "standard",
+              "speed": "standard"
+            }
+          }
+        }
+      ],
+      "coordinator": {
+        "target": {
+          "providerID": "codex",
+          "model": "gpt-5.6-luna",
+          "options": {
+            "effort": "low",
+            "mode": "standard",
+            "speed": "fast"
+          }
+        },
+        "instructions": "Create a concise, loss-minimizing handoff for the next configured step. Preserve facts, changed files, tests, unresolved findings, and blockers. Only after the last repeating step, decide whether the full goal is complete, should continue for another loop, is blocked, or failed. Do not infer completion merely because one work unit finished."
+      }
+    },
+    {
+      "id": "code-review",
+      "name": "Code / Review",
+      "summary": "Alternate coding and read-only review passes without a separate fix step.",
+      "steps": [
+        {
+          "id": "code",
+          "name": "Code",
+          "section": "loop",
+          "instructions": "Implement or correct the next useful portion of the goal. Incorporate the preceding review handoff when present. Test the work and say clearly whether the full goal is complete.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "high",
+              "mode": "standard",
+              "speed": "standard"
+            }
+          }
+        },
+        {
+          "id": "review",
+          "name": "Review",
+          "section": "loop",
+          "instructions": "Review the current repository against the full goal. Do not modify files. Report actionable findings and decide whether all goal requirements are satisfied.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "max",
+              "mode": "plan",
+              "speed": "standard"
+            }
+          }
+        }
+      ],
+      "coordinator": {
+        "target": {
+          "providerID": "codex",
+          "model": "gpt-5.6-luna",
+          "options": {
+            "effort": "low",
+            "mode": "standard",
+            "speed": "fast"
+          }
+        },
+        "instructions": "Pass a concise factual work summary to the next step. After Review, mark complete only when the repository satisfies the entire goal; otherwise continue so Code receives the findings."
+      }
+    },
+    {
+      "id": "plan-implement-review-fix",
+      "name": "Plan + Implement / Review / Fix",
+      "summary": "Create a read-only plan once, then run the implementation, review, and fix loop.",
+      "steps": [
+        {
+          "id": "plan",
+          "name": "Plan",
+          "section": "prefix",
+          "instructions": "Inspect the repository and produce a concrete implementation plan for the full goal. Resolve important architectural questions and identify validation work. Do not modify files.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "high",
+              "mode": "plan",
+              "speed": "standard"
+            }
+          }
+        },
+        {
+          "id": "implement",
+          "name": "Implement",
+          "section": "loop",
+          "instructions": "Implement the next useful portion of the goal, using the plan and latest handoff as context. Test the work and stop at a coherent review point.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "high",
+              "mode": "standard",
+              "speed": "standard"
+            }
+          }
+        },
+        {
+          "id": "review",
+          "name": "Review",
+          "section": "loop",
+          "instructions": "Review the current repository against the goal and original plan. Do not modify files. Report actionable findings and whether the entire goal is complete.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "max",
+              "mode": "plan",
+              "speed": "standard"
+            }
+          }
+        },
+        {
+          "id": "fix",
+          "name": "Fix",
+          "section": "loop",
+          "instructions": "Address the review findings without starting unrelated work. Test the result and state whether the full goal still needs another loop.",
+          "target": {
+            "providerID": "codex",
+            "model": "gpt-5.6-sol",
+            "options": {
+              "effort": "high",
+              "mode": "standard",
+              "speed": "standard"
+            }
+          }
+        }
+      ],
+      "coordinator": {
+        "target": {
+          "providerID": "codex",
+          "model": "gpt-5.6-luna",
+          "options": {
+            "effort": "low",
+            "mode": "standard",
+            "speed": "fast"
+          }
+        },
+        "instructions": "Preserve plan decisions and current implementation state in each handoff. Only after Fix, decide whether the full goal is complete, should continue, is blocked, or failed."
+      }
+    }
+  ]
+}

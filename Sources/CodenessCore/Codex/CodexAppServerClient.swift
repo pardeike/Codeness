@@ -131,17 +131,27 @@ public actor CodexAppServerClient {
     public func startThread(
         cwd: String,
         model: String,
-        developerInstructions: String
+        developerInstructions: String,
+        ephemeral: Bool = false,
+        readOnly: Bool = false,
+        approvalPolicy: String? = nil
     ) async throws -> String {
+        var params: [String: JSONValue] = [
+            "cwd": .string(cwd),
+            "model": .string(model),
+            "developerInstructions": .string(developerInstructions),
+            "ephemeral": .bool(ephemeral),
+            "serviceName": .string("Codeness")
+        ]
+        if readOnly {
+            params["sandbox"] = .string("read-only")
+        }
+        if let approvalPolicy {
+            params["approvalPolicy"] = .string(approvalPolicy)
+        }
         let response = try await sendRequest(
             method: "thread/start",
-            params: [
-                "cwd": .string(cwd),
-                "model": .string(model),
-                "developerInstructions": .string(developerInstructions),
-                "ephemeral": .bool(false),
-                "serviceName": .string("Codeness")
-            ]
+            params: params
         )
         guard let identifier = response["thread"]?["id"]?.stringValue else {
             throw AppServerClientError.invalidResponse("thread/start did not return thread.id")
@@ -188,21 +198,45 @@ public actor CodexAppServerClient {
         prompt: String,
         cwd: String,
         model: String,
-        effort: String
+        effort: String,
+        mode: AgentMode = .standard,
+        serviceTier: String? = nil,
+        outputSchema: JSONValue? = nil
     ) async throws -> String {
+        var params: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "input": .array([.object([
+                "type": .string("text"),
+                "text": .string(prompt),
+                "text_elements": .array([])
+            ])]),
+            "cwd": .string(cwd),
+            "model": .string(model),
+            "effort": .string(effort)
+        ]
+        if mode == .plan {
+            params["collaborationMode"] = .object([
+                "mode": .string("plan"),
+                "settings": .object([
+                    "model": .string(model),
+                    "reasoning_effort": .string(effort),
+                    "developer_instructions": .null
+                ])
+            ])
+            params["sandboxPolicy"] = .object([
+                "type": .string("readOnly"),
+                "networkAccess": .bool(false)
+            ])
+        }
+        // serviceTier is sticky for subsequent turns. Send an explicit null for
+        // Standard so changing Fast on an existing step session is reversible.
+        params["serviceTier"] = serviceTier.map(JSONValue.string) ?? .null
+        if let outputSchema {
+            params["outputSchema"] = outputSchema
+        }
         let response = try await sendRequest(
             method: "turn/start",
-            params: [
-                "threadId": .string(threadID),
-                "input": .array([.object([
-                    "type": .string("text"),
-                    "text": .string(prompt),
-                    "text_elements": .array([])
-                ])]),
-                "cwd": .string(cwd),
-                "model": .string(model),
-                "effort": .string(effort)
-            ]
+            params: params
         )
         guard let identifier = response["turn"]?["id"]?.stringValue else {
             throw AppServerClientError.invalidResponse("turn/start did not return turn.id")
@@ -445,6 +479,15 @@ public actor CodexAppServerClient {
               let defaultEffort = value["defaultReasoningEffort"]?.stringValue else { return nil }
         let efforts = value["supportedReasoningEfforts"]?.arrayValue?
             .compactMap { $0["reasoningEffort"]?.stringValue } ?? []
+        let serviceTiers = value["serviceTiers"]?.arrayValue?.compactMap { tier -> CodexServiceTier? in
+            guard let id = tier["id"]?.stringValue,
+                  let name = tier["name"]?.stringValue else { return nil }
+            return CodexServiceTier(
+                id: id,
+                name: name,
+                description: tier["description"]?.stringValue ?? ""
+            )
+        } ?? []
         return CodexModel(
             id: id,
             model: model,
@@ -452,7 +495,9 @@ public actor CodexAppServerClient {
             description: value["description"]?.stringValue ?? "",
             defaultEffort: defaultEffort,
             efforts: efforts,
-            hidden: value["hidden"]?.boolValue ?? false
+            hidden: value["hidden"]?.boolValue ?? false,
+            serviceTiers: serviceTiers,
+            defaultServiceTier: value["defaultServiceTier"]?.stringValue
         )
     }
 }

@@ -151,6 +151,72 @@ struct WorkOverviewMetricsTests {
         )
     }
 
+    @Test
+    func genericMetricsAggregateByConfiguredStepAndCountOnlyLoopCycles() throws {
+        let startedAt = Date(timeIntervalSince1970: 20_000)
+        let codex = AgentTarget(providerID: .codex, model: "codex-model")
+        let claude = AgentTarget(providerID: .claude, model: "sonnet")
+        let plan = WorkflowStep(
+            id: "plan",
+            name: "Plan",
+            section: .prefix,
+            instructions: "Plan.",
+            target: codex
+        )
+        let code = WorkflowStep(
+            id: "code",
+            name: "Code",
+            section: .loop,
+            instructions: "Code.",
+            target: claude
+        )
+        let inspect = WorkflowStep(
+            id: "inspect",
+            name: "Inspect",
+            section: .loop,
+            instructions: "Inspect.",
+            target: codex
+        )
+        let workflow = WorkflowTemplate(
+            id: "generic",
+            name: "Generic",
+            summary: "Metrics",
+            steps: [plan, code, inspect],
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: codex,
+                instructions: "Route."
+            )
+        )
+        let activity = ActivityRecord(
+            goal: "Measure generic work",
+            prompts: .builtInDefaults,
+            status: .completed,
+            runs: [
+                genericRun(1, step: plan, iteration: 1, startedAt: startedAt),
+                genericRun(2, step: code, iteration: 1, startedAt: startedAt),
+                genericRun(3, step: inspect, iteration: 1, startedAt: startedAt),
+                genericRun(4, step: code, iteration: 2, startedAt: startedAt),
+                genericRun(5, step: inspect, iteration: 2, startedAt: startedAt)
+            ],
+            workflow: workflow,
+            completedAt: startedAt.addingTimeInterval(10)
+        )
+
+        let metrics = WorkOverviewMetrics(
+            activity: activity,
+            repositoryUpdatedAt: startedAt,
+            now: startedAt.addingTimeInterval(20)
+        )
+
+        #expect(metrics.usesGenericWorkflow)
+        #expect(metrics.workUnitCount == 2)
+        #expect(metrics.phases.map(\.name) == ["Plan", "Code", "Inspect"])
+        #expect(try #require(metrics.phases.first { $0.id == "plan" }).runCount == 1)
+        #expect(try #require(metrics.phases.first { $0.id == "code" }).runCount == 2)
+        #expect(try #require(metrics.phases.first { $0.id == "inspect" }).runCount == 2)
+        #expect(metrics.phases.allSatisfy { $0.kind == nil })
+    }
+
     private func run(
         sequence: Int,
         kind: RunKind,
@@ -173,6 +239,32 @@ struct WorkOverviewMetricsTests {
             completedAt: completedAt,
             durationMilliseconds: durationMilliseconds,
             tokenUsage: tokenUsage
+        )
+    }
+
+    private func genericRun(
+        _ sequence: Int,
+        step: WorkflowStep,
+        iteration: Int,
+        startedAt: Date
+    ) -> RunRecord {
+        RunRecord(
+            sequence: sequence,
+            role: .implementer,
+            kind: .implementation,
+            status: .completed,
+            threadID: "session-\(step.id)",
+            model: step.target.model,
+            effort: "high",
+            prompt: step.name,
+            startedAt: startedAt,
+            completedAt: startedAt.addingTimeInterval(1),
+            durationMilliseconds: 1_000,
+            workflowStep: WorkflowStepSnapshot(
+                step: step,
+                loopIteration: iteration
+            ),
+            agentTarget: step.target
         )
     }
 }

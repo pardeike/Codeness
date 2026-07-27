@@ -81,6 +81,52 @@ struct WorkspaceStoreTests {
     }
 
     @Test
+    func recoversLatestProviderNeutralTokenUsageCheckpoint() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkspaceStore(rootURL: root)
+        let repositoryPath = "/tmp/generic-token-repository"
+        let activityID = UUID()
+        let runID = UUID()
+        let first = RunTokenUsage(
+            totalTokens: 120,
+            inputTokens: 100,
+            cachedInputTokens: 30,
+            outputTokens: 20
+        )
+        let latest = RunTokenUsage(
+            totalTokens: 260,
+            inputTokens: 220,
+            cachedInputTokens: 80,
+            cacheWriteInputTokens: 10,
+            outputTokens: 40,
+            reasoningOutputTokens: 5
+        )
+
+        try await store.appendTokenUsage(
+            first,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+        try await store.appendTokenUsage(
+            latest,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+
+        #expect(
+            try await store.recoveredTokenUsage(
+                repositoryPath: repositoryPath,
+                activityID: activityID,
+                runID: runID
+            ) == latest
+        )
+    }
+
+    @Test
     func archivesTheCompleteActivityRecordUnderApplicationSupport() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

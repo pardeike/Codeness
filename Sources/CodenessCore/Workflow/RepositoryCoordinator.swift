@@ -33,9 +33,11 @@ public struct ApprovalDecision: Sendable, Equatable, Identifiable {
     public let value: JSONValue
     public let label: String
     public let explanation: String
+    private let destructiveOverride: Bool?
 
     public init(value: JSONValue) {
         self.value = value
+        destructiveOverride = nil
         switch value {
         case .string("accept"):
             label = "Approve Once"
@@ -79,10 +81,22 @@ public struct ApprovalDecision: Sendable, Equatable, Identifiable {
         }
     }
 
+    public init(
+        value: JSONValue,
+        label: String,
+        explanation: String,
+        isDestructive: Bool = false
+    ) {
+        self.value = value
+        self.label = label
+        self.explanation = explanation
+        destructiveOverride = isDestructive
+    }
+
     public var id: String { value.encodedString() }
 
     public var isDestructive: Bool {
-        value.stringValue == "cancel"
+        destructiveOverride ?? (value.stringValue == "cancel")
     }
 }
 
@@ -144,6 +158,12 @@ public enum DocumentClosePreparationResult: Sendable, Equatable {
 @MainActor
 @Observable
 public final class RepositoryCoordinator {
+    private struct GenericInteractionRoute {
+        let providerID: AgentProviderID
+        let runID: UUID
+        let interactionID: String
+    }
+
     public private(set) var record: RepositoryRecord
     public var selectedRunID: UUID? {
         didSet {
@@ -170,6 +190,8 @@ public final class RepositoryCoordinator {
     private let router: any HandoffRouting
     private let handoffConfigurationValidator: any HandoffConfigurationValidating
     private let store: any RepositoryWorkspaceStoring
+    private let agentProviders: AgentProviderRegistry?
+    private let workflowRouter: (any WorkflowHandoffRouting)?
     private var sessionsPrepared = false
     private var itemsWithDeltas: [UUID: Set<String>] = [:]
     private var tokenUsageBaselines: [UUID: RunTokenUsage] = [:]
@@ -182,6 +204,8 @@ public final class RepositoryCoordinator {
     private var closeWaiter: CheckedContinuation<DocumentClosePreparationResult, Never>?
     private var isClosing = false
     private var pendingInteractions: [PendingServerInteraction] = []
+    private var genericRunTasks: [UUID: Task<Void, Never>] = [:]
+    private var genericInteractionRoutes: [String: GenericInteractionRoute] = [:]
 
     public init(
         canonicalPath: String,
@@ -189,13 +213,17 @@ public final class RepositoryCoordinator {
         router: any HandoffRouting,
         store: any RepositoryWorkspaceStoring,
         handoffConfigurationValidator: any HandoffConfigurationValidating = HandoffConfigurationValidator(),
-        initialSettings: RepositorySettings = .init()
+        initialSettings: RepositorySettings = .init(),
+        agentProviders: AgentProviderRegistry? = nil,
+        workflowRouter: (any WorkflowHandoffRouting)? = nil
     ) {
         record = RepositoryRecord(canonicalPath: canonicalPath, settings: initialSettings)
         self.appServer = appServer
         self.router = router
         self.handoffConfigurationValidator = handoffConfigurationValidator
         self.store = store
+        self.agentProviders = agentProviders
+        self.workflowRouter = workflowRouter
     }
 
     public var repositoryName: String {
@@ -259,12 +287,39 @@ public final class RepositoryCoordinator {
     }
 
     public var hasActiveCodexTurn: Bool {
+        guard let run = activeRun,
+              (run.agentTarget?.providerID ?? .codex) == .codex else { return false }
+        let status = run.status
+        return [.queued, .running, .awaitingApproval].contains(status)
+    }
+
+    public var hasActiveAgentTurn: Bool {
         guard let status = activeRun?.status else { return false }
         return [.queued, .running, .awaitingApproval].contains(status)
     }
 
+    public func hasActiveWork(for providerID: AgentProviderID) -> Bool {
+        if let run = activeRun,
+           [.queued, .running, .awaitingApproval].contains(run.status),
+           (run.agentTarget?.providerID ?? .codex) == providerID {
+            return true
+        }
+        guard let workflow = record.activity?.workflow,
+              workflow.coordinator.target.providerID == providerID else {
+            return false
+        }
+        return !routingTasks.isEmpty || workOverviewSummaryTask != nil
+    }
+
     public var canResume: Bool {
         guard let activity = activeActivity, activity.status == .paused else { return false }
+        if activity.workflow != nil {
+            if activity.workflowResumeCheckpoint != nil { return true }
+            guard let run = activity.runs.last else { return activity.workflowCursor != nil }
+            if run.status == .interrupted { return true }
+            guard run.finalOutput?.isEmpty == false else { return false }
+            return run.status == .routing || (run.status == .paused && run.relayError != nil)
+        }
         if activity.resumeCheckpoint != nil { return true }
         if activity.pendingAction != nil { return true }
         guard let run = activity.runs.last else { return false }
@@ -326,8 +381,12 @@ public final class RepositoryCoordinator {
                 ?? RepositoryViewState()
             await recoverAppendOnlyTranscripts()
             await recoverAppendOnlyTokenUsage()
-            recoverInterruptedState()
-            migrateResumeCheckpointIfNeeded()
+            if record.activity?.workflow != nil {
+                recoverInterruptedGenericState()
+            } else {
+                recoverInterruptedState()
+                migrateResumeCheckpointIfNeeded()
+            }
             pauseAfterCurrent = viewState.pauseAfterCurrent
             runIsAtBottom = viewState.transcriptViewports.mapValues(\.followsOutput)
             if viewState.runSelectionWasSaved {
@@ -417,6 +476,58 @@ public final class RepositoryCoordinator {
         }
     }
 
+    public func startActivity(goal: String, workflow: WorkflowTemplate) async {
+        guard canStartActivity else { return }
+        guard let agentProviders, workflowRouter != nil else {
+            errorMessage = "The agent providers are not configured."
+            return
+        }
+        _ = agentProviders
+        let cleanGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanGoal.isEmpty else {
+            errorMessage = "The goal is empty."
+            return
+        }
+        if let validationMessage = workflow.validationMessage {
+            errorMessage = validationMessage
+            return
+        }
+        guard let cursor = GenericWorkflowStateMachine.initialCursor(for: workflow) else {
+            errorMessage = "The workflow has no runnable steps."
+            return
+        }
+
+        isStartingActivity = true
+        defer { isStartingActivity = false }
+        record.activityDraft = nil
+        record.activity = ActivityRecord(
+            goal: cleanGoal,
+            prompts: .builtInDefaults,
+            workflow: workflow,
+            workflowCursor: cursor,
+            workflowResumeCheckpoint: .perform(cursor)
+        )
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        errorMessage = nil
+
+        do {
+            try await persist()
+        } catch {
+            record.activity?.status = .paused
+            statusMessage = "Paused before \(genericStepName(at: cursor).lowercased())"
+            do {
+                try await persist()
+                errorMessage = "Could not save the new activity before starting its first step: \(error.localizedDescription)"
+            } catch {
+                errorMessage = "Could not save the new activity or its paused retry checkpoint: \(error.localizedDescription)"
+            }
+            return
+        }
+        await performGeneric(cursor: cursor, previousHandoff: nil)
+    }
+
     public func handle(_ event: AppServerEvent) async {
         if case .notification(let method, let params, _) = event,
            method == "serverRequest/resolved",
@@ -440,6 +551,16 @@ public final class RepositoryCoordinator {
         }
     }
 
+    public func acceptsCodexEvent(_ event: AppServerEvent) -> Bool {
+        guard record.activity?.workflow == nil else { return false }
+        if case .notification(let method, let params, _) = event,
+           method == "serverRequest/resolved",
+           let requestID = params["requestId"] {
+            return pendingInteractions.contains { $0.id == requestID }
+        }
+        return belongsToRepository(event)
+    }
+
     public func setPauseAfterCurrent(_ enabled: Bool) {
         pauseAfterCurrent = enabled
         viewState.pauseAfterCurrent = enabled
@@ -453,6 +574,17 @@ public final class RepositoryCoordinator {
     public func updateActivityDraft(goal: String, prompts: ActivityPrompts) {
         guard isLoaded, record.activity == nil, !isStartingActivity, !isStartingOver else { return }
         let draft = ActivityConfigurationDraft(goal: goal, prompts: prompts)
+        guard record.activityDraft != draft else { return }
+        record.activityDraft = draft
+    }
+
+    public func updateActivityDraft(goal: String, workflow: WorkflowTemplate) {
+        guard isLoaded, record.activity == nil, !isStartingActivity, !isStartingOver else { return }
+        let draft = ActivityConfigurationDraft(
+            goal: goal,
+            prompts: .builtInDefaults,
+            workflow: workflow
+        )
         guard record.activityDraft != draft else { return }
         record.activityDraft = draft
     }
@@ -535,13 +667,29 @@ public final class RepositoryCoordinator {
         isGeneratingWorkOverviewSummary = true
         workOverviewSummaryError = nil
         let router = self.router
+        let workflowRouter = self.workflowRouter
+        let workflowCoordinator = record.activity?.workflow?.coordinator
         let settings = record.settings.relay
         let store = self.store
         let canonicalPath = record.canonicalPath
 
         workOverviewSummaryTask = Task { @MainActor [weak self] in
             do {
-                let text = try await router.summarizeWork(context, settings: settings)
+                let text: String
+                if let workflowCoordinator {
+                    guard let workflowRouter else {
+                        throw AgentProviderError.invalidResponse(
+                            "the configured workflow coordinator is unavailable"
+                        )
+                    }
+                    text = try await workflowRouter.summarizeWork(
+                        context,
+                        configuration: workflowCoordinator,
+                        cwd: canonicalPath
+                    )
+                } else {
+                    text = try await router.summarizeWork(context, settings: settings)
+                }
                 try Task.checkCancellation()
                 if let self,
                    self.workSummaryContext?.sourceSignature == signature,
@@ -621,6 +769,10 @@ public final class RepositoryCoordinator {
 
     public func resume() async {
         guard record.activity?.status == .paused else { return }
+        if record.activity?.workflow != nil {
+            await resumeGeneric()
+            return
+        }
         // Resume means returning to the normal automatic workflow. Keeping the
         // one-shot pause flag set made every subsequent phase require another click.
         pauseAfterCurrent = false
@@ -683,6 +835,18 @@ public final class RepositoryCoordinator {
     }
 
     public func interrupt() async {
+        if let run = activeRun, let target = run.agentTarget {
+            guard let agentProviders else { return }
+            do {
+                try await agentProviders.interrupt(providerID: target.providerID, runID: run.id)
+                statusMessage = "Interrupting \(run.displayName.lowercased())…"
+            } catch {
+                if canInterrupt {
+                    errorMessage = error.localizedDescription
+                }
+            }
+            return
+        }
         guard let run = activeRun, let threadID = run.threadID, let turnID = run.turnID else { return }
         do {
             try await appServer.interrupt(threadID: threadID, turnID: turnID)
@@ -714,6 +878,9 @@ public final class RepositoryCoordinator {
         isClosing = true
         pauseState = .saving
         await cancelRoutingTasks()
+        if record.activity?.workflow != nil {
+            return await prepareGenericWorkflowForClose(strategy: strategy)
+        }
 
         guard record.activity?.status == .running else {
             return await finishCloseWithoutActiveTurn()
@@ -780,8 +947,19 @@ public final class RepositoryCoordinator {
     public func interruptCloseWait() async {
         guard isClosing,
               pauseState == .waitingForTurn || pauseState == .requestingCheckpoint,
-              let run = activeRun,
-              let threadID = run.threadID,
+              let run = activeRun else { return }
+        if let target = run.agentTarget {
+            guard let agentProviders else { return }
+            do {
+                pauseState = .interrupting
+                statusMessage = "Interrupting \(run.displayName.lowercased())…"
+                try await agentProviders.interrupt(providerID: target.providerID, runID: run.id)
+            } catch {
+                _ = await reconcileCloseControlFailure(error.localizedDescription)
+            }
+            return
+        }
+        guard let threadID = run.threadID,
               let turnID = run.turnID else { return }
         do {
             pauseState = .interrupting
@@ -810,9 +988,24 @@ public final class RepositoryCoordinator {
 
     @discardableResult
     public func steer(_ message: String) async -> Bool {
-        guard let run = activeRun, let threadID = run.threadID, let turnID = run.turnID else { return false }
+        guard let run = activeRun else { return false }
         let cleanMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanMessage.isEmpty else { return false }
+        if let target = run.agentTarget {
+            guard let agentProviders else { return false }
+            do {
+                try await agentProviders.steer(
+                    providerID: target.providerID,
+                    runID: run.id,
+                    message: cleanMessage
+                )
+                return true
+            } catch {
+                errorMessage = error.localizedDescription
+                return false
+            }
+        }
+        guard let threadID = run.threadID, let turnID = run.turnID else { return false }
         do {
             try await appServer.steer(threadID: threadID, turnID: turnID, message: cleanMessage)
             return true
@@ -824,6 +1017,14 @@ public final class RepositoryCoordinator {
 
     public func resolveApproval(_ decision: ApprovalDecision) async {
         guard let interaction = pendingInteraction else { return }
+        if let route = genericRoute(for: interaction.id) {
+            await resolveGenericInteraction(
+                route,
+                resolution: .decision(decision.value),
+                presentationID: interaction.id
+            )
+            return
+        }
         do {
             try await appServer.respond(
                 to: interaction.id,
@@ -837,6 +1038,14 @@ public final class RepositoryCoordinator {
 
     public func resolveQuestions(_ answers: [String: [String]]) async {
         guard let interaction = pendingInteraction else { return }
+        if let route = genericRoute(for: interaction.id) {
+            await resolveGenericInteraction(
+                route,
+                resolution: .answers(answers),
+                presentationID: interaction.id
+            )
+            return
+        }
         let values = answers.mapValues { answer in
             JSONValue.object(["answers": .array(answer.map(JSONValue.string))])
         }
@@ -852,6 +1061,14 @@ public final class RepositoryCoordinator {
         guard let interaction = pendingInteraction else { return }
         do {
             let value = try JSONDecoder().decode(JSONValue.self, from: Data(resultText.utf8))
+            if let route = genericRoute(for: interaction.id) {
+                await resolveGenericInteraction(
+                    route,
+                    resolution: .raw(value),
+                    presentationID: interaction.id
+                )
+                return
+            }
             try await appServer.respond(to: interaction.id, result: value)
             await finishInteraction(id: interaction.id)
         } catch {
@@ -861,6 +1078,14 @@ public final class RepositoryCoordinator {
 
     public func cancelInteraction() async {
         guard let interaction = pendingInteraction else { return }
+        if let route = genericRoute(for: interaction.id) {
+            await resolveGenericInteraction(
+                route,
+                resolution: .cancel,
+                presentationID: interaction.id
+            )
+            return
+        }
         do {
             try await appServer.respondWithError(to: interaction.id, message: "Cancelled by the user")
             await finishInteraction(id: interaction.id)
@@ -872,6 +1097,12 @@ public final class RepositoryCoordinator {
     public func retryRelay() async {
         guard let run = activeRun ?? record.activity?.runs.last,
               let finalOutput = run.finalOutput else { return }
+        if record.activity?.workflow != nil {
+            record.activity?.status = .running
+            record.activity?.workflowResumeCheckpoint = nil
+            await beginGenericRouting(runID: run.id, finalOutput: finalOutput)
+            return
+        }
         record.activity?.status = .running
         record.activity?.resumeCheckpoint = nil
         await beginRouting(runID: run.id, finalOutput: finalOutput)
@@ -881,6 +1112,17 @@ public final class RepositoryCoordinator {
         guard let run = activeRun ?? record.activity?.runs.last else { return }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             errorMessage = "The handoff must contain information for the next session."
+            return
+        }
+        if record.activity?.workflow != nil {
+            let outcome: WorkflowOutcome = switch disposition {
+            case .implementationComplete, .fixComplete: .complete
+            case .blocked: .blocked
+            case .failed: .failed
+            case .unclear: .unclear
+            case .implementationCheckpoint, .reviewComplete, .fixCheckpoint: .continueWorkflow
+            }
+            await useWorkflowHandoff(text: text, outcome: outcome, label: label)
             return
         }
         let envelope = HandoffEnvelope(
@@ -896,6 +1138,33 @@ public final class RepositoryCoordinator {
         record.activity?.status = .running
         record.activity?.resumeCheckpoint = nil
         await applyWorkflowDecision(runID: run.id, for: run.kind, envelope: envelope)
+    }
+
+    public func useWorkflowHandoff(
+        text: String,
+        outcome: WorkflowOutcome,
+        label: String
+    ) async {
+        guard record.activity?.workflow != nil,
+              let run = activeRun ?? record.activity?.runs.last else { return }
+        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanText.isEmpty else {
+            errorMessage = "The handoff must contain information for the next step."
+            return
+        }
+        let handoff = WorkflowHandoff(
+            text: cleanText,
+            outcome: outcome,
+            runLabel: normalizedRunLabel(label, fallback: run.displayName)
+        )
+        updateRun(run.id) {
+            $0.workflowHandoff = handoff
+            $0.relayError = nil
+            $0.status = .completed
+        }
+        record.activity?.status = .running
+        record.activity?.workflowResumeCheckpoint = nil
+        await applyGenericWorkflowDecision(runID: run.id, handoff: handoff)
     }
 
     @discardableResult
@@ -914,6 +1183,47 @@ public final class RepositoryCoordinator {
         } catch {
             record.settings = previousSettings
             errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func updateWorkflowTargets(_ updatedWorkflow: WorkflowTemplate) async -> Bool {
+        guard var activity = record.activity,
+              let currentWorkflow = activity.workflow,
+              activity.status == .paused else {
+            errorMessage = "Workflow targets can only be changed while the activity is paused."
+            return false
+        }
+        guard Self.sameFrozenWorkflowDefinition(currentWorkflow, updatedWorkflow) else {
+            errorMessage = "Step topology, names, and instructions are frozen after an activity starts."
+            return false
+        }
+        if let validationMessage = updatedWorkflow.validationMessage {
+            errorMessage = validationMessage
+            return false
+        }
+
+        let previousActivity = activity
+        for updatedStep in updatedWorkflow.steps {
+            guard let previousStep = currentWorkflow.step(id: updatedStep.id) else { continue }
+            guard var session = activity.stepSessions[updatedStep.id] else { continue }
+            if Self.requiresNewLineage(from: previousStep.target, to: updatedStep.target) {
+                session.lineage += 1
+                session.providerSessionID = nil
+            }
+            session.target = updatedStep.target
+            activity.stepSessions[updatedStep.id] = session
+        }
+        activity.workflow = updatedWorkflow
+        record.activity = activity
+        do {
+            try await persist()
+            statusMessage = pausedStatusMessage
+            return true
+        } catch {
+            record.activity = previousActivity
+            errorMessage = "Could not save the workflow targets: \(error.localizedDescription)"
             return false
         }
     }
@@ -974,7 +1284,8 @@ public final class RepositoryCoordinator {
             settings: record.settings,
             activityDraft: ActivityConfigurationDraft(
                 goal: previousActivity.goal,
-                prompts: previousActivity.prompts
+                prompts: previousActivity.prompts,
+                workflow: previousActivity.workflow
             ),
             activity: nil,
             createdAt: record.createdAt,
@@ -1013,6 +1324,9 @@ public final class RepositoryCoordinator {
             runIsAtBottom.removeAll()
             completingRunIDs.removeAll()
             pendingInteractions.removeAll()
+            genericInteractionRoutes.removeAll()
+            genericRunTasks.values.forEach { $0.cancel() }
+            genericRunTasks.removeAll()
             pauseState = .idle
             statusMessage = "Configure this activity"
             errorMessage = nil
@@ -1029,11 +1343,20 @@ public final class RepositoryCoordinator {
 
     public func appServerRestarted() async {
         sessionsPrepared = false
+        if record.activity?.workflow != nil,
+           activeRun?.agentTarget?.providerID != .codex {
+            return
+        }
         pendingInteractions.removeAll()
+        genericInteractionRoutes.removeAll()
         if record.activity?.status == .running {
             record.activity?.status = .paused
-            markLastRunInterruptedIfNeeded()
-            migrateResumeCheckpointIfNeeded()
+            if record.activity?.workflow != nil {
+                markLastGenericRunInterruptedIfNeeded()
+            } else {
+                markLastRunInterruptedIfNeeded()
+                migrateResumeCheckpointIfNeeded()
+            }
             statusMessage = pausedStatusMessage
         }
         if isClosing {
@@ -1443,6 +1766,748 @@ public final class RepositoryCoordinator {
         statusMessage = "\(kind.displayName) running"
     }
 
+    private func resumeGeneric() async {
+        guard let activity = record.activity,
+              let workflow = activity.workflow else { return }
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        statusMessage = "Resuming automatic workflow…"
+
+        let checkpoint = activity.workflowResumeCheckpoint
+        record.activity?.status = .running
+        record.activity?.workflowResumeCheckpoint = nil
+        do {
+            switch checkpoint {
+            case .recoverRun(let runID):
+                guard let run = run(withID: runID) else {
+                    throw RepositoryCoordinatorError.missingRun(runID)
+                }
+                await recoverGenericRun(run)
+            case .routeCompletedRun(let runID):
+                guard let run = run(withID: runID),
+                      let output = run.finalOutput,
+                      !output.isEmpty else {
+                    throw RepositoryCoordinatorError.missingRunOutput(runID)
+                }
+                await beginGenericRouting(runID: runID, finalOutput: output)
+            case .perform(let cursor):
+                await performGeneric(
+                    cursor: cursor,
+                    previousHandoff: activity.runs.last(where: {
+                        $0.workflowHandoff != nil
+                    })?.workflowHandoff
+                )
+            case nil:
+                if let run = activity.runs.last,
+                   let output = run.finalOutput,
+                   !output.isEmpty,
+                   run.workflowHandoff == nil {
+                    await beginGenericRouting(runID: run.id, finalOutput: output)
+                } else if let cursor = activity.workflowCursor {
+                    await performGeneric(
+                        cursor: cursor,
+                        previousHandoff: activity.runs.last(where: {
+                            $0.workflowHandoff != nil
+                        })?.workflowHandoff
+                    )
+                } else if GenericWorkflowStateMachine.initialCursor(for: workflow) == nil {
+                    completeGenericActivity()
+                }
+            }
+        } catch {
+            record.activity?.status = .paused
+            record.activity?.workflowResumeCheckpoint = checkpoint
+            errorMessage = error.localizedDescription
+            try? await persist()
+        }
+    }
+
+    private func performGeneric(
+        cursor: WorkflowCursor,
+        previousHandoff: WorkflowHandoff?,
+        promptOverride: String? = nil
+    ) async {
+        guard let workflow = record.activity?.workflow,
+              let step = GenericWorkflowStateMachine.step(at: cursor, in: workflow) else {
+            pauseGenericActivity(
+                message: "The saved workflow cursor does not identify a configured step."
+            )
+            try? await persist()
+            return
+        }
+        guard !isClosing else {
+            record.activity?.status = .paused
+            record.activity?.workflowCursor = cursor
+            record.activity?.workflowResumeCheckpoint = .perform(cursor)
+            return
+        }
+        record.activity?.status = .running
+        record.activity?.workflowCursor = cursor
+        record.activity?.workflowResumeCheckpoint = .perform(cursor)
+        let prompt = promptOverride ?? GenericPromptBuilder.stepPrompt(
+            goal: record.activity?.goal ?? "",
+            workflow: workflow,
+            step: step,
+            cursor: cursor,
+            previousHandoff: previousHandoff
+        )
+        await launchGenericRun(step: step, cursor: cursor, prompt: prompt)
+    }
+
+    private func launchGenericRun(
+        step: WorkflowStep,
+        cursor: WorkflowCursor,
+        prompt: String
+    ) async {
+        guard let agentProviders,
+              let workflow = record.activity?.workflow,
+              !isClosing else {
+            pauseGenericActivity(message: "The agent providers are not available.")
+            return
+        }
+        let previousRunID = record.activity?.runs.last?.id
+        let followsLiveRun = RunSelectionPolicy.shouldSelectNextRun(
+            selectedRunID: selectedRunID,
+            activeRunID: previousRunID,
+            activeRunIsAtBottom: previousRunID.flatMap { runIsAtBottom[$0] }
+        )
+        let compatibility = Self.compatibilityRoleAndKind(for: step)
+        var sessionState = record.activity?.stepSessions[step.id]
+            ?? WorkflowSessionState(stepID: step.id, target: step.target)
+        sessionState.target = step.target
+        record.activity?.stepSessions[step.id] = sessionState
+
+        let run = RunRecord(
+            sequence: (record.activity?.runs.count ?? 0) + 1,
+            role: compatibility.role,
+            kind: compatibility.kind,
+            status: .queued,
+            threadID: sessionState.providerSessionID,
+            model: step.target.model,
+            effort: step.target.options.effort ?? "",
+            prompt: prompt,
+            workflowStep: WorkflowStepSnapshot(
+                step: step,
+                loopIteration: cursor.loopIteration
+            ),
+            agentTarget: step.target,
+            sessionLineage: sessionState.lineage
+        )
+        record.activity?.workflowResumeCheckpoint = .recoverRun(run.id)
+        record.activity?.runs.append(run)
+        runIsAtBottom[run.id] = true
+        if followsLiveRun {
+            selectedRunID = run.id
+        }
+        statusMessage = "Starting \(step.name.lowercased())…"
+
+        do {
+            try await persist()
+        } catch {
+            let queuedSaveError = error
+            record.activity?.runs.removeAll { $0.id == run.id }
+            runIsAtBottom.removeValue(forKey: run.id)
+            record.activity?.status = .paused
+            record.activity?.workflowResumeCheckpoint = .perform(cursor)
+            selectedRunID = previousRunID
+            try? await persist()
+            errorMessage = "Could not save \(step.name) before starting it: \(queuedSaveError.localizedDescription)"
+            statusMessage = "Paused before \(step.name.lowercased())"
+            return
+        }
+
+        let reusableSessionID = reusableProviderSessionID(
+            sessionState,
+            stepID: step.id
+        )
+        let session: AgentSession
+        do {
+            session = try await agentProviders.prepareSession(
+                AgentSessionRequest(
+                    existingSessionID: reusableSessionID,
+                    name: "\(repositoryName) — \(step.name)",
+                    cwd: record.canonicalPath,
+                    target: step.target,
+                    developerInstructions: GenericPromptBuilder.sessionInstructions(
+                        workflow: workflow,
+                        step: step
+                    )
+                )
+            )
+            sessionState.providerSessionID = session.id
+            record.activity?.stepSessions[step.id] = sessionState
+            updateRun(run.id) { $0.threadID = session.id }
+            try await persist()
+        } catch {
+            await failGenericRunBeforeStart(
+                runID: run.id,
+                message: "Could not prepare \(step.name): \(error.localizedDescription)"
+            )
+            return
+        }
+
+        guard !isClosing else {
+            updateRun(run.id) { $0.status = .interrupted }
+            record.activity?.status = .paused
+            record.activity?.workflowResumeCheckpoint = .recoverRun(run.id)
+            try? await persist()
+            return
+        }
+
+        do {
+            let handle = try await agentProviders.startRun(
+                AgentRunRequest(
+                    runID: run.id,
+                    session: session,
+                    cwd: record.canonicalPath,
+                    prompt: prompt,
+                    target: step.target
+                )
+            )
+            updateRun(run.id) {
+                $0.turnID = handle.executionID
+                $0.status = .running
+            }
+            do {
+                try await persist()
+            } catch {
+                errorMessage = "\(step.name) started, but its latest state could not be saved: \(error.localizedDescription)"
+            }
+
+            genericRunTasks[run.id] = Task { [weak self] in
+                for await event in handle.events {
+                    guard let self else { return }
+                    await self.handleAgentEvent(event, runID: run.id)
+                }
+                self?.genericRunTasks.removeValue(forKey: run.id)
+            }
+            if isClosing {
+                pauseState = .interrupting
+                statusMessage = "Interrupting \(step.name.lowercased())…"
+                try await agentProviders.interrupt(
+                    providerID: step.target.providerID,
+                    runID: run.id
+                )
+            } else {
+                statusMessage = "\(step.name) running"
+            }
+        } catch {
+            await failGenericRunBeforeStart(
+                runID: run.id,
+                message: "Could not start \(step.name): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func failGenericRunBeforeStart(runID: UUID, message: String) async {
+        let text = RunTranscriptPresentation.storedText(
+            "\n\(message)\n",
+            section: .diagnostic
+        )
+        updateRun(runID) {
+            $0.status = .failed
+            $0.completedAt = .now
+            $0.transcript += text
+        }
+        await appendTranscript(text, runID: runID)
+        record.activity?.status = .paused
+        record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+        statusMessage = "Paused after an agent start failure"
+        errorMessage = message
+        if isClosing {
+            await completeCloseAfterTerminalEvent()
+        } else {
+            try? await persist()
+        }
+    }
+
+    private func handleAgentEvent(_ event: AgentEvent, runID: UUID) async {
+        guard let run = run(withID: runID) else { return }
+        switch event {
+        case .started(let executionID):
+            updateRun(runID) {
+                $0.turnID = executionID
+                $0.status = .running
+            }
+            try? await persist()
+
+        case .transcript(let text), .diagnostic(let text):
+            guard !text.isEmpty else { return }
+            updateRun(runID) { $0.transcript += text }
+            await appendTranscript(text, runID: runID)
+
+        case .tokenUsage(let usage):
+            updateRun(runID) { $0.tokenUsage = usage }
+            await appendTokenUsage(usage, runID: runID)
+
+        case .interaction(let interaction):
+            presentGenericInteraction(interaction, runID: runID, providerID: run.agentTarget?.providerID)
+            try? await persist()
+
+        case .interactionResolved(let interactionID):
+            if let presentationKey = genericInteractionRoutes.first(where: {
+                $0.value.runID == runID && $0.value.interactionID == interactionID
+            })?.key {
+                await finishGenericInteraction(presentationKey: presentationKey)
+            }
+
+        case .completed(let output, let duration, let usage):
+            updateRun(runID) {
+                $0.finalOutput = output
+                $0.durationMilliseconds = duration
+                $0.tokenUsage = usage ?? $0.tokenUsage
+                $0.completedAt = .now
+                $0.status = .routing
+            }
+            if let usage {
+                await appendTokenUsage(usage, runID: runID)
+            }
+            if isClosing {
+                record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
+                pauseGenericActivity(message: "Paused before preparing the handoff")
+                await completeCloseAfterTerminalEvent()
+            } else {
+                await beginGenericRouting(runID: runID, finalOutput: output)
+            }
+
+        case .interrupted(let detail):
+            updateRun(runID) {
+                $0.status = .interrupted
+                $0.completedAt = .now
+                if let detail, !detail.isEmpty {
+                    $0.relayError = detail
+                }
+            }
+            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+            pauseGenericActivity(message: detail ?? "\(run.displayName) was interrupted.")
+            if isClosing {
+                await completeCloseAfterTerminalEvent()
+            } else {
+                try? await persist()
+            }
+
+        case .failed(let detail):
+            updateRun(runID) {
+                $0.status = .failed
+                $0.completedAt = .now
+                $0.relayError = detail
+            }
+            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+            pauseGenericActivity(message: detail)
+            if isClosing {
+                await completeCloseAfterTerminalEvent()
+            } else {
+                try? await persist()
+            }
+        }
+    }
+
+    private func beginGenericRouting(runID: UUID, finalOutput: String) async {
+        guard !completingRunIDs.contains(runID), run(withID: runID) != nil else { return }
+        completingRunIDs.insert(runID)
+        updateRun(runID) {
+            $0.status = .routing
+            $0.relayError = nil
+            $0.workflowHandoff = nil
+        }
+        record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
+        statusMessage = "Preparing handoff…"
+        do {
+            try await persist()
+        } catch {
+            completingRunIDs.remove(runID)
+            updateRun(runID) {
+                $0.status = .paused
+                $0.relayError = "The completed step could not be saved before preparing its handoff."
+            }
+            record.activity?.status = .paused
+            errorMessage = "Codeness did not start the handoff because the completed step could not be saved: \(error.localizedDescription)"
+            try? await persist()
+            return
+        }
+        routingTasks[runID] = Task { [weak self] in
+            await self?.routeGenericRun(runID: runID, finalOutput: finalOutput)
+        }
+    }
+
+    private func routeGenericRun(runID: UUID, finalOutput: String) async {
+        defer {
+            completingRunIDs.remove(runID)
+            routingTasks.removeValue(forKey: runID)
+        }
+        guard let workflowRouter,
+              let activity = record.activity,
+              let workflow = activity.workflow,
+              let run = run(withID: runID),
+              let sourceStep = run.workflowStep,
+              let cursor = activity.workflowCursor else { return }
+        let continuingTransition = GenericWorkflowStateMachine.transition(
+            after: cursor,
+            outcome: .continueWorkflow,
+            in: workflow
+        )
+        let nextStepName: String? = switch continuingTransition {
+        case .run(let nextCursor):
+            GenericWorkflowStateMachine.step(at: nextCursor, in: workflow)?.name
+        case .complete, .pause:
+            nil
+        }
+        let context = WorkflowHandoffContext(
+            goal: activity.goal,
+            workflowName: workflow.name,
+            sourceStep: sourceStep,
+            nextStepName: nextStepName,
+            makesLoopDecision: GenericWorkflowStateMachine.isLoopDecision(cursor, in: workflow),
+            previousHandoff: activity.runs.last(where: {
+                $0.id != runID && $0.workflowHandoff != nil
+            })?.workflowHandoff,
+            source: finalOutput
+        )
+        do {
+            let handoff = try await workflowRouter.route(
+                context,
+                configuration: workflow.coordinator,
+                cwd: record.canonicalPath
+            )
+            guard !isClosing else { return }
+            var normalized = handoff
+            normalized.runLabel = normalizedRunLabel(
+                handoff.runLabel,
+                fallback: sourceStep.name
+            )
+            updateRun(runID) {
+                $0.workflowHandoff = normalized
+                $0.status = .completed
+                $0.relayError = nil
+            }
+            record.activity?.workflowResumeCheckpoint = nil
+            await applyGenericWorkflowDecision(runID: runID, handoff: normalized)
+        } catch {
+            guard !isClosing else { return }
+            updateRun(runID) {
+                $0.status = .paused
+                $0.relayError = error.localizedDescription
+            }
+            record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
+            pauseGenericActivity(message: "Handoff paused: \(error.localizedDescription)")
+            try? await persist()
+        }
+    }
+
+    private func applyGenericWorkflowDecision(
+        runID: UUID,
+        handoff: WorkflowHandoff
+    ) async {
+        guard let activity = record.activity,
+              let workflow = activity.workflow,
+              let cursor = activity.workflowCursor else { return }
+        switch GenericWorkflowStateMachine.transition(
+            after: cursor,
+            outcome: handoff.outcome,
+            in: workflow
+        ) {
+        case .pause(let reason):
+            updateRun(runID) {
+                $0.status = .paused
+                $0.relayError = reason
+            }
+            record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
+            pauseGenericActivity(message: reason)
+            try? await persist()
+
+        case .run(let nextCursor):
+            record.activity?.workflowCursor = nextCursor
+            if pauseAfterCurrent || isClosing || record.activity?.status == .paused {
+                record.activity?.status = .paused
+                record.activity?.workflowResumeCheckpoint = .perform(nextCursor)
+                statusMessage = "Paused before \(genericStepName(at: nextCursor).lowercased())"
+                try? await persist()
+            } else {
+                await performGeneric(cursor: nextCursor, previousHandoff: handoff)
+            }
+
+        case .complete:
+            completeGenericActivity()
+            try? await persist()
+        }
+    }
+
+    private func completeGenericActivity() {
+        record.activity?.status = .completed
+        record.activity?.completedAt = .now
+        record.activity?.workflowCursor = nil
+        record.activity?.workflowResumeCheckpoint = nil
+        statusMessage = "Activity complete"
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+    }
+
+    private func recoverGenericRun(_ interruptedRun: RunRecord) async {
+        guard let cursor = record.activity?.workflowCursor else {
+            pauseGenericActivity(message: "The interrupted step has no workflow cursor.")
+            return
+        }
+        let recoveryPrompt = """
+        The preceding Codeness step was interrupted and may have partially changed the repository. \
+        Inspect the current state, recover the intended step without blindly replaying completed \
+        edits, and finish at the same kind of checkpoint.
+
+        PREVIOUS STEP INSTRUCTION
+
+        \(interruptedRun.prompt)
+        """
+        record.activity?.workflowResumeCheckpoint = .recoverRun(interruptedRun.id)
+        await performGeneric(
+            cursor: cursor,
+            previousHandoff: record.activity?.runs.dropLast().last(where: {
+                $0.workflowHandoff != nil
+            })?.workflowHandoff,
+            promptOverride: recoveryPrompt
+        )
+    }
+
+    private func presentGenericInteraction(
+        _ interaction: AgentInteraction,
+        runID: UUID,
+        providerID: AgentProviderID?
+    ) {
+        guard let providerID else { return }
+        let presentationKey = "agent:\(providerID.rawValue):\(runID.uuidString):\(interaction.id)"
+        let presentationID = JSONValue.string(presentationKey)
+        guard !pendingInteractions.contains(where: { $0.id == presentationID }) else { return }
+        genericInteractionRoutes[presentationKey] = GenericInteractionRoute(
+            providerID: providerID,
+            runID: runID,
+            interactionID: interaction.id
+        )
+        pendingInteractions.append(
+            PendingServerInteraction(
+                id: presentationID,
+                method: "agent/\(providerID.rawValue)/\(interaction.kind.rawValue)",
+                title: interaction.title,
+                detail: interaction.detail,
+                questions: interaction.questions,
+                approvalDecisions: interaction.decisions.map {
+                    ApprovalDecision(
+                        value: $0.payload,
+                        label: $0.label,
+                        explanation: $0.explanation,
+                        isDestructive: $0.isDestructive
+                    )
+                },
+                rawParameters: interaction.rawParameters
+            )
+        )
+        updateRun(runID) { $0.status = .awaitingApproval }
+        if pendingInteractions.count == 1 {
+            statusMessage = interaction.title
+        }
+    }
+
+    private func genericRoute(for presentationID: JSONValue) -> GenericInteractionRoute? {
+        guard let key = presentationID.stringValue else { return nil }
+        return genericInteractionRoutes[key]
+    }
+
+    private func resolveGenericInteraction(
+        _ route: GenericInteractionRoute,
+        resolution: AgentInteractionResolution,
+        presentationID: JSONValue
+    ) async {
+        guard let agentProviders else { return }
+        do {
+            try await agentProviders.resolveInteraction(
+                providerID: route.providerID,
+                runID: route.runID,
+                interactionID: route.interactionID,
+                resolution: resolution
+            )
+            if let key = presentationID.stringValue {
+                genericInteractionRoutes.removeValue(forKey: key)
+            }
+            await finishInteraction(id: presentationID)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func finishGenericInteraction(presentationKey: String) async {
+        genericInteractionRoutes.removeValue(forKey: presentationKey)
+        await finishInteraction(id: .string(presentationKey))
+    }
+
+    private func prepareGenericWorkflowForClose(
+        strategy: DocumentPauseStrategy
+    ) async -> DocumentClosePreparationResult {
+        guard record.activity?.status == .running else {
+            return await finishCloseWithoutActiveTurn()
+        }
+        guard let run = activeRun else {
+            record.activity?.status = .paused
+            if let cursor = record.activity?.workflowCursor {
+                record.activity?.workflowResumeCheckpoint = .perform(cursor)
+            }
+            return await finishCloseWithoutActiveTurn()
+        }
+        switch run.status {
+        case .routing:
+            record.activity?.status = .paused
+            record.activity?.workflowResumeCheckpoint = .routeCompletedRun(run.id)
+            statusMessage = "Paused before preparing the handoff"
+            return await finishCloseWithoutActiveTurn()
+        case .queued where genericRunTasks[run.id] == nil:
+            record.activity?.status = .paused
+            record.activity?.workflowResumeCheckpoint = .recoverRun(run.id)
+            return await finishCloseWithoutActiveTurn()
+        case .queued, .running, .awaitingApproval:
+            guard let target = run.agentTarget, let agentProviders else {
+                return failClose("The active agent provider is unavailable.")
+            }
+            do {
+                if strategy == .graceful, run.status == .running {
+                    pauseState = .requestingCheckpoint
+                    statusMessage = "Asking \(run.displayName.lowercased()) to stop coherently…"
+                    try await agentProviders.steer(
+                        providerID: target.providerID,
+                        runID: run.id,
+                        message: Self.gracefulPausePrompt
+                    )
+                    pauseState = .waitingForTurn
+                } else {
+                    pauseState = .interrupting
+                    statusMessage = "Interrupting \(run.displayName.lowercased())…"
+                    try await agentProviders.interrupt(
+                        providerID: target.providerID,
+                        runID: run.id
+                    )
+                }
+                return await waitForCloseCompletion()
+            } catch {
+                return await reconcileCloseControlFailure(error.localizedDescription)
+            }
+        case .paused, .interrupted, .failed, .completed:
+            record.activity?.status = .paused
+            if run.status == .completed, run.workflowHandoff != nil,
+               let cursor = record.activity?.workflowCursor,
+               let workflow = record.activity?.workflow {
+                switch GenericWorkflowStateMachine.transition(
+                    after: cursor,
+                    outcome: run.workflowHandoff?.outcome ?? .unclear,
+                    in: workflow
+                ) {
+                case .run(let next):
+                    record.activity?.workflowCursor = next
+                    record.activity?.workflowResumeCheckpoint = .perform(next)
+                case .complete:
+                    completeGenericActivity()
+                case .pause:
+                    record.activity?.workflowResumeCheckpoint = .routeCompletedRun(run.id)
+                }
+            } else {
+                record.activity?.workflowResumeCheckpoint = .recoverRun(run.id)
+            }
+            return await finishCloseWithoutActiveTurn()
+        }
+    }
+
+    private func pauseGenericActivity(message: String) {
+        record.activity?.status = .paused
+        statusMessage = message
+    }
+
+    private func genericStepName(at cursor: WorkflowCursor) -> String {
+        guard let workflow = record.activity?.workflow else { return "step" }
+        return GenericWorkflowStateMachine.step(at: cursor, in: workflow)?.name ?? "step"
+    }
+
+    private func recoverInterruptedGenericState() {
+        guard record.activity?.status == .running else { return }
+        record.activity?.status = .paused
+        markLastGenericRunInterruptedIfNeeded()
+    }
+
+    private func markLastGenericRunInterruptedIfNeeded() {
+        guard let index = record.activity?.runs.indices.last else {
+            if let cursor = record.activity?.workflowCursor {
+                record.activity?.workflowResumeCheckpoint = .perform(cursor)
+            }
+            return
+        }
+        let run = record.activity?.runs[index]
+        if let status = run?.status,
+           [.queued, .running, .awaitingApproval].contains(status),
+           let runID = run?.id {
+            record.activity?.runs[index].status = .interrupted
+            record.activity?.runs[index].completedAt = .now
+            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+        } else if run?.status == .routing,
+                  let runID = run?.id,
+                  run?.finalOutput?.isEmpty == false {
+            record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
+        } else if let runID = run?.id, run?.status == .routing {
+            record.activity?.runs[index].status = .interrupted
+            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+        }
+    }
+
+    private static func compatibilityRoleAndKind(
+        for step: WorkflowStep
+    ) -> (role: AgentRole, kind: RunKind) {
+        let name = step.name.lowercased()
+        if step.target.options.mode == .plan || name.contains("review") || name.contains("plan") {
+            return (.reviewer, .review)
+        }
+        if name.contains("fix") {
+            return (.implementer, .fix)
+        }
+        return (.implementer, .implementation)
+    }
+
+    private static func sameFrozenWorkflowDefinition(
+        _ lhs: WorkflowTemplate,
+        _ rhs: WorkflowTemplate
+    ) -> Bool {
+        guard lhs.id == rhs.id,
+              lhs.name == rhs.name,
+              lhs.steps.count == rhs.steps.count,
+              lhs.coordinator.instructions == rhs.coordinator.instructions else { return false }
+        return zip(lhs.steps, rhs.steps).allSatisfy { old, new in
+            old.id == new.id
+                && old.name == new.name
+                && old.section == new.section
+                && old.instructions == new.instructions
+        }
+    }
+
+    private static func requiresNewLineage(
+        from old: AgentTarget,
+        to new: AgentTarget
+    ) -> Bool {
+        old.providerID != new.providerID
+            || old.model != new.model
+            || old.options.mode != new.options.mode
+    }
+
+    private func reusableProviderSessionID(
+        _ session: WorkflowSessionState,
+        stepID: String
+    ) -> String? {
+        guard let providerSessionID = session.providerSessionID else { return nil }
+        // Claude reserves an ID locally before its process creates the session.
+        // Reuse only after a started execution was durably observed; otherwise a
+        // crash between reservation and launch would retry `--resume` against a
+        // conversation that never existed. Creating a fresh lineage session here
+        // is safe for Codex too and leaves the lineage number unchanged.
+        let wasEstablished = record.activity?.runs.contains { run in
+            run.workflowStep?.id == stepID
+                && run.threadID == providerSessionID
+                && run.turnID != nil
+        } == true
+        return wasEstablished ? providerSessionID : nil
+    }
+
     private func ensureSessions(allowRecreate: Bool) async throws {
         guard !sessionsPrepared else { return }
         let implementerThreadID = try await prepareThread(
@@ -1759,6 +2824,16 @@ public final class RepositoryCoordinator {
 
     private var pausedStatusMessage: String {
         guard let activity = record.activity else { return "Paused" }
+        if let checkpoint = activity.workflowResumeCheckpoint {
+            switch checkpoint {
+            case .recoverRun:
+                return "Interrupted; inspect the repository before resuming"
+            case .routeCompletedRun:
+                return "Handoff pending; resume without replaying the completed step"
+            case .perform(let cursor):
+                return "Paused before \(genericStepName(at: cursor))"
+            }
+        }
         if let checkpoint = activity.resumeCheckpoint {
             switch checkpoint {
             case .recoverRun:
@@ -1798,6 +2873,17 @@ public final class RepositoryCoordinator {
               record.activity?.runs.contains(where: { $0.id == runID }) == true else { return }
         try? await store.appendTranscript(
             text,
+            repositoryPath: record.canonicalPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    private func appendTokenUsage(_ usage: RunTokenUsage, runID: UUID) async {
+        guard let activityID = record.activity?.id,
+              record.activity?.runs.contains(where: { $0.id == runID }) == true else { return }
+        try? await store.appendTokenUsage(
+            usage,
             repositoryPath: record.canonicalPath,
             activityID: activityID,
             runID: runID
@@ -1864,6 +2950,23 @@ public final class RepositoryCoordinator {
     private var workSummaryContext: WorkSummaryContext? {
         guard let activity = record.activity else { return nil }
         let handoffs = activity.runs.compactMap { run -> WorkSummaryHandoff? in
+            if let handoff = run.workflowHandoff {
+                let disposition: SourceDisposition = switch handoff.outcome {
+                case .continueWorkflow: .implementationCheckpoint
+                case .complete: .fixComplete
+                case .blocked: .blocked
+                case .failed: .failed
+                case .unclear: .unclear
+                }
+                return WorkSummaryHandoff(
+                    runID: run.id,
+                    sequence: run.sequence,
+                    kind: run.kind,
+                    label: handoff.runLabel,
+                    disposition: disposition,
+                    text: handoff.text
+                )
+            }
             guard let handoff = run.handoff else { return nil }
             return WorkSummaryHandoff(
                 runID: run.id,
@@ -1888,8 +2991,16 @@ public final class RepositoryCoordinator {
     private var hasSafeAutomaticResumeCheckpoint: Bool {
         guard isLoaded,
               let activity = record.activity,
-              activity.status == .paused,
-              let checkpoint = activity.resumeCheckpoint else { return false }
+              activity.status == .paused else { return false }
+        if let checkpoint = activity.workflowResumeCheckpoint {
+            switch checkpoint {
+            case .routeCompletedRun, .perform:
+                return true
+            case .recoverRun:
+                return false
+            }
+        }
+        guard let checkpoint = activity.resumeCheckpoint else { return false }
         switch checkpoint {
         case .routeCompletedRun, .perform:
             return true
@@ -1917,7 +3028,14 @@ public final class RepositoryCoordinator {
         }
         if record.activity?.status == .running {
             record.activity?.status = .paused
-            migrateResumeCheckpointIfNeeded()
+            if record.activity?.workflow != nil {
+                if record.activity?.workflowResumeCheckpoint == nil,
+                   let cursor = record.activity?.workflowCursor {
+                    record.activity?.workflowResumeCheckpoint = .perform(cursor)
+                }
+            } else {
+                migrateResumeCheckpointIfNeeded()
+            }
         }
         guard await flushDocumentState() else {
             return failClose(errorMessage ?? "Could not save this repository document.")

@@ -6,20 +6,17 @@ struct ActivityConfigurationView: View {
 
     @Environment(CodenessApplicationModel.self) private var application
     @State private var goal: String
-    @State private var prompts: ActivityPrompts
-    @State private var showsAdvancedPrompts = false
-    @State private var isTestingHandoff = false
-    @State private var handoffTestMessage: String?
-    @State private var handoffTestSucceeded = false
+    @State private var workflow: WorkflowTemplate
+    @State private var showsWorkflowEditor = false
 
     init(
         coordinator: RepositoryCoordinator,
         suggestedGoal: String,
-        suggestedPrompts: ActivityPrompts
+        suggestedWorkflow: WorkflowTemplate
     ) {
         self.coordinator = coordinator
         _goal = State(initialValue: suggestedGoal)
-        _prompts = State(initialValue: suggestedPrompts)
+        _workflow = State(initialValue: suggestedWorkflow)
     }
 
     var body: some View {
@@ -29,152 +26,149 @@ struct ActivityConfigurationView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Configure Activity")
                             .font(.largeTitle.weight(.semibold))
-                        Text("Set the goal and phase prompts for this repository. Starting creates a fresh implementer/reviewer session pair.")
+                        Text("Choose a reusable workflow, then adjust any step, agent, model, mode, or speed for this activity.")
                             .foregroundStyle(.secondary)
                     }
 
                     VStack(alignment: .leading, spacing: 7) {
                         Text("Goal")
                             .font(.headline)
-                        Text("Describe the intended outcome, point the agents to a specification file or folder, add direct instructions, or combine all three. Codeness supplies this entire text to every phase as THE GOAL.")
+                        Text("Describe the intended outcome, point the agents to a specification, or combine both. Codeness supplies this full text to every configured step.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         ActivityTextEditor(
                             text: $goal,
                             minHeight: 140,
                             accessibilityLabel: "Goal",
-                            helpText: "Edit THE GOAL supplied to the Implement, Review, and Fix phases.",
+                            helpText: "Edit the full goal supplied to every workflow step.",
                             placeholder: "For example: Implement the specification in Docs/Feature.md, including its test requirements."
                         )
                     }
 
-                    GroupBox("Models") {
-                        HStack {
-                            Text(modelSummary)
-                                .foregroundStyle(.secondary)
-                            Spacer()
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Workflow")
+                            .font(.headline)
+                        Picker("Workflow", selection: workflowSelection) {
+                            ForEach(application.workflowCatalog.templates) { template in
+                                Text(template.name).tag(template.id)
+                            }
                         }
-                        .padding(.vertical, 2)
+                        .labelsHidden()
+                        .frame(maxWidth: 420, alignment: .leading)
+                        Text(workflow.summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(workflowSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
 
-                    DisclosureGroup(isExpanded: $showsAdvancedPrompts) {
-                        PromptTemplateFields(prompts: $prompts)
+                    DisclosureGroup(isExpanded: $showsWorkflowEditor) {
+                        WorkflowTemplateFields(workflow: $workflow)
                             .padding(.top, 14)
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Advanced Prompt Templates")
+                            Text("Customize This Workflow")
                                 .font(.headline)
-                            Text("The supplied defaults are ready for normal activities.")
+                            Text("Changes here belong only to this activity draft. Edit the global library in Codeness Settings.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
 
-                    if let validationMessage = prompts.validationMessage {
+                    if let validationMessage = workflow.validationMessage {
                         Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
+                    } else if let compatibilityMessage =
+                        application.workflowCompatibilityMessage(workflow) {
+                        Label(
+                            compatibilityMessage,
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
+                    } else if !application.canRun(workflow) {
+                        Label(
+                            unavailableProvidersMessage,
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
                     }
                 }
-                .frame(maxWidth: 900, alignment: .leading)
+                .frame(maxWidth: 980, alignment: .leading)
                 .padding(28)
                 .frame(maxWidth: .infinity)
             }
 
             Divider()
             HStack {
-                if let handoffTestMessage {
-                    Label(
-                        handoffTestMessage,
-                        systemImage: handoffTestSucceeded
-                            ? "checkmark.circle.fill"
-                            : "exclamationmark.triangle.fill"
-                    )
+                Text("The goal and future step targets remain editable whenever the workflow is paused.")
                     .font(.caption)
-                    .foregroundStyle(handoffTestSucceeded ? .green : .red)
-                    .lineLimit(2)
-                } else {
-                    Text("The Goal can be amended later whenever the workflow is paused.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("Test Handoff") {
-                    Task { await testHandoffConfiguration() }
-                }
-                .disabled(isTestingHandoff)
-                .help("Verify handoff credentials and model access before starting an implementation turn")
                 if coordinator.isStartingActivity {
                     ProgressView()
                         .controlSize(.small)
-                        .help("Codeness is starting the first Implement pass")
+                        .help("Codeness is starting the first configured step")
                 }
                 Button("Start") {
                     Task {
-                        await coordinator.startActivity(goal: goal, prompts: prompts)
+                        await coordinator.startActivity(goal: goal, workflow: workflow)
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .help("Start this activity and begin its first Implement pass")
+                .help("Start this activity and run its first configured step")
                 .disabled(
                     goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || prompts.validationMessage != nil
+                        || workflow.validationMessage != nil
+                        || application.workflowCompatibilityMessage(workflow) != nil
                         || !coordinator.canStartActivity
-                        || !application.isReady
+                        || !application.canRun(workflow)
                 )
             }
             .padding(14)
         }
         .onChange(of: goal) { _, _ in
-            coordinator.updateActivityDraft(goal: goal, prompts: prompts)
+            coordinator.updateActivityDraft(goal: goal, workflow: workflow)
         }
-        .onChange(of: prompts) { _, _ in
-            coordinator.updateActivityDraft(goal: goal, prompts: prompts)
+        .onChange(of: workflow) { _, _ in
+            coordinator.updateActivityDraft(goal: goal, workflow: workflow)
         }
     }
 
-    private var modelSummary: String {
-        let settings = coordinator.record.settings
-        let phases = [
-            ("Implement", displayName(for: settings.implementer.model)),
-            ("Review", displayName(for: settings.reviewer.model)),
-            ("Fix", displayName(for: settings.fixer.model))
-        ]
-        var groups: [(model: String, phases: [String])] = []
-        for (phase, model) in phases {
-            if let index = groups.firstIndex(where: { $0.model == model }) {
-                groups[index].phases.append(phase)
-            } else {
-                groups.append((model, [phase]))
+    private var workflowSelection: Binding<String> {
+        Binding(
+            get: { workflow.id },
+            set: { identifier in
+                guard let selected = application.workflowCatalog.template(id: identifier) else {
+                    return
+                }
+                workflow = selected
             }
-        }
-        return groups.map { group in
-            "\(joinedPhases(group.phases)): \(group.model)"
+        )
+    }
+
+    private var workflowSummary: String {
+        WorkflowSection.allCases.compactMap { section -> String? in
+            let steps = workflow.steps(in: section)
+            guard !steps.isEmpty else { return nil }
+            let names = steps.map(\.name).joined(separator: " → ")
+            return "\(section.displayName): \(names)"
         }
         .joined(separator: " · ")
     }
 
-    private func joinedPhases(_ phases: [String]) -> String {
-        guard let last = phases.last else { return "" }
-        if phases.count == 1 { return last }
-        if phases.count == 2 { return phases.joined(separator: " and ") }
-        return phases.dropLast().joined(separator: ", ") + ", and " + last
-    }
-
-    private func displayName(for identifier: String) -> String {
-        application.models.first(where: { $0.model == identifier })?.displayName ?? identifier
-    }
-
-    private func testHandoffConfiguration() async {
-        isTestingHandoff = true
-        defer { isTestingHandoff = false }
-        do {
-            try await coordinator.testHandoffConfiguration(coordinator.record.settings.relay)
-            handoffTestSucceeded = true
-            handoffTestMessage = "Handoff configuration verified"
-        } catch {
-            handoffTestSucceeded = false
-            handoffTestMessage = error.localizedDescription
-        }
+    private var unavailableProvidersMessage: String {
+        let identifiers = Set(
+            workflow.steps.map(\.target.providerID)
+                + [workflow.coordinator.target.providerID]
+        )
+        let names = identifiers
+            .filter { !application.isProviderReady($0) }
+            .map(application.providerName)
+            .sorted()
+            .joined(separator: ", ")
+        return "\(names.isEmpty ? "A required provider" : names) must be configured before this workflow can start."
     }
 }
