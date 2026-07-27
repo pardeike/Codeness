@@ -377,6 +377,14 @@ public actor ClaudeAgentProvider: AgentProviding {
         outputSchema: JSONValue?,
         utility: Bool
     ) -> [String] {
+        let permissionMode: String
+        if utility {
+            permissionMode = "dontAsk"
+        } else if target.options.mode == .plan {
+            permissionMode = "plan"
+        } else {
+            permissionMode = "bypassPermissions"
+        }
         var result = [
             "--print",
             "--output-format", "stream-json",
@@ -385,7 +393,7 @@ public actor ClaudeAgentProvider: AgentProviding {
             "--include-partial-messages",
             "--replay-user-messages",
             "--model", target.model,
-            "--permission-mode", target.options.mode == .plan ? "plan" : (utility ? "dontAsk" : "manual"),
+            "--permission-mode", permissionMode,
             "--settings", JSONValue.object([
                 "fastMode": .bool(target.options.speed == .fast)
             ]).encodedString(),
@@ -404,6 +412,9 @@ public actor ClaudeAgentProvider: AgentProviding {
         if utility {
             result += ["--tools", "", "--no-session-persistence"]
         } else {
+            // Keep Claude in Plan mode when requested while making bypass
+            // available so no Codeness run pauses for tool approval.
+            result.append("--allow-dangerously-skip-permissions")
             result += ["--permission-prompt-tool", "stdio"]
         }
         if let outputSchema {

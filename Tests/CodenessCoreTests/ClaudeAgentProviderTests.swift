@@ -45,19 +45,28 @@ struct ClaudeAgentProviderTests {
             target: target,
             cwd: fixture.directory.path
         )
+        let standardTarget = AgentTarget(
+            providerID: .claude,
+            model: "sonnet",
+            options: AgentExecutionOptions(
+                effort: "high",
+                mode: .standard,
+                speed: .fast
+            )
+        )
         let resumedSession = try await provider.prepareSession(
             AgentSessionRequest(
                 existingSessionID: firstSession.id,
                 name: "Fixture — Review",
                 cwd: fixture.directory.path,
-                target: target,
+                target: standardTarget,
                 developerInstructions: "Review the repository carefully."
             )
         )
         let resumedEvents = try await run(
             provider: provider,
             session: resumedSession,
-            target: target,
+            target: standardTarget,
             cwd: fixture.directory.path
         )
         let utilityTarget = AgentTarget(
@@ -65,7 +74,7 @@ struct ClaudeAgentProviderTests {
             model: "opus",
             options: AgentExecutionOptions(
                 effort: "low",
-                mode: .standard,
+                mode: .plan,
                 speed: .fast
             )
         )
@@ -137,14 +146,21 @@ struct ClaudeAgentProviderTests {
         #expect(firstArguments.contains("high"))
         #expect(firstArguments.contains("--permission-mode"))
         #expect(firstArguments.contains("plan"))
+        #expect(firstArguments.contains("--allow-dangerously-skip-permissions"))
         #expect(firstArguments.contains("--permission-prompt-tool"))
         #expect(firstArguments.contains("stdio"))
         #expect(firstArguments.contains { $0.hasPrefix("--session-id=") })
         #expect(secondArguments.contains { $0 == "--resume=\(firstSession.id)" })
+        let standardPermissionIndex = try #require(
+            secondArguments.firstIndex(of: "--permission-mode")
+        )
+        #expect(secondArguments[standardPermissionIndex + 1] == "bypassPermissions")
+        #expect(secondArguments.contains("--allow-dangerously-skip-permissions"))
         #expect(utilityArguments.contains("--no-session-persistence"))
         #expect(utilityArguments.contains("--json-schema"))
         #expect(utilityArguments.contains("--tools"))
         #expect(utilityArguments.contains(""))
+        #expect(!utilityArguments.contains("--allow-dangerously-skip-permissions"))
         let utilityPermissionIndex = try #require(
             utilityArguments.firstIndex(of: "--permission-mode")
         )
