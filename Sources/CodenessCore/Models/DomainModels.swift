@@ -688,6 +688,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
     public var resumeCheckpoint: ResumeCheckpoint?
     public var implementationClaimedComplete: Bool
     public var goalAmendments: [GoalAmendment]
+    public var pendingGoalAmendment: GoalAmendment?
     public var workflow: WorkflowTemplate?
     public var workflowCursor: WorkflowCursor?
     public var workflowResumeCheckpoint: WorkflowResumeCheckpoint?
@@ -705,6 +706,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         resumeCheckpoint: ResumeCheckpoint? = nil,
         implementationClaimedComplete: Bool = false,
         goalAmendments: [GoalAmendment] = [],
+        pendingGoalAmendment: GoalAmendment? = nil,
         workflow: WorkflowTemplate? = nil,
         workflowCursor: WorkflowCursor? = nil,
         workflowResumeCheckpoint: WorkflowResumeCheckpoint? = nil,
@@ -721,6 +723,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         self.resumeCheckpoint = resumeCheckpoint
         self.implementationClaimedComplete = implementationClaimedComplete
         self.goalAmendments = goalAmendments
+        self.pendingGoalAmendment = pendingGoalAmendment
         self.workflow = workflow
         self.workflowCursor = workflowCursor
         self.workflowResumeCheckpoint = workflowResumeCheckpoint
@@ -739,6 +742,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         case resumeCheckpoint
         case implementationClaimedComplete
         case goalAmendments
+        case pendingGoalAmendment
         case workflow
         case workflowCursor
         case workflowResumeCheckpoint
@@ -764,6 +768,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
             [GoalAmendment].self,
             forKey: .goalAmendments
         ) ?? []
+        pendingGoalAmendment = try container.decodeIfPresent(
+            GoalAmendment.self,
+            forKey: .pendingGoalAmendment
+        )
         workflow = try container.decodeIfPresent(WorkflowTemplate.self, forKey: .workflow)
         workflowCursor = try container.decodeIfPresent(WorkflowCursor.self, forKey: .workflowCursor)
         workflowResumeCheckpoint = try container.decodeIfPresent(
@@ -791,6 +799,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         if !goalAmendments.isEmpty {
             try container.encode(goalAmendments, forKey: .goalAmendments)
         }
+        try container.encodeIfPresent(pendingGoalAmendment, forKey: .pendingGoalAmendment)
         try container.encodeIfPresent(workflow, forKey: .workflow)
         try container.encodeIfPresent(workflowCursor, forKey: .workflowCursor)
         try container.encodeIfPresent(workflowResumeCheckpoint, forKey: .workflowResumeCheckpoint)

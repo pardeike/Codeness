@@ -7,7 +7,7 @@
 
 ![A completed Implement, Review, and Fix workflow in Codeness](Documentation/codeness-workflow.png)
 
-Codeness is a workflow supervisor—not another coding agent. It coordinates your locally installed Codex and Claude Code CLIs inside the repository folder you choose, keeps each step's session alive across cycles, and gives you one place to follow, pause, steer, and resume the work.
+Codeness is a workflow supervisor—not another coding agent. It coordinates your locally installed Codex and Claude Code CLIs inside the work folder you choose, keeps each step's session alive across cycles, and gives you one place to follow, pause, steer, and resume the work.
 
 ## Why Codeness?
 
@@ -68,10 +68,10 @@ The build script generates the Xcode project, creates and verifies a signed Rele
 
 ### Run your first workflow
 
-1. Open Codeness and choose the repository folder in which the agents should work.
+1. Open Codeness and choose the folder in which the agents should work. Git is optional.
 2. Describe the complete outcome in **Goal**. You can also point to a specification file or folder.
 3. Pick a bundled workflow.
-4. Optionally expand **Customize This Workflow** to change steps, providers, models, modes, effort, or speed.
+4. Optionally choose **Customize…** to change steps, providers, models, modes, effort, or speed.
 5. Select **Start** and follow the runs in the sidebar.
 
 The folder you select is used exactly as chosen—it is not silently replaced by a parent Git root. This makes it possible to open different subfolders of the same working tree as independent Codeness workspaces.
@@ -86,13 +86,13 @@ Each workflow step owns a persistent provider session. When the step repeats, it
 - **Pause After Current** stops cleanly after the current handoff.
 - You can steer or interrupt an active turn, then resume from the saved checkpoint.
 - While paused, you can adjust the provider, model, effort, mode, and speed of future steps.
-- Approval and input requests from both providers appear in the same native interaction sheet.
+- Agent tool and file operations run without approval prompts in both Standard and Plan mode. Genuine questions and other user-input requests still appear in the native interaction sheet.
 
 Changing only effort or speed preserves a step's session lineage. Changing its provider, model, or mode starts a new lineage so incompatible context is never silently resumed.
 
 ## Customize workflows
 
-Open **Codeness → Settings** to manage the reusable workflow library and agent executable paths. Automatic CLI discovery is used when an executable path is empty; a configured path is authoritative after Codeness verifies it and restarts that provider.
+Open **Codeness → Settings** to manage reusable workflows and agent executable paths. Automatic CLI discovery is used when an executable path is empty; a configured path is authoritative after Codeness verifies it and restarts that provider.
 
 Every step and coordinator target can independently configure:
 
@@ -169,7 +169,7 @@ Generate the project, build, and run the test suite:
 ```sh
 xcodegen generate
 xcodebuild -project Codeness.xcodeproj -scheme Codeness -destination 'platform=macOS' build
-xcodebuild -project Codeness.xcodeproj -scheme Codeness -destination 'platform=macOS' test
+./scripts/test-quiet.sh
 ```
 
 Before considering a change complete, run the canonical Release build:

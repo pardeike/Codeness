@@ -64,7 +64,7 @@ final class RepositoryWindowManager {
         }
 
         let openPanel = NSOpenPanel()
-        openPanel.title = "Open Git Workspace"
+        openPanel.title = "Open Workspace"
         openPanel.prompt = "Open"
         openPanel.message = "Choose the exact folder Codeness should use as its workspace."
         openPanel.allowedContentTypes = [.folder]

@@ -232,6 +232,7 @@ struct WorkspaceStoreTests {
             JSONSerialization.jsonObject(with: encodedActivity) as? [String: Any]
         )
         activityObject.removeValue(forKey: "goalAmendments")
+        activityObject.removeValue(forKey: "pendingGoalAmendment")
         let legacyActivity = try JSONDecoder().decode(
             ActivityRecord.self,
             from: JSONSerialization.data(withJSONObject: activityObject)
@@ -253,6 +254,7 @@ struct WorkspaceStoreTests {
 
         #expect(legacyActivity.goal == "Legacy goal")
         #expect(legacyActivity.goalAmendments.isEmpty)
+        #expect(legacyActivity.pendingGoalAmendment == nil)
         #expect(viewState.detailPresentation == nil)
         #expect(viewState.detailSplitFraction == nil)
         #expect(viewState.workOverviewSummary == nil)

@@ -489,6 +489,32 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func completedActivityCanAmendTheGoalUsedByStartOver() async throws {
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-completed-goal-amendment-\(UUID().uuidString)",
+            activity: ActivityRecord(
+                goal: "Completed goal",
+                prompts: .builtInDefaults,
+                status: .completed,
+                completedAt: .now
+            )
+        )
+        let harness = try await CoordinatorHarness(record: record)
+        defer { harness.remove() }
+
+        #expect(harness.coordinator.canAmendGoal)
+        #expect(!harness.coordinator.goalAmendmentWillBeDeferred)
+        #expect(await harness.coordinator.amendGoal("Revised rerun goal"))
+        #expect(harness.coordinator.activity?.goal == "Revised rerun goal")
+        #expect(harness.coordinator.activity?.pendingGoalAmendment == nil)
+
+        await harness.coordinator.startOver()
+
+        #expect(harness.coordinator.activity == nil)
+        #expect(harness.coordinator.record.activityDraft?.goal == "Revised rerun goal")
+    }
+
+    @Test
     func invalidHandoffCredentialsBlockTheFirstImplementationTurn() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

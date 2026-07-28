@@ -329,17 +329,25 @@ public final class RepositoryCoordinator {
     }
 
     public var canAmendGoal: Bool {
-        guard let activity = activeActivity,
-              activity.status == .paused,
-              !isStartingActivity,
-              !isStartingOver,
-              !isClosing,
-              !pauseState.isInProgress,
-              pendingInteractions.isEmpty,
-              routingTasks.isEmpty,
-              completingRunIDs.isEmpty else { return false }
-        guard let run = activeRun else { return true }
-        return ![.queued, .running, .routing, .awaitingApproval].contains(run.status)
+        isLoaded
+            && record.activity != nil
+            && !isStartingActivity
+            && !isStartingOver
+            && !isClosing
+    }
+
+    public var goalForAmendment: String {
+        record.activity?.pendingGoalAmendment?.revisedGoal
+            ?? record.activity?.goal
+            ?? ""
+    }
+
+    public var goalAmendmentWillBeDeferred: Bool {
+        record.activity?.status == .running
+    }
+
+    public var hasPendingGoalAmendment: Bool {
+        record.activity?.pendingGoalAmendment != nil
     }
 
     public var runDetailPresentation: RunDetailPresentation {
@@ -1135,6 +1143,7 @@ public final class RepositoryCoordinator {
             $0.relayError = nil
             $0.status = .completed
         }
+        activatePendingGoalAmendment()
         record.activity?.status = .running
         record.activity?.resumeCheckpoint = nil
         await applyWorkflowDecision(runID: run.id, for: run.kind, envelope: envelope)
@@ -1162,6 +1171,7 @@ public final class RepositoryCoordinator {
             $0.relayError = nil
             $0.status = .completed
         }
+        activatePendingGoalAmendment()
         record.activity?.status = .running
         record.activity?.workflowResumeCheckpoint = nil
         await applyGenericWorkflowDecision(runID: run.id, handoff: handoff)
@@ -1240,24 +1250,65 @@ public final class RepositoryCoordinator {
             errorMessage = "The goal is empty."
             return false
         }
-        guard cleanGoal != activity.goal else { return true }
+        let currentlyRequestedGoal = activity.pendingGoalAmendment?.revisedGoal ?? activity.goal
+        guard cleanGoal != currentlyRequestedGoal else { return true }
 
         let previousActivity = activity
-        activity.goalAmendments.append(GoalAmendment(
-            previousGoal: activity.goal,
-            revisedGoal: cleanGoal
-        ))
-        activity.goal = cleanGoal
+        if activity.status == .running {
+            if cleanGoal == activity.goal {
+                activity.pendingGoalAmendment = nil
+            } else {
+                let pending = activity.pendingGoalAmendment
+                activity.pendingGoalAmendment = GoalAmendment(
+                    id: pending?.id ?? UUID(),
+                    previousGoal: activity.goal,
+                    revisedGoal: cleanGoal,
+                    createdAt: pending?.createdAt ?? .now
+                )
+            }
+        } else {
+            if let pending = activity.pendingGoalAmendment {
+                activity.goalAmendments.append(pending)
+                activity.goal = pending.revisedGoal
+                activity.pendingGoalAmendment = nil
+            }
+            if cleanGoal != activity.goal {
+                activity.goalAmendments.append(GoalAmendment(
+                    previousGoal: activity.goal,
+                    revisedGoal: cleanGoal
+                ))
+                activity.goal = cleanGoal
+            }
+        }
         record.activity = activity
+        cancelWorkOverviewSummaryRequest()
         do {
             try await persist()
-            statusMessage = pausedStatusMessage
             return true
         } catch {
             record.activity = previousActivity
             errorMessage = "Could not save the revised goal: \(error.localizedDescription)"
             return false
         }
+    }
+
+    @discardableResult
+    private func activatePendingGoalAmendment() -> Bool {
+        guard var activity = record.activity,
+              let pending = activity.pendingGoalAmendment else { return false }
+        activity.pendingGoalAmendment = nil
+        if pending.revisedGoal != activity.goal {
+            activity.goalAmendments.append(GoalAmendment(
+                id: pending.id,
+                previousGoal: activity.goal,
+                revisedGoal: pending.revisedGoal,
+                createdAt: pending.createdAt
+            ))
+            activity.goal = pending.revisedGoal
+        }
+        record.activity = activity
+        cancelWorkOverviewSummaryRequest()
+        return true
     }
 
     /// Archives the current Codeness-owned activity, then returns this repository
@@ -1276,6 +1327,8 @@ public final class RepositoryCoordinator {
         await cancelRoutingTasks()
 
         let archivedRecord = record
+        let restartGoal = previousActivity.pendingGoalAmendment?.revisedGoal
+            ?? previousActivity.goal
         let resetRecord = RepositoryRecord(
             id: record.id,
             canonicalPath: record.canonicalPath,
@@ -1283,7 +1336,7 @@ public final class RepositoryCoordinator {
             reviewerThreadID: nil,
             settings: record.settings,
             activityDraft: ActivityConfigurationDraft(
-                goal: previousActivity.goal,
+                goal: restartGoal,
                 prompts: previousActivity.prompts,
                 workflow: previousActivity.workflow
             ),
@@ -1427,6 +1480,7 @@ public final class RepositoryCoordinator {
                     $0.finalOutput = finalOutput
                     $0.status = .routing
                 }
+                activatePendingGoalAmendment()
                 if isClosing {
                     record.activity?.resumeCheckpoint = .routeCompletedRun(runID)
                     pauseActivity(message: "Paused before preparing the handoff")
@@ -1436,6 +1490,7 @@ public final class RepositoryCoordinator {
                 }
             } else {
                 updateRun(runID) { $0.status = status == "interrupted" ? .interrupted : .failed }
+                activatePendingGoalAmendment()
                 record.activity?.resumeCheckpoint = .recoverRun(runID)
                 pauseActivity(message: "The Codex turn ended with status \(status).")
                 if isClosing {
@@ -1450,6 +1505,7 @@ public final class RepositoryCoordinator {
     private func beginRouting(runID: UUID, finalOutput: String) async {
         guard !completingRunIDs.contains(runID), run(withID: runID) != nil else { return }
         completingRunIDs.insert(runID)
+        activatePendingGoalAmendment()
         updateRun(runID) {
             $0.status = .routing
             $0.relayError = nil
@@ -1491,6 +1547,7 @@ public final class RepositoryCoordinator {
         do {
             var envelope = try await router.route(context, settings: record.settings.relay)
             guard !isClosing else { return }
+            activatePendingGoalAmendment()
             envelope.runLabel = normalizedRunLabel(envelope.runLabel, fallback: run.kind.displayName)
             updateRun(runID) {
                 $0.handoff = envelope
@@ -1501,6 +1558,7 @@ public final class RepositoryCoordinator {
             await applyWorkflowDecision(runID: runID, for: run.kind, envelope: envelope)
         } catch {
             guard !isClosing else { return }
+            activatePendingGoalAmendment()
             updateRun(runID) {
                 $0.status = .paused
                 $0.relayError = error.localizedDescription
@@ -1512,6 +1570,7 @@ public final class RepositoryCoordinator {
     }
 
     private func applyWorkflowDecision(runID: UUID, for kind: RunKind, envelope: HandoffEnvelope) async {
+        activatePendingGoalAmendment()
         if kind == .implementation {
             record.activity?.implementationClaimedComplete = envelope.sourceDisposition == .implementationComplete
         } else if kind == .fix {
@@ -1551,6 +1610,7 @@ public final class RepositoryCoordinator {
     }
 
     private func perform(action: PendingAction, handoff: HandoffEnvelope?) async {
+        activatePendingGoalAmendment()
         guard let activity = record.activity else { return }
         record.activity?.pendingAction = action
         record.activity?.resumeCheckpoint = .perform(action)
@@ -1828,6 +1888,7 @@ public final class RepositoryCoordinator {
         previousHandoff: WorkflowHandoff?,
         promptOverride: String? = nil
     ) async {
+        activatePendingGoalAmendment()
         guard let workflow = record.activity?.workflow,
               let step = GenericWorkflowStateMachine.step(at: cursor, in: workflow) else {
             pauseGenericActivity(
@@ -2063,6 +2124,7 @@ public final class RepositoryCoordinator {
             if let usage {
                 await appendTokenUsage(usage, runID: runID)
             }
+            activatePendingGoalAmendment()
             if isClosing {
                 record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
                 pauseGenericActivity(message: "Paused before preparing the handoff")
@@ -2079,6 +2141,7 @@ public final class RepositoryCoordinator {
                     $0.relayError = detail
                 }
             }
+            activatePendingGoalAmendment()
             record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
             pauseGenericActivity(message: detail ?? "\(run.displayName) was interrupted.")
             if isClosing {
@@ -2093,6 +2156,7 @@ public final class RepositoryCoordinator {
                 $0.completedAt = .now
                 $0.relayError = detail
             }
+            activatePendingGoalAmendment()
             record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
             pauseGenericActivity(message: detail)
             if isClosing {
@@ -2106,6 +2170,7 @@ public final class RepositoryCoordinator {
     private func beginGenericRouting(runID: UUID, finalOutput: String) async {
         guard !completingRunIDs.contains(runID), run(withID: runID) != nil else { return }
         completingRunIDs.insert(runID)
+        activatePendingGoalAmendment()
         updateRun(runID) {
             $0.status = .routing
             $0.relayError = nil
@@ -2171,6 +2236,7 @@ public final class RepositoryCoordinator {
                 cwd: record.canonicalPath
             )
             guard !isClosing else { return }
+            activatePendingGoalAmendment()
             var normalized = handoff
             normalized.runLabel = normalizedRunLabel(
                 handoff.runLabel,
@@ -2185,6 +2251,7 @@ public final class RepositoryCoordinator {
             await applyGenericWorkflowDecision(runID: runID, handoff: normalized)
         } catch {
             guard !isClosing else { return }
+            activatePendingGoalAmendment()
             updateRun(runID) {
                 $0.status = .paused
                 $0.relayError = error.localizedDescription
@@ -2199,6 +2266,7 @@ public final class RepositoryCoordinator {
         runID: UUID,
         handoff: WorkflowHandoff
     ) async {
+        activatePendingGoalAmendment()
         guard let activity = record.activity,
               let workflow = activity.workflow,
               let cursor = activity.workflowCursor else { return }
@@ -2234,6 +2302,7 @@ public final class RepositoryCoordinator {
     }
 
     private func completeGenericActivity() {
+        activatePendingGoalAmendment()
         record.activity?.status = .completed
         record.activity?.completedAt = .now
         record.activity?.workflowCursor = nil

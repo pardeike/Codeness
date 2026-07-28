@@ -4,6 +4,7 @@ import SwiftUI
 
 struct WorkOverviewView: View {
     @Bindable var coordinator: RepositoryCoordinator
+    @State private var isGoalExpanded = false
 
     private var record: RepositoryRecord { coordinator.record }
 
@@ -37,18 +38,12 @@ struct WorkOverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 overviewHeader(activity: activity)
-                goal(activity.goal)
+                compactSummary(metrics)
                 workSummary
-                summaryGrid(metrics)
+                goal(activity.goal)
                 phaseTimes(metrics)
                 phaseTokens(metrics)
                 detailsGrid(activity: activity, metrics: metrics)
-                Label(
-                    "Select a run in the sidebar to inspect its transcript and final result.",
-                    systemImage: "sidebar.left"
-                )
-                .font(.callout)
-                .foregroundStyle(.secondary)
             }
             .frame(maxWidth: 1_050, alignment: .leading)
             .padding(28)
@@ -152,72 +147,55 @@ struct WorkOverviewView: View {
     }
 
     private func goal(_ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("GOAL")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+        DisclosureGroup(isExpanded: $isGoalExpanded) {
             Text(text)
-                .font(.title3)
+                .padding(.top, 8)
                 .textSelection(.enabled)
+        } label: {
+            Label("Goal", systemImage: "scope")
+                .font(.headline)
         }
     }
 
-    private func summaryGrid(_ metrics: WorkOverviewMetrics) -> some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 190, maximum: 300), spacing: 10)],
-            alignment: .leading,
-            spacing: 10
-        ) {
-            OverviewMetricCard(
-                title: "Runs",
-                value: "\(metrics.totalRunCount)",
-                detail: "\(metrics.completedRunCount) completed",
+    private func compactSummary(_ metrics: WorkOverviewMetrics) -> some View {
+        HStack(spacing: 10) {
+            compactSummaryItem(
+                "\(metrics.totalRunCount) \(metrics.totalRunCount == 1 ? "run" : "runs")",
                 symbol: "terminal"
             )
-            OverviewMetricCard(
-                title: metrics.usesGenericWorkflow ? "Cycles" : "Work units",
-                value: "\(metrics.workUnitCount)",
-                detail: metrics.usesGenericWorkflow
-                    ? (metrics.workUnitCount == 1 ? "workflow cycle" : "workflow cycles")
-                    : (metrics.workUnitCount == 1 ? "review cycle" : "review cycles"),
+            compactSummaryDivider
+            compactSummaryItem(
+                "\(metrics.workUnitCount) \(metrics.usesGenericWorkflow ? "cycle" : "work unit")\(metrics.workUnitCount == 1 ? "" : "s")",
                 symbol: "square.stack.3d.up"
             )
-            OverviewMetricCard(
-                title: "Run time",
-                value: WorkOverviewFormatting.duration(
-                    milliseconds: metrics.totalRunMilliseconds
-                ),
-                detail: "across all phases",
+            compactSummaryDivider
+            compactSummaryItem(
+                "\(WorkOverviewFormatting.duration(milliseconds: metrics.totalRunMilliseconds)) active",
                 symbol: "timer"
             )
-            OverviewMetricCard(
-                title: "Elapsed",
-                value: WorkOverviewFormatting.duration(
-                    milliseconds: metrics.elapsedMilliseconds
-                ),
-                detail: metrics.isFinished ? "start to finish" : "since activity start",
+            compactSummaryDivider
+            compactSummaryItem(
+                "\(WorkOverviewFormatting.duration(milliseconds: metrics.elapsedMilliseconds)) elapsed",
                 symbol: "clock"
             )
         }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+
+    private func compactSummaryItem(_ text: String, symbol: String) -> some View {
+        Label(text, systemImage: symbol)
+    }
+
+    private var compactSummaryDivider: some View {
+        Divider()
+            .frame(height: 14)
     }
 
     private func phaseTimes(_ metrics: WorkOverviewMetrics) -> some View {
         GroupBox {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
-                GridRow {
-                    Text("Phase")
-                    Text("Share")
-                    Text("Time")
-                        .frame(minWidth: 74, alignment: .trailing)
-                    Text("Runs")
-                        .frame(minWidth: 54, alignment: .trailing)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                Divider()
-                    .gridCellColumns(4)
-
                 ForEach(Array(metrics.phases.enumerated()), id: \.element.id) { index, phase in
                     GridRow {
                         Label(phase.name, systemImage: phaseSymbol(phase))
@@ -239,14 +217,23 @@ struct WorkOverviewView: View {
                         .frame(minWidth: 74, alignment: .trailing)
                         Text("\(phase.runCount)")
                             .monospacedDigit()
-                            .frame(minWidth: 54, alignment: .trailing)
+                            .frame(minWidth: 68, alignment: .trailing)
                     }
                 }
             }
             .padding(8)
         } label: {
-            Label("Time by Phase", systemImage: "chart.bar.xaxis")
-                .font(.headline)
+            HStack(spacing: 16) {
+                Label("Time by Phase", systemImage: "chart.bar.xaxis")
+                    .font(.headline)
+                Spacer(minLength: 16)
+                Text("Runs")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 68, alignment: .trailing)
+            }
+            .padding(.trailing, 8)
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -254,22 +241,6 @@ struct WorkOverviewView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
-                    GridRow {
-                        Text("Phase")
-                        Text("Share")
-                        Text("Input")
-                            .frame(minWidth: 62, alignment: .trailing)
-                        Text("Output")
-                            .frame(minWidth: 62, alignment: .trailing)
-                        Text("Total")
-                            .frame(minWidth: 62, alignment: .trailing)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                    Divider()
-                        .gridCellColumns(5)
-
                     ForEach(Array(metrics.phases.enumerated()), id: \.element.id) { index, phase in
                         GridRow {
                             Label(phase.name, systemImage: phaseSymbol(phase))
@@ -281,9 +252,9 @@ struct WorkOverviewView: View {
                             .tint(phaseColor(phase, index: index))
                             .frame(minWidth: 70, maxWidth: .infinity)
                             tokenCell(
-                                phase.tokenUsage?.inputTokens,
+                                phase.tokenUsage.map { WorkOverviewFormatting.inputTokens($0) },
                                 detail: phase.tokenUsage.map {
-                                    "\(WorkOverviewFormatting.tokenDetail($0.inputTokens)) input tokens, including \(WorkOverviewFormatting.tokenDetail($0.cachedInputTokens)) cached"
+                                    "\(WorkOverviewFormatting.tokenDetail(WorkOverviewFormatting.inputTokens($0))) input tokens, including \(WorkOverviewFormatting.tokenDetail($0.cachedInputTokens)) cache reads and \(WorkOverviewFormatting.tokenDetail($0.cacheWriteInputTokens)) cache writes"
                                 }
                             )
                             tokenCell(
@@ -320,8 +291,22 @@ struct WorkOverviewView: View {
             }
             .padding(8)
         } label: {
-            Label("Tokens by Phase", systemImage: "number")
-                .font(.headline)
+            HStack(spacing: 12) {
+                Label("Tokens by Phase", systemImage: "number")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 12)
+                Text("Input")
+                    .frame(width: 62, alignment: .trailing)
+                Text("Output")
+                    .frame(width: 62, alignment: .trailing)
+                Text("Total")
+                    .frame(width: 62, alignment: .trailing)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.trailing, 8)
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -337,17 +322,13 @@ struct WorkOverviewView: View {
         metrics: WorkOverviewMetrics
     ) -> some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 280), spacing: 12)],
+            columns: [GridItem(.adaptive(minimum: 280), spacing: 12, alignment: .top)],
             alignment: .leading,
             spacing: 12
         ) {
             OverviewInfoCard(title: "Activity", symbol: "calendar") {
                 if let workflow = activity.workflow {
                     OverviewInfoRow(title: "Workflow", value: workflow.name)
-                    OverviewInfoRow(
-                        title: "Topology",
-                        value: workflowTopology(workflow)
-                    )
                 }
                 OverviewInfoRow(
                     title: "Started",
@@ -363,10 +344,6 @@ struct WorkOverviewView: View {
                         value: WorkOverviewFormatting.date(completedAt)
                     )
                 }
-                OverviewInfoRow(
-                    title: "Goal revisions",
-                    value: "\(activity.goalAmendments.count)"
-                )
             }
 
             OverviewInfoCard(title: "Sessions", symbol: "person.2") {
@@ -429,7 +406,7 @@ struct WorkOverviewView: View {
     }
 
     private func modelDescription(_ selection: ModelSelection) -> String {
-        "\(selection.model) · \(selection.effort)"
+        "\(selection.model) \(selection.effort)"
     }
 
     private func targetDescription(_ target: AgentTarget) -> String {
@@ -440,19 +417,13 @@ struct WorkOverviewView: View {
         if let effort = target.options.effort, !effort.isEmpty {
             values.append(effort)
         }
-        values.append(target.options.mode.displayName)
+        if target.options.mode != .standard {
+            values.append(target.options.mode.displayName)
+        }
         if target.options.speed == .fast {
             values.append("Fast")
         }
-        return values.joined(separator: " · ")
-    }
-
-    private func workflowTopology(_ workflow: WorkflowTemplate) -> String {
-        WorkflowSection.allCases.compactMap { section in
-            let count = workflow.steps(in: section).count
-            guard count > 0 else { return nil }
-            return "\(section.displayName): \(count)"
-        }.joined(separator: " · ")
+        return values.joined(separator: " ")
     }
 
     private func sessionDescription(_ session: WorkflowSessionState?) -> String {
@@ -672,6 +643,10 @@ enum WorkSummaryMarkdownBlock: Equatable {
 }
 
 enum WorkOverviewFormatting {
+    static func inputTokens(_ usage: RunTokenUsage) -> Int64 {
+        max(usage.inputTokens, usage.totalTokens - usage.outputTokens)
+    }
+
     static func duration(milliseconds: Int64) -> String {
         let totalSeconds = max(Int((Double(milliseconds) / 1_000).rounded()), 0)
         let hours = totalSeconds / 3_600
@@ -755,44 +730,6 @@ enum WorkOverviewFormatting {
     }
 }
 
-private struct OverviewMetricCard: View {
-    let title: String
-    let value: String
-    let detail: String
-    let symbol: String
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol)
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption.weight(.medium))
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            Text(value)
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
-        .background(
-            Color(nsColor: .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 12)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.5))
-        }
-    }
-}
-
 private struct OverviewInfoCard<Content: View>: View {
     let title: String
     let symbol: String
@@ -827,13 +764,15 @@ private struct OverviewInfoRow: View {
     let value: String
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title)
                 .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
+                .fixedSize(horizontal: true, vertical: false)
             Text(value)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .layoutPriority(1)
                 .textSelection(.enabled)
         }
         .font(.callout)

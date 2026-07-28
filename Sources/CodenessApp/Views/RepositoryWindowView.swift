@@ -39,6 +39,7 @@ struct RepositoryWindowView: View {
             .background {
                 RepositorySplitViewStateBridge(
                     restoredSidebarWidth: coordinator.viewState.sidebarWidth.map { CGFloat($0) },
+                    optimalSidebarWidth: optimalSidebarWidth,
                     allowsSidebarRestoration: coordinator.activity != nil
                         && columnVisibility != .detailOnly,
                     onSidebarChange: { width, isVisible in
@@ -130,7 +131,7 @@ struct RepositoryWindowView: View {
                 )
             } else {
                 ContentUnavailableView(
-                    "Workflow Library Unavailable",
+                    "Workflows Unavailable",
                     systemImage: "exclamationmark.triangle",
                     description: Text("Restore the bundled workflow resources, then reopen this repository.")
                 )
@@ -218,17 +219,15 @@ struct RepositoryWindowView: View {
     }
 
     private var workflowControlBar: some View {
-        HStack(spacing: 8) {
-            Spacer()
+        HStack(spacing: 10) {
             if let transport = workflowControls.transport {
                 Button {
                     perform(transport)
                 } label: {
-                    Image(systemName: transport.systemImage)
+                    Text(transport.buttonTitle)
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderless)
-                .frame(width: 30, height: 24)
-                .contentShape(Rectangle())
+                .buttonStyle(.borderedProminent)
                 .accessibilityLabel(transport.title)
                 .accessibilityHint(transport.help)
                 .help(transport.help)
@@ -238,21 +237,20 @@ struct RepositoryWindowView: View {
                 Button {
                     Task { await coordinator.interrupt() }
                 } label: {
-                    Image(systemName: "stop.fill")
+                    Text("Interrupt")
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderless)
-                .frame(width: 30, height: 24)
-                .contentShape(Rectangle())
+                .buttonStyle(.bordered)
                 .accessibilityLabel("Interrupt Active Turn")
                 .accessibilityHint(
                     "Interrupt the active agent turn and preserve a resumable checkpoint"
                 )
                 .help("Interrupt the active agent turn and preserve a resumable checkpoint")
             }
-            Spacer()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .controlSize(.regular)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
         .background(.bar)
     }
 
@@ -262,6 +260,25 @@ struct RepositoryWindowView: View {
             isActivityRunning: coordinator.activity?.status == .running,
             pauseAfterCurrent: coordinator.pauseAfterCurrent,
             canInterrupt: coordinator.canInterrupt
+        )
+    }
+
+    private var optimalSidebarWidth: CGFloat {
+        let runs = coordinator.activity?.runs ?? []
+        let groups = coordinator.activity.map {
+            RunGroupingPolicy.workUnits(for: $0.runs)
+        } ?? []
+        var controlTitles = workflowControls.transport.map {
+            [$0.buttonTitle]
+        } ?? []
+        if workflowControls.showsInterrupt {
+            controlTitles.append("Interrupt")
+        }
+        return RepositoryWindowMetrics.optimalSidebarWidth(
+            rowTitles: runs.map(\.displayName),
+            rowMetadata: runs.map(runSidebarMetadata),
+            sectionTitles: groups.map(\.title),
+            controlTitles: controlTitles
         )
     }
 
@@ -285,9 +302,9 @@ struct RepositoryWindowView: View {
             Button {
                 showsSettings = true
             } label: {
-                Label("Repository Settings", systemImage: "gearshape")
+                Label("Workflow Preferences", systemImage: "gearshape")
             }
-            .help("Configure provider, model, effort, mode, and speed for future steps")
+            .help("Configure agent targets for future workflow steps")
         }
     }
 
@@ -375,6 +392,13 @@ private struct RunGroupHeader: View {
     var body: some View {
         Text(group.title)
     }
+}
+
+private func runSidebarMetadata(_ run: RunRecord) -> String {
+    let target = run.agentTarget.map {
+        "\($0.providerID.rawValue.capitalized) · \($0.model)"
+    } ?? run.kind.displayName
+    return "\(target) · \(run.status.rawValue.capitalized)"
 }
 
 private struct RunRow: View {

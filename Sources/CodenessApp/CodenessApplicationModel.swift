@@ -74,7 +74,7 @@ final class CodenessApplicationModel {
     @ObservationIgnored private let appServer: CodexAppServerClient
     @ObservationIgnored private let router: any HandoffRouting
     @ObservationIgnored private let store: WorkspaceStore
-    @ObservationIgnored private let resolver: GitRepositoryResolver
+    @ObservationIgnored private let resolver: WorkspaceResolver
     @ObservationIgnored private let codexProvider: CodexAgentProvider
     @ObservationIgnored private var claudeProvider: ClaudeAgentProvider?
     @ObservationIgnored private let agentProviders: AgentProviderRegistry
@@ -87,7 +87,7 @@ final class CodenessApplicationModel {
         appServer: CodexAppServerClient = CodexAppServerClient(),
         router: any HandoffRouting = HandoffRouter(),
         store: WorkspaceStore = WorkspaceStore(),
-        resolver: GitRepositoryResolver = GitRepositoryResolver()
+        resolver: WorkspaceResolver = WorkspaceResolver()
     ) {
         let loadedProviderCatalog: AgentProviderCatalog
         let loadedWorkflowCatalog: WorkflowCatalog
@@ -554,7 +554,7 @@ final class CodenessApplicationModel {
               !catalog.templates.isEmpty,
               catalog.templates.contains(where: { $0.id == catalog.defaultTemplateID }),
               catalog.templates.allSatisfy({ $0.validationMessage == nil }) else {
-            applicationError = "The workflow library is invalid."
+            applicationError = "The workflows are invalid."
             return
         }
         let custom = catalog.templates.filter { template in
@@ -578,7 +578,7 @@ final class CodenessApplicationModel {
                 )
             )
         } catch {
-            applicationError = "Could not save the workflow library: \(error.localizedDescription)"
+            applicationError = "Could not save workflows: \(error.localizedDescription)"
         }
     }
 

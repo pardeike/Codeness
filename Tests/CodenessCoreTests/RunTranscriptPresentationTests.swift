@@ -60,6 +60,28 @@ struct RunTranscriptPresentationTests {
     }
 
     @Test
+    func structuredTranscriptRecoversClaudeNarrativeStoredAfterLegacyActionMarkers() {
+        let transcript = [
+            RunTranscriptPresentation.storedText(
+                "\n\nClaude\nInitial orientation.",
+                section: .reasoning
+            ),
+            RunTranscriptPresentation.storedText("\n› Bash\n", section: .action),
+            "Claude status: requesting\nNarrative after Bash.",
+            RunTranscriptPresentation.storedText("\n› Read\n", section: .action),
+            "Narrative after Read."
+        ].joined()
+        let run = makeRun(prompt: "Do the work.", transcript: transcript)
+
+        let recommended = RunTranscriptPresentation.text(for: run, separatesRuns: true)
+        #expect(recommended.contains("Initial orientation."))
+        #expect(recommended.contains("Narrative after Bash."))
+        #expect(recommended.contains("Narrative after Read."))
+        #expect(!recommended.contains("› Bash"))
+        #expect(!recommended.contains("› Read"))
+    }
+
+    @Test
     func legacyTranscriptCanHideNoisyCommandBodies() {
         let transcript = """
         Prompt

@@ -18,6 +18,10 @@ public enum CodexExecutableError: LocalizedError, Sendable {
 }
 
 public enum CodexExecutableLocator {
+    private static let loginShellEnvironment = loadLoginShellEnvironment(
+        baseEnvironment: ProcessInfo.processInfo.environment
+    )
+
     public static func resolve(configuredPath: String = "") throws -> URL {
         let configuredPath = configuredPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !configuredPath.isEmpty {
@@ -62,7 +66,22 @@ public enum CodexExecutableLocator {
     }
 
     public static func processEnvironment() -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
+        processEnvironment(
+            baseEnvironment: ProcessInfo.processInfo.environment,
+            loginShellEnvironment: loginShellEnvironment
+        )
+    }
+
+    static func processEnvironment(
+        baseEnvironment: [String: String],
+        loginShellEnvironment: [String: String]?
+    ) -> [String: String] {
+        var environment = loginShellEnvironment ?? [:]
+        for key in ["PWD", "OLDPWD", "SHLVL", "_"] {
+            environment.removeValue(forKey: key)
+        }
+        environment.merge(baseEnvironment) { _, processValue in processValue }
+
         let knownPaths = [
             "/opt/homebrew/bin",
             "/usr/local/bin",
@@ -71,11 +90,80 @@ public enum CodexExecutableLocator {
             "/usr/sbin",
             "/sbin"
         ]
-        let existingPath = environment["PATH"] ?? ""
-        environment["PATH"] = (knownPaths + [existingPath])
-            .filter { !$0.isEmpty }
+        let pathSources: [String]
+        if let loginPath = loginShellEnvironment?["PATH"], !loginPath.isEmpty {
+            pathSources = [loginPath, baseEnvironment["PATH"] ?? ""]
+                + knownPaths
+        } else {
+            pathSources = knownPaths + [baseEnvironment["PATH"] ?? ""]
+        }
+        environment["PATH"] = uniquePathComponents(pathSources)
             .joined(separator: ":")
         return environment
+    }
+
+    private static func loadLoginShellEnvironment(
+        baseEnvironment: [String: String]
+    ) -> [String: String]? {
+        let configuredShell = baseEnvironment["SHELL"] ?? ""
+        let shellPath = FileManager.default.isExecutableFile(atPath: configuredShell)
+            ? configuredShell
+            : "/bin/zsh"
+        guard FileManager.default.isExecutableFile(atPath: shellPath) else {
+            return nil
+        }
+
+        let process = Process()
+        let stdout = Pipe()
+        process.executableURL = URL(fileURLWithPath: shellPath)
+        process.arguments = [
+            "-lc",
+            #"/usr/bin/printf '\000CODENESS_ENV\000'; /usr/bin/env -0"#
+        ]
+        process.environment = baseEnvironment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            return parseLoginShellEnvironment(data)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func parseLoginShellEnvironment(
+        _ data: Data
+    ) -> [String: String]? {
+        let marker = Data([0])
+            + Data("CODENESS_ENV".utf8)
+            + Data([0])
+        guard let markerRange = data.range(of: marker) else { return nil }
+
+        var environment: [String: String] = [:]
+        for entry in data[markerRange.upperBound...].split(separator: 0) {
+            guard let separator = entry.firstIndex(of: 61) else { continue }
+            let key = String(decoding: entry[..<separator], as: UTF8.self)
+            guard !key.isEmpty else { continue }
+            environment[key] = String(
+                decoding: entry[entry.index(after: separator)...],
+                as: UTF8.self
+            )
+        }
+        return environment.isEmpty ? nil : environment
+    }
+
+    private static func uniquePathComponents(
+        _ sources: [String]
+    ) -> [String] {
+        var seen: Set<String> = []
+        return sources
+            .flatMap { $0.split(separator: ":").map(String.init) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     private static func candidatePaths() -> [String] {

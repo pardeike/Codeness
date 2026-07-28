@@ -161,6 +161,43 @@ struct RepositoryWindowGeometryTests {
     }
 
     @Test
+    func optimalSidebarWidthUsesTheIdealFloorAndMaximumCap() {
+        #expect(
+            RepositoryWindowMetrics.optimalSidebarWidth(
+                rowTitles: ["Short"],
+                rowMetadata: ["Codex"],
+                sectionTitles: ["Loop"],
+                controlTitles: []
+            ) == RepositoryWindowMetrics.idealSidebarWidth
+        )
+        #expect(
+            RepositoryWindowMetrics.optimalSidebarWidth(
+                rowTitles: [String(repeating: "W", count: 200)],
+                rowMetadata: [String(repeating: "W", count: 200)],
+                sectionTitles: [],
+                controlTitles: []
+            ) == RepositoryWindowMetrics.maximumSidebarWidth
+        )
+    }
+
+    @Test
+    func sidebarDoubleClickAlternatesBetweenOptimalAndMaximumWidths() {
+        let optimalWidth: CGFloat = 362
+        #expect(
+            RepositoryWindowMetrics.sidebarDoubleClickTarget(
+                currentWidth: RepositoryWindowMetrics.maximumSidebarWidth,
+                optimalWidth: optimalWidth
+            ) == optimalWidth
+        )
+        #expect(
+            RepositoryWindowMetrics.sidebarDoubleClickTarget(
+                currentWidth: optimalWidth,
+                optimalWidth: optimalWidth
+            ) == RepositoryWindowMetrics.maximumSidebarWidth
+        )
+    }
+
+    @Test
     func systemSidebarToolbarItemsAreHiddenWithoutChangingToolbarStructure() {
         let splitView = NSSplitView()
         let privateTrackingSeparatorItem = NSTrackingSeparatorToolbarItem(
@@ -218,6 +255,7 @@ struct RepositoryWindowGeometryTests {
         var reportedWidths: [CGFloat] = []
         let bridge = RepositorySplitViewStateBridge.Coordinator(
             restoredSidebarWidth: 338,
+            optimalSidebarWidth: 350,
             allowsSidebarRestoration: true,
             onSidebarChange: { width, _ in
                 reportedWidths.append(width)

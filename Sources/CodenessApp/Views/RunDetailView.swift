@@ -128,21 +128,6 @@ struct RunDetailView: View {
         HStack(spacing: 8) {
             visibilityMenu
             jumpToEndButton
-            if let handoff = run.handoff {
-                Button {
-                    copy(handoff.handoffText)
-                } label: {
-                    Label("Copy Handoff", systemImage: "arrow.left.arrow.right")
-                }
-                .help("Copy the filtered context passed to the next workflow phase")
-            } else if let handoff = run.workflowHandoff {
-                Button {
-                    copy(handoff.text)
-                } label: {
-                    Label("Copy Handoff", systemImage: "arrow.left.arrow.right")
-                }
-                .help("Copy the filtered context passed to the next workflow step")
-            }
         }
     }
 
@@ -154,15 +139,6 @@ struct RunDetailView: View {
                 scrollToEndRequest &+= 1
             }
             .disabled(isAtBottom)
-            if let handoff = run.handoff {
-                Button("Copy Handoff") {
-                    copy(handoff.handoffText)
-                }
-            } else if let handoff = run.workflowHandoff {
-                Button("Copy Handoff") {
-                    copy(handoff.text)
-                }
-            }
         } label: {
             Label("Run Actions", systemImage: "ellipsis.circle")
         }
@@ -244,11 +220,6 @@ struct RunDetailView: View {
         }
         return values.joined(separator: " · ") + durationText
     }
-
-    private func copy(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
 }
 
 private struct FinalResultView: View {
@@ -266,13 +237,6 @@ private struct FinalResultView: View {
                 Toggle("Formatted", isOn: $isFormatted)
                     .toggleStyle(.checkbox)
                     .help("Show rendered Markdown; turn this off to show its exact source")
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                } label: {
-                    Label("Copy Final", systemImage: "doc.on.doc")
-                }
-                .help("Copy the exact final result")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

@@ -10,14 +10,14 @@ struct GoalAmendmentSheet: View {
 
     init(coordinator: RepositoryCoordinator) {
         self.coordinator = coordinator
-        _revisedGoal = State(initialValue: coordinator.activity?.goal ?? "")
+        _revisedGoal = State(initialValue: coordinator.goalForAmendment)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Amend Goal")
                 .font(.title2.weight(.semibold))
-            Text("The revised Goal is supplied to all subsequent workflow steps. Codeness keeps the previous text and timestamp in the activity history.")
+            Text(amendmentExplanation)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -28,8 +28,18 @@ struct GoalAmendmentSheet: View {
                 helpText: "Revise THE GOAL used by subsequent workflow phases."
             )
 
-            if let amendments = coordinator.activity?.goalAmendments, !amendments.isEmpty {
-                Text("\(amendments.count) earlier goal amendment\(amendments.count == 1 ? "" : "s") recorded")
+            if coordinator.hasPendingGoalAmendment {
+                Label(
+                    "A goal change is already queued; saving replaces that queued revision.",
+                    systemImage: "clock.arrow.circlepath"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else if let amendments = coordinator.activity?.goalAmendments, !amendments.isEmpty {
+                Text(
+                    "\(amendments.count) earlier goal amendment"
+                        + "\(amendments.count == 1 ? "" : "s") recorded"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -37,7 +47,7 @@ struct GoalAmendmentSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Save Amendment") {
+                Button(saveButtonTitle) {
                     Task {
                         isSaving = true
                         defer { isSaving = false }
@@ -52,11 +62,25 @@ struct GoalAmendmentSheet: View {
                     isSaving
                         || revisedGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || revisedGoal.trimmingCharacters(in: .whitespacesAndNewlines)
-                            == coordinator.activity?.goal
+                            == coordinator.goalForAmendment
                 )
             }
         }
         .padding(20)
         .frame(width: 680, height: 470)
+    }
+
+    private var amendmentExplanation: String {
+        if coordinator.goalAmendmentWillBeDeferred {
+            return "The active turn keeps the Goal it started with. Codeness queues this revision, activates it at the earliest durable boundary, and uses it for the next handoff or workflow step. The previous text and activation time remain in the activity history."
+        }
+        if coordinator.activity?.status == .completed {
+            return "This activity is complete, so the revised Goal will be prefilled when you choose Start Over. Codeness keeps the previous text and timestamp in the archived activity history."
+        }
+        return "The revised Goal takes effect immediately and is supplied to subsequent workflow steps. Codeness keeps the previous text and timestamp in the activity history."
+    }
+
+    private var saveButtonTitle: String {
+        coordinator.goalAmendmentWillBeDeferred ? "Queue Goal Change" : "Save Amendment"
     }
 }

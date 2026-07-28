@@ -7,9 +7,15 @@ struct SettingsWindowCloseGuard: NSViewRepresentable {
     let isDirty: Bool
     let save: @MainActor () async -> Bool
     let discard: @MainActor () -> Void
+    let closeRequestID: Int
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(isDirty: isDirty, save: save, discard: discard)
+        Coordinator(
+            isDirty: isDirty,
+            save: save,
+            discard: discard,
+            closeRequestID: closeRequestID
+        )
     }
 
     func makeNSView(context: Context) -> SettingsWindowProbeView {
@@ -23,6 +29,7 @@ struct SettingsWindowCloseGuard: NSViewRepresentable {
         context.coordinator.save = save
         context.coordinator.discard = discard
         context.coordinator.attach(to: unsafe nsView.window)
+        context.coordinator.closeIfRequested(closeRequestID)
     }
 
     static func dismantleNSView(_ nsView: SettingsWindowProbeView, coordinator: Coordinator) {
@@ -37,15 +44,18 @@ struct SettingsWindowCloseGuard: NSViewRepresentable {
 
         private weak var window: NSWindow?
         private var delegateProxy: SettingsWindowDelegateProxy?
+        private var lastHandledCloseRequestID: Int
 
         init(
             isDirty: Bool,
             save: @escaping @MainActor () async -> Bool,
-            discard: @escaping @MainActor () -> Void
+            discard: @escaping @MainActor () -> Void,
+            closeRequestID: Int
         ) {
             self.isDirty = isDirty
             self.save = save
             self.discard = discard
+            lastHandledCloseRequestID = closeRequestID
         }
 
         func attach(to window: NSWindow?) {
@@ -61,6 +71,12 @@ struct SettingsWindowCloseGuard: NSViewRepresentable {
             self.window = window
             delegateProxy = proxy
             window.delegate = proxy
+        }
+
+        func closeIfRequested(_ closeRequestID: Int) {
+            guard closeRequestID != lastHandledCloseRequestID else { return }
+            lastHandledCloseRequestID = closeRequestID
+            window?.performClose(nil)
         }
 
         func detach() {
@@ -124,7 +140,7 @@ private final class SettingsWindowDelegateProxy: NSObject, NSWindowDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Save changes before closing Settings?"
-        alert.informativeText = "Your edited prompts, models, transcript preferences, and executable path have not been saved."
+        alert.informativeText = "Your workflow, transcript, and executable-path changes have not been saved."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Discard Changes")
         alert.addButton(withTitle: "Cancel")

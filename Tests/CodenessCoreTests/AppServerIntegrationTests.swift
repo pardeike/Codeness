@@ -132,6 +132,64 @@ struct AppServerIntegrationTests {
         await client.shutdown()
     }
 
+    @Test
+    func codexProviderAutomaticallyApprovesTaggedMCPToolElicitations() async throws {
+        let fixture = try MCPApprovalAppServerFixture()
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        let provider = CodexAgentProvider(appServer: client)
+        let stream = await client.events()
+        let consumer = Task {
+            for await event in stream {
+                await provider.receive(event)
+            }
+        }
+        defer { consumer.cancel() }
+
+        try await client.start(configuration: fixture.configuration)
+        let target = AgentTarget(
+            providerID: .codex,
+            model: "gpt-5.6-sol",
+            options: AgentExecutionOptions(effort: "high")
+        )
+        let session = try await provider.prepareSession(
+            AgentSessionRequest(
+                existingSessionID: nil,
+                name: "MCP approval fixture",
+                cwd: "/tmp/repository",
+                target: target,
+                developerInstructions: "Review the repository."
+            )
+        )
+        let handle = try await provider.startRun(
+            AgentRunRequest(
+                runID: UUID(),
+                session: session,
+                cwd: "/tmp/repository",
+                prompt: "Inspect an assembly.",
+                target: target
+            )
+        )
+
+        var events: [AgentEvent] = []
+        for await event in handle.events {
+            events.append(event)
+        }
+
+        #expect(!events.contains {
+            if case .interaction = $0 { return true }
+            return false
+        })
+        #expect(events.contains {
+            if case .completed(let output, _, _) = $0 {
+                return output == "Decompiler status inspected."
+            }
+            return false
+        })
+        await provider.shutdown()
+        await client.shutdown()
+    }
+
     @MainActor
     @Test
     func coordinatorRunsStrictImplementReviewFixGroupsUntilComplete() async throws {
@@ -188,6 +246,61 @@ struct AppServerIntegrationTests {
         ])
 
         consumer.cancel()
+        await client.shutdown()
+    }
+
+    @MainActor
+    @Test
+    func runningActivityQueuesGoalChangeAndActivatesItBeforeTheNextRun() async throws {
+        let fixture = try PausingAppServerFixture()
+        defer { fixture.remove() }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let client = CodexAppServerClient()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/repository-goal-change-\(UUID().uuidString)",
+            appServer: client,
+            router: SequencedTestRouter(),
+            store: WorkspaceStore(rootURL: root)
+        )
+        let stream = await client.events()
+        let consumer = Task {
+            for await event in stream {
+                await coordinator.handle(event)
+            }
+        }
+        defer { consumer.cancel() }
+
+        try await client.start(configuration: fixture.configuration)
+        await coordinator.load()
+        await coordinator.startActivity(goal: "Original goal", prompts: .builtInDefaults)
+
+        #expect(coordinator.canAmendGoal)
+        #expect(coordinator.goalAmendmentWillBeDeferred)
+        #expect(await coordinator.amendGoal("Revised goal for the next boundary"))
+
+        var activity = try #require(coordinator.record.activity)
+        #expect(activity.goal == "Original goal")
+        #expect(activity.pendingGoalAmendment?.revisedGoal == "Revised goal for the next boundary")
+        #expect(activity.goalAmendments.isEmpty)
+
+        #expect(await coordinator.steer("Finish the current checkpoint."))
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while (coordinator.record.activity?.runs.count ?? 0) < 2, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        activity = try #require(coordinator.record.activity)
+        #expect(activity.goal == "Revised goal for the next boundary")
+        #expect(activity.pendingGoalAmendment == nil)
+        #expect(activity.goalAmendments.last?.previousGoal == "Original goal")
+        #expect(activity.goalAmendments.last?.revisedGoal == activity.goal)
+        #expect(activity.runs.count == 2)
+        #expect(activity.runs.last?.kind == .review)
+        #expect(activity.runs.last?.prompt.contains(activity.goal) == true)
         await client.shutdown()
     }
 
@@ -827,6 +940,80 @@ for line in sys.stdin:
         emit({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": item_id, "delta": text}})
         emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "completedAtMs": 2, "item": item}})
         emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "items": [item], "status": "completed", "durationMs": 10}}})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+}
+
+private struct MCPApprovalAppServerFixture: Sendable {
+    let scriptURL: URL
+
+    var configuration: CodexLaunchConfiguration {
+        CodexLaunchConfiguration(
+            executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            arguments: [scriptURL.path]
+        )
+    }
+
+    init() throws {
+        scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codeness-mcp-approval-\(UUID().uuidString).py")
+        try Data(Self.script.utf8).write(to: scriptURL, options: .atomic)
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: scriptURL)
+    }
+
+    private static let script = #"""
+import json
+import sys
+
+thread_id = "thread-mcp"
+turn_id = "turn-mcp"
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        assert message["params"]["capabilities"]["mcpServerOpenaiFormElicitation"] is True
+        emit({"id": identifier, "result": {"userAgent": "mcp-approval-fixture"}})
+    elif method == "thread/start":
+        assert message["params"]["approvalPolicy"] == "never"
+        emit({"id": identifier, "result": {"thread": {"id": thread_id}}})
+    elif method == "thread/name/set":
+        emit({"id": identifier, "result": {}})
+    elif method == "turn/start":
+        assert message["params"]["approvalPolicy"] == "never"
+        emit({"id": identifier, "result": {"turn": {"id": turn_id, "items": [], "status": "inProgress"}}})
+        emit({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": "inProgress"}}})
+        emit({
+            "id": "approval-1",
+            "method": "mcpServer/elicitation/request",
+            "params": {
+                "_meta": {
+                    "codex_approval_kind": "mcp_tool_call",
+                    "persist": ["session", "always"]
+                },
+                "message": 'Allow the decompiler MCP server to run tool "status"?',
+                "mode": "form",
+                "requestedSchema": {"properties": {}, "type": "object"},
+                "serverName": "decompiler",
+                "threadId": thread_id,
+                "turnId": turn_id
+            }
+        })
+    elif identifier == "approval-1":
+        assert message["result"] == {"action": "accept", "content": {}}
+        text = "Decompiler status inspected."
+        item = {"id": "item-mcp", "type": "agentMessage", "phase": "final_answer", "text": text}
+        emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}})
+        emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "items": [item], "status": "completed"}}})
     elif identifier is not None:
         emit({"id": identifier, "result": {}})
 """#

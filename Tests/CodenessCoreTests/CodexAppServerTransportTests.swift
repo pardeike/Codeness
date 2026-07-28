@@ -63,7 +63,7 @@ struct CodexAppServerTransportTests {
     }
 
     @Test
-    func sendsNativePlanSandboxFastTierAndOutputSchemaParameters() async throws {
+    func sendsExperimentalCapabilityAndNativePlanParameters() async throws {
         let fixture = try TransportFixture(script: Self.planParameterServer)
         defer { fixture.remove() }
         let client = CodexAppServerClient()
@@ -77,6 +77,13 @@ struct CodexAppServerTransportTests {
             readOnly: true,
             approvalPolicy: "never"
         )
+        try await client.resumeThread(
+            id: threadID,
+            cwd: "/tmp",
+            model: "fixture",
+            developerInstructions: "Resume plan.",
+            approvalPolicy: "never"
+        )
         let turnID = try await client.startTurn(
             threadID: threadID,
             prompt: "Plan.",
@@ -85,7 +92,8 @@ struct CodexAppServerTransportTests {
             effort: "high",
             mode: .plan,
             serviceTier: "dynamic-fast",
-            outputSchema: .object(["type": .string("object")])
+            outputSchema: .object(["type": .string("object")]),
+            approvalPolicy: "never"
         )
 
         #expect(threadID == "thread-plan")
@@ -163,11 +171,18 @@ for line in sys.stdin:
     method = message.get("method")
     identifier = message.get("id")
     if method == "initialize":
+        assert message["params"]["capabilities"]["experimentalApi"] is True
+        assert message["params"]["capabilities"]["mcpServerOpenaiFormElicitation"] is True
         emit({"id": identifier, "result": {"userAgent": "parameter-fixture"}})
     elif method == "thread/start":
         params = message["params"]
         assert params["ephemeral"] is True
         assert params["sandbox"] == "read-only"
+        assert params["approvalPolicy"] == "never"
+        emit({"id": identifier, "result": {"thread": {"id": "thread-plan"}}})
+    elif method == "thread/resume":
+        params = message["params"]
+        assert params["threadId"] == "thread-plan"
         assert params["approvalPolicy"] == "never"
         emit({"id": identifier, "result": {"thread": {"id": "thread-plan"}}})
     elif method == "turn/start":
@@ -186,6 +201,7 @@ for line in sys.stdin:
         }
         assert params["serviceTier"] == "dynamic-fast"
         assert params["outputSchema"] == {"type": "object"}
+        assert params["approvalPolicy"] == "never"
         emit({
             "id": identifier,
             "result": {

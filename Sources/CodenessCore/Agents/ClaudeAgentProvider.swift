@@ -37,6 +37,7 @@ public actor ClaudeAgentProvider: AgentProviding {
         var latestAssistantText: String?
         var emittedTextHeading: Bool
         var emittedThinkingHeading: Bool
+        var transcriptSection: TranscriptSectionKind?
         var terminalDelivered: Bool
         var interruptRequested: Bool
         var terminationStatus: Int32?
@@ -294,6 +295,7 @@ public actor ClaudeAgentProvider: AgentProviding {
             latestAssistantText: nil,
             emittedTextHeading: false,
             emittedThinkingHeading: false,
+            transcriptSection: nil,
             terminalDelivered: false,
             interruptRequested: false,
             terminationStatus: nil,
@@ -451,7 +453,14 @@ public actor ClaudeAgentProvider: AgentProviding {
         guard var run = activeRuns[runID] else { return }
         guard let message = try? JSONDecoder().decode(JSONValue.self, from: data) else {
             let line = String(decoding: data, as: UTF8.self)
-            run.continuation.yield(.diagnostic("Invalid Claude JSON: \(line)"))
+            run.continuation.yield(
+                .diagnostic(transcriptText(
+                    "Invalid Claude JSON: \(line)",
+                    section: .diagnostic,
+                    run: &run
+                ))
+            )
+            activeRuns[runID] = run
             return
         }
 
@@ -462,7 +471,13 @@ public actor ClaudeAgentProvider: AgentProviding {
                 run.continuation.yield(.started(executionID: executionID))
             } else if message["subtype"]?.stringValue == "status",
                       let status = message["status"]?.stringValue {
-                run.continuation.yield(.diagnostic("Claude status: \(status)"))
+                run.continuation.yield(
+                    .diagnostic(transcriptText(
+                        "Claude status: \(status)",
+                        section: .diagnostic,
+                        run: &run
+                    ))
+                )
             }
         case "stream_event":
             consumeStreamEvent(message["event"] ?? .null, run: &run)
@@ -500,9 +515,10 @@ public actor ClaudeAgentProvider: AgentProviding {
             let block = event["content_block"] ?? .null
             if block["type"]?.stringValue == "tool_use" {
                 let name = block["name"]?.stringValue ?? "tool"
-                let text = RunTranscriptPresentation.storedText(
+                let text = transcriptText(
                     "\n› \(name)\n",
-                    section: .action
+                    section: .action,
+                    run: &run
                 )
                 run.continuation.yield(.transcript(text))
             }
@@ -514,25 +530,39 @@ public actor ClaudeAgentProvider: AgentProviding {
                 if !run.emittedTextHeading {
                     run.emittedTextHeading = true
                     run.continuation.yield(
-                        .transcript(RunTranscriptPresentation.storedText(
+                        .transcript(transcriptText(
                             "\n\nClaude\n",
-                            section: .reasoning
+                            section: .reasoning,
+                            run: &run
                         ))
                     )
                 }
-                run.continuation.yield(.transcript(text))
+                run.continuation.yield(
+                    .transcript(transcriptText(
+                        text,
+                        section: .reasoning,
+                        run: &run
+                    ))
+                )
             case "thinking_delta":
                 guard let text = delta["thinking"]?.stringValue, !text.isEmpty else { return }
                 if !run.emittedThinkingHeading {
                     run.emittedThinkingHeading = true
                     run.continuation.yield(
-                        .transcript(RunTranscriptPresentation.storedText(
+                        .transcript(transcriptText(
                             "\n\nReasoning\n",
-                            section: .reasoning
+                            section: .reasoning,
+                            run: &run
                         ))
                     )
                 }
-                run.continuation.yield(.transcript(text))
+                run.continuation.yield(
+                    .transcript(transcriptText(
+                        text,
+                        section: .reasoning,
+                        run: &run
+                    ))
+                )
             default:
                 break
             }
@@ -544,6 +574,16 @@ public actor ClaudeAgentProvider: AgentProviding {
         default:
             break
         }
+    }
+
+    private func transcriptText(
+        _ text: String,
+        section: TranscriptSectionKind,
+        run: inout ActiveRun
+    ) -> String {
+        defer { run.transcriptSection = section }
+        guard run.transcriptSection != section else { return text }
+        return RunTranscriptPresentation.storedText(text, section: section)
     }
 
     private func consumeResult(_ message: JSONValue, runID: UUID, run: inout ActiveRun) {
@@ -589,9 +629,10 @@ public actor ClaudeAgentProvider: AgentProviding {
         guard !clean.isEmpty else { return }
         run.stderrTail = String((run.stderrTail + clean + "\n").suffix(4_000))
         run.continuation.yield(
-            .diagnostic(RunTranscriptPresentation.storedText(
+            .diagnostic(transcriptText(
                 "\n\(clean)\n",
-                section: .diagnostic
+                section: .diagnostic,
+                run: &run
             ))
         )
         activeRuns[runID] = run
@@ -699,9 +740,10 @@ public actor ClaudeAgentProvider: AgentProviding {
         let cacheWrite = value["cache_creation_input_tokens"]?.integerValue ?? 0
         let output = value["output_tokens"]?.integerValue ?? 0
         guard input > 0 || cached > 0 || cacheWrite > 0 || output > 0 else { return nil }
+        let totalInput = input + cached + cacheWrite
         return RunTokenUsage(
-            totalTokens: input + cached + cacheWrite + output,
-            inputTokens: input,
+            totalTokens: totalInput + output,
+            inputTokens: totalInput,
             cachedInputTokens: cached,
             cacheWriteInputTokens: cacheWrite,
             outputTokens: output

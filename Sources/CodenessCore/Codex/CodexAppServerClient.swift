@@ -85,10 +85,11 @@ public actor CodexAppServerClient {
                     "clientInfo": .object([
                         "name": .string("codeness"),
                         "title": .string("Codeness"),
-                        "version": .string("0.5.1")
+                        "version": .string("0.8.0")
                     ]),
                     "capabilities": .object([
-                        "experimentalApi": .bool(false)
+                        "experimentalApi": .bool(true),
+                        "mcpServerOpenaiFormElicitation": .bool(true)
                     ])
                 ]
             )
@@ -163,16 +164,21 @@ public actor CodexAppServerClient {
         id: String,
         cwd: String,
         model: String,
-        developerInstructions: String
+        developerInstructions: String,
+        approvalPolicy: String? = nil
     ) async throws {
+        var params: [String: JSONValue] = [
+            "threadId": .string(id),
+            "cwd": .string(cwd),
+            "model": .string(model),
+            "developerInstructions": .string(developerInstructions)
+        ]
+        if let approvalPolicy {
+            params["approvalPolicy"] = .string(approvalPolicy)
+        }
         _ = try await sendRequest(
             method: "thread/resume",
-            params: [
-                "threadId": .string(id),
-                "cwd": .string(cwd),
-                "model": .string(model),
-                "developerInstructions": .string(developerInstructions)
-            ]
+            params: params
         )
     }
 
@@ -201,7 +207,8 @@ public actor CodexAppServerClient {
         effort: String,
         mode: AgentMode = .standard,
         serviceTier: String? = nil,
-        outputSchema: JSONValue? = nil
+        outputSchema: JSONValue? = nil,
+        approvalPolicy: String? = nil
     ) async throws -> String {
         var params: [String: JSONValue] = [
             "threadId": .string(threadID),
@@ -214,6 +221,9 @@ public actor CodexAppServerClient {
             "model": .string(model),
             "effort": .string(effort)
         ]
+        if let approvalPolicy {
+            params["approvalPolicy"] = .string(approvalPolicy)
+        }
         if mode == .plan {
             params["collaborationMode"] = .object([
                 "mode": .string("plan"),

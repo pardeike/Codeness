@@ -28,15 +28,15 @@ private struct RepositoryWindowCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Open Repository…") {
+            Button("Open Workspace…") {
                 appDelegate.openRepository()
             }
             .keyboardShortcut("o", modifiers: .command)
-            .help("Choose a repository folder and open it in a Codeness window")
+            .help("Choose a work folder and open it in a Codeness window")
 
             Menu("Open Recent") {
                 if state.recentURLs.isEmpty {
-                    Text("No Recent Repositories")
+                    Text("No Recent Workspaces")
                 } else {
                     ForEach(state.recentURLs, id: \.path) { url in
                         Button(url.repositoryMenuTitle) {
@@ -48,10 +48,10 @@ private struct RepositoryWindowCommands: Commands {
                     Button("Clear Menu") {
                         appDelegate.clearRecentRepositories()
                     }
-                    .help("Remove every repository from the Open Recent menu")
+                    .help("Remove every workspace from the Open Recent menu")
                 }
             }
-            .help("Open a recently used repository")
+            .help("Open a recently used workspace")
 
             Divider()
             Button("Close") {
@@ -67,16 +67,6 @@ private struct RepositoryWindowCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: .command)
             .help("Persist the active repository's Codeness state")
-
-            Divider()
-
-            Button("Start Over…") {
-                state.requestStartOver()
-            }
-            .disabled(state.currentCoordinator?.canStartOver != true)
-            .help(
-                "Archive the current activity and return to its editable Goal and prompts"
-            )
         }
 
         CommandGroup(replacing: .printItem) {
@@ -90,30 +80,6 @@ private struct RepositoryWindowCommands: Commands {
                 }
             }
             .disabled(!canChooseDetailLayout)
-        }
-
-        CommandMenu("Repository") {
-            Button("Copy Repository Path") {
-                guard let path = state.currentCoordinator?.record.canonicalPath else { return }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(path, forType: .string)
-            }
-            .disabled(state.currentCoordinator == nil)
-
-            Button("Reveal Repository in Finder") {
-                guard let path = state.currentCoordinator?.record.canonicalPath else { return }
-                NSWorkspace.shared.activateFileViewerSelecting([
-                    URL(fileURLWithPath: path, isDirectory: true)
-                ])
-            }
-            .disabled(state.currentCoordinator == nil)
-
-            Divider()
-
-            Button("Amend Goal…") {
-                state.requestGoalAmendment()
-            }
-            .disabled(state.currentCoordinator?.canAmendGoal != true)
         }
 
         CommandMenu("Workflow") {
@@ -147,11 +113,41 @@ private struct RepositoryWindowCommands: Commands {
 
             Divider()
 
+            Button("Amend Goal…") {
+                state.requestGoalAmendment()
+            }
+            .disabled(state.currentCoordinator?.canAmendGoal != true)
+
+            Button("Start Over…") {
+                state.requestStartOver()
+            }
+            .disabled(state.currentCoordinator?.canStartOver != true)
+            .help(
+                "Archive the current activity and return to its editable Goal and workflow"
+            )
+
+            Divider()
+
             Button("Show Current Run") {
                 state.currentCoordinator?.selectLiveRun()
             }
             .keyboardShortcut("l", modifiers: [.command, .option])
             .disabled(!canShowCurrentRun)
+
+            Button("Reveal in Finder") {
+                guard let path = state.currentCoordinator?.record.canonicalPath else { return }
+                NSWorkspace.shared.activateFileViewerSelecting([
+                    URL(fileURLWithPath: path, isDirectory: true)
+                ])
+            }
+            .disabled(state.currentCoordinator == nil)
+
+            Button("Copy Path") {
+                guard let path = state.currentCoordinator?.record.canonicalPath else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(path, forType: .string)
+            }
+            .disabled(state.currentCoordinator == nil)
         }
     }
 

@@ -109,6 +109,26 @@ struct ClaudeAgentProviderTests {
             }
             return false
         })
+        let firstTranscript = firstEvents.compactMap { event -> String? in
+            guard case .transcript(let text) = event else { return nil }
+            return text
+        }.joined()
+        let presentedTranscript = RunTranscriptPresentation.text(
+            for: RunRecord(
+                sequence: 1,
+                role: .implementer,
+                kind: .implementation,
+                status: .completed,
+                threadID: firstSession.id,
+                model: target.model,
+                effort: "high",
+                prompt: "Run the configured review step.",
+                transcript: firstTranscript
+            ),
+            separatesRuns: true
+        )
+        #expect(presentedTranscript.contains("Narrative after tool."))
+        #expect(!presentedTranscript.contains("› Bash"))
         #expect(resumedEvents.contains {
             if case .interaction(let interaction) = $0 {
                 return interaction.kind == .questions
@@ -121,6 +141,7 @@ struct ClaudeAgentProviderTests {
                 return output == "Claude fixture complete"
                     && duration == 12
                     && usage?.totalTokens == 18
+                    && usage?.inputTokens == 14
             }
             return false
         })
@@ -407,6 +428,13 @@ for line in sys.stdin:
             })
         else:
             emit({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "content_block": {"type": "tool_use", "name": "Bash"}
+                }
+            })
+            emit({
                 "type": "control_request",
                 "request_id": "permission-command",
                 "request": {
@@ -420,6 +448,16 @@ for line in sys.stdin:
     elif value.get("type") == "control_response":
         request_id = value.get("response", {}).get("request_id", "")
         if request_id.startswith("permission-"):
+            emit({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "Narrative after tool."
+                    }
+                }
+            })
             emit({
                 "type": "assistant",
                 "message": {

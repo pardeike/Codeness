@@ -39,7 +39,8 @@ public actor CodexAgentProvider: AgentProviding {
                 id: existingSessionID,
                 cwd: request.cwd,
                 model: request.target.model,
-                developerInstructions: request.developerInstructions
+                developerInstructions: request.developerInstructions,
+                approvalPolicy: "never"
             )
             return AgentSession(providerID: id, id: existingSessionID, target: request.target)
         }
@@ -48,7 +49,8 @@ public actor CodexAgentProvider: AgentProviding {
             cwd: request.cwd,
             model: request.target.model,
             developerInstructions: request.developerInstructions,
-            readOnly: request.target.options.mode == .plan
+            readOnly: request.target.options.mode == .plan,
+            approvalPolicy: "never"
         )
         try await appServer.setThreadName(id: sessionID, name: request.name)
         return AgentSession(providerID: id, id: sessionID, target: request.target)
@@ -86,7 +88,8 @@ public actor CodexAgentProvider: AgentProviding {
                 effort: effort,
                 mode: request.target.options.mode,
                 serviceTier: serviceTier,
-                outputSchema: request.outputSchema
+                outputSchema: request.outputSchema,
+                approvalPolicy: "never"
             )
             if var activeRun = activeRuns[request.runID] {
                 activeRun.executionID = activeRun.executionID ?? executionID
@@ -212,6 +215,17 @@ public actor CodexAgentProvider: AgentProviding {
             }
         case .request(let requestID, let method, let params, _):
             guard let runID = runID(for: event), var run = activeRuns[runID] else { return }
+            if let response = Self.automaticResponse(method: method, params: params) {
+                do {
+                    try await appServer.respond(to: requestID, result: response)
+                } catch {
+                    run.continuation.yield(
+                        .failed("Could not automatically approve the Codex MCP tool call: \(error.localizedDescription)")
+                    )
+                    finish(runID: runID)
+                }
+                return
+            }
             let interactionID = requestID.encodedString()
             run.interactionRequestIDs[interactionID] = requestID
             activeRuns[runID] = run
@@ -391,6 +405,20 @@ public actor CodexAgentProvider: AgentProviding {
                 rawParameters: params
             )
         }
+    }
+
+    private nonisolated static func automaticResponse(
+        method: String,
+        params: JSONValue
+    ) -> JSONValue? {
+        guard method == "mcpServer/elicitation/request",
+              params["_meta"]?["codex_approval_kind"]?.stringValue == "mcp_tool_call" else {
+            return nil
+        }
+        return .object([
+            "action": .string("accept"),
+            "content": .object([:])
+        ])
     }
 
     private nonisolated static func approvalDecisions(

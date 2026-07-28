@@ -125,6 +125,18 @@ struct WorkOverviewMetricsTests {
     }
 
     @Test
+    func derivesTotalInputForClaudeUsageRecordedBeforeInputNormalization() {
+        let legacyUsage = RunTokenUsage(
+            totalTokens: 46_600_000,
+            inputTokens: 379,
+            cachedInputTokens: 46_451_621,
+            outputTokens: 148_000
+        )
+
+        #expect(WorkOverviewFormatting.inputTokens(legacyUsage) == 46_452_000)
+    }
+
+    @Test
     func preservesSummarySectionsAndBulletsAsSeparateVisualBlocks() {
         let markdown = """
         ### Completed

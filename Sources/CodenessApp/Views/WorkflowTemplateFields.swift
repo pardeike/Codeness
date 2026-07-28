@@ -61,9 +61,20 @@ struct WorkflowTemplateFields: View {
                     workflow.steps[$0].section == section
                 }
                 if indices.isEmpty {
-                    Text("No steps")
-                        .foregroundStyle(.tertiary)
-                        .padding(.vertical, 4)
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(
+                            Color.secondary.opacity(0.35),
+                            style: StrokeStyle(
+                                lineWidth: 1,
+                                dash: [4, 3]
+                            )
+                        )
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 20)
+                        .accessibilityElement()
+                        .accessibilityLabel(
+                            "\(section.displayName) has no steps"
+                        )
                 }
                 ForEach(indices, id: \.self) { index in
                     stepEditor(index: index, sectionIndices: indices)
@@ -268,24 +279,12 @@ struct WorkflowTargetFields: View {
                     }
                 }
                 GridRow {
-                    Text("Mode")
-                    Picker("Mode", selection: $target.options.mode) {
-                        ForEach(AgentMode.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
+                    Text("Options")
+                    HStack(spacing: 18) {
+                        Toggle("Plan", isOn: planModeBinding)
+                        Toggle("Fast", isOn: fastModeBinding)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                }
-                GridRow {
-                    Text("Speed")
-                    Picker("Speed", selection: $target.options.speed) {
-                        ForEach(AgentSpeed.allCases, id: \.self) { speed in
-                            Text(speed.displayName).tag(speed)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                    .toggleStyle(.checkbox)
                 }
             }
             .font(.caption)
@@ -326,6 +325,20 @@ struct WorkflowTargetFields: View {
 
     private var knownEfforts: [String] {
         selectedModel?.supportedEfforts ?? []
+    }
+
+    private var planModeBinding: Binding<Bool> {
+        Binding(
+            get: { target.options.mode == .plan },
+            set: { target.options.mode = $0 ? .plan : .standard }
+        )
+    }
+
+    private var fastModeBinding: Binding<Bool> {
+        Binding(
+            get: { target.options.speed == .fast },
+            set: { target.options.speed = $0 ? .fast : .standard }
+        )
     }
 
 }

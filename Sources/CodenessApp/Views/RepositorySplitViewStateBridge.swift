@@ -3,12 +3,14 @@ import SwiftUI
 
 struct RepositorySplitViewStateBridge: NSViewRepresentable {
     let restoredSidebarWidth: CGFloat?
+    let optimalSidebarWidth: CGFloat
     let allowsSidebarRestoration: Bool
     let onSidebarChange: (CGFloat, Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             restoredSidebarWidth: restoredSidebarWidth,
+            optimalSidebarWidth: optimalSidebarWidth,
             allowsSidebarRestoration: allowsSidebarRestoration,
             onSidebarChange: onSidebarChange
         )
@@ -23,14 +25,20 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
     func updateNSView(_ nsView: ProbeView, context: Context) {
         context.coordinator.onSidebarChange = onSidebarChange
         context.coordinator.restoredSidebarWidth = restoredSidebarWidth
+        context.coordinator.optimalSidebarWidth = optimalSidebarWidth
         context.coordinator.allowsSidebarRestoration = allowsSidebarRestoration
         context.coordinator.attachIfPossible(from: nsView)
         context.coordinator.applyRestoredWidthIfNeeded()
     }
 
+    static func dismantleNSView(_ nsView: ProbeView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
     @MainActor
     final class Coordinator: NSObject {
         var restoredSidebarWidth: CGFloat?
+        var optimalSidebarWidth: CGFloat
         var allowsSidebarRestoration: Bool
         var onSidebarChange: (CGFloat, Bool) -> Void
 
@@ -39,22 +47,28 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
         private var isApplyingWidth = false
         private var reportTask: Task<Void, Never>?
         private var observationTask: Task<Void, Never>?
+        private var doubleClickMonitor: Any?
         private var lastReportedWidth: CGFloat?
         private var lastReportedVisibility: Bool?
 
         init(
             restoredSidebarWidth: CGFloat?,
+            optimalSidebarWidth: CGFloat,
             allowsSidebarRestoration: Bool,
             onSidebarChange: @escaping (CGFloat, Bool) -> Void
         ) {
             self.restoredSidebarWidth = restoredSidebarWidth
+            self.optimalSidebarWidth = optimalSidebarWidth
             self.allowsSidebarRestoration = allowsSidebarRestoration
             self.onSidebarChange = onSidebarChange
         }
 
-        deinit {
+        isolated deinit {
             reportTask?.cancel()
             observationTask?.cancel()
+            if let doubleClickMonitor {
+                NSEvent.removeMonitor(doubleClickMonitor)
+            }
             NotificationCenter.default.removeObserver(self)
         }
 
@@ -84,7 +98,21 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
             applyRestoredWidthIfNeeded()
             reportCurrentState()
             beginObservingActualWidth()
+            installDoubleClickMonitor()
             return true
+        }
+
+        func detach() {
+            reportTask?.cancel()
+            reportTask = nil
+            observationTask?.cancel()
+            observationTask = nil
+            if let doubleClickMonitor {
+                NSEvent.removeMonitor(doubleClickMonitor)
+                self.doubleClickMonitor = nil
+            }
+            NotificationCenter.default.removeObserver(self)
+            splitView = nil
         }
 
         @objc private func splitViewDidResize() {
@@ -102,6 +130,61 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
             isApplyingWidth = true
             splitView.setPosition(restoredSidebarWidth, ofDividerAt: 0)
             isApplyingWidth = false
+        }
+
+        private func installDoubleClickMonitor() {
+            guard doubleClickMonitor == nil else { return }
+            doubleClickMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .leftMouseDown
+            ) { [weak self] event in
+                guard let self,
+                      event.clickCount == 2,
+                      let splitView = self.splitView,
+                      let sidebar = splitView.arrangedSubviews.first else {
+                    return event
+                }
+                let splitWindow = unsafe splitView.window
+                guard event.window === splitWindow else { return event }
+                let point = splitView.convert(event.locationInWindow, from: nil)
+                let dividerHitArea = NSRect(
+                    x: sidebar.frame.maxX,
+                    y: splitView.bounds.minY,
+                    width: max(1, splitView.dividerThickness),
+                    height: splitView.bounds.height
+                )
+                    .insetBy(dx: -4, dy: 0)
+                guard dividerHitArea.contains(point) else { return event }
+                self.toggleSidebarWidth()
+                return nil
+            }
+        }
+
+        private func toggleSidebarWidth() {
+            guard let splitView,
+                  let sidebar = splitView.arrangedSubviews.first else { return }
+            let minimumWidth = max(
+                RepositoryWindowMetrics.minimumSidebarWidth,
+                splitView.minPossiblePositionOfDivider(at: 0)
+            )
+            let maximumWidth = min(
+                RepositoryWindowMetrics.maximumSidebarWidth,
+                splitView.maxPossiblePositionOfDivider(at: 0)
+            )
+            guard maximumWidth >= minimumWidth else { return }
+            let optimalWidth = min(
+                maximumWidth,
+                max(minimumWidth, optimalSidebarWidth)
+            )
+            let targetWidth = RepositoryWindowMetrics.sidebarDoubleClickTarget(
+                currentWidth: sidebar.frame.width,
+                optimalWidth: optimalWidth,
+                maximumWidth: maximumWidth
+            )
+
+            isApplyingWidth = true
+            splitView.setPosition(targetWidth, ofDividerAt: 0)
+            isApplyingWidth = false
+            scheduleStateReport()
         }
 
         private func beginObservingActualWidth() {

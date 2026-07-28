@@ -13,11 +13,11 @@ enum WorkflowTransportControl: Equatable {
         }
     }
 
-    var systemImage: String {
+    var buttonTitle: String {
         switch self {
-        case .resume: "play.fill"
-        case .pauseAfterCurrent: "pause.circle"
-        case .keepRunning: "arrow.forward.circle"
+        case .resume: "Resume"
+        case .pauseAfterCurrent: "Pause"
+        case .keepRunning: "Continue"
         }
     }
 

@@ -9,47 +9,363 @@ struct RepositorySettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var settings: RepositorySettings
     @State private var workflow: WorkflowTemplate?
+    @State private var selection: WorkflowPreferencesSelection?
     @State private var isTestingHandoff = false
     @State private var handoffTestMessage: String?
     @State private var handoffTestSucceeded = false
+    @State private var isSaving = false
 
     init(coordinator: RepositoryCoordinator) {
         self.coordinator = coordinator
         _settings = State(initialValue: coordinator.record.settings)
         _workflow = State(initialValue: coordinator.record.activity?.workflow)
+        _selection = State(initialValue: .overview)
     }
 
     var body: some View {
         VStack(spacing: 0) {
+            header
+
+            Divider()
+
             if workflow != nil {
-                genericWorkflowSettings
+                workflowPreferences
             } else {
                 legacyRepositorySettings
             }
 
             Divider()
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                    .help("Discard repository-setting changes and close this sheet")
-                Button("Save") {
-                    Task {
-                        if await save() {
-                            dismiss()
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .help(saveHelp)
-                .disabled(!canSave)
-            }
-            .padding(14)
+            footer
         }
-        .frame(width: workflow == nil ? 840 : 920, height: workflow == nil ? 640 : 760)
+        .frame(width: workflow == nil ? 880 : 940, height: workflow == nil ? 680 : 720)
         .onChange(of: settings.relay) {
             handoffTestMessage = nil
             handoffTestSucceeded = false
         }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Workflow Preferences")
+                    .font(.title2.weight(.semibold))
+                Text(
+                    workflow?.name
+                        ?? "Model and handoff defaults for this repository"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if workflow != nil {
+                Label(activityStatusTitle, systemImage: activityStatusIcon)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(activityStatusColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        activityStatusColor.opacity(0.12),
+                        in: Capsule()
+                    )
+            }
+        }
+        .padding(20)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            if let validationMessage {
+                Label(
+                    validationMessage,
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(2)
+            }
+            Spacer()
+            Button("Cancel", role: .cancel) {
+                dismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+            .help("Discard workflow-preference changes and close this sheet")
+            Button {
+                Task {
+                    isSaving = true
+                    defer { isSaving = false }
+                    if await save() {
+                        dismiss()
+                    }
+                }
+            } label: {
+                if isSaving {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Text("Save")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .help(saveHelp)
+            .disabled(!canSave || isSaving)
+        }
+        .padding(14)
+    }
+
+    private var workflowPreferences: some View {
+        HSplitView {
+            workflowSidebar
+                .frame(
+                    minWidth: 220,
+                    idealWidth: 250,
+                    maxWidth: 290,
+                    maxHeight: .infinity
+                )
+
+            workflowDetail
+                .frame(
+                    minWidth: 650,
+                    maxWidth: .infinity,
+                    maxHeight: .infinity
+                )
+        }
+    }
+
+    private var workflowSidebar: some View {
+        List(selection: $selection) {
+            Section("Workflow") {
+                Label("Overview", systemImage: "doc.text")
+                    .tag(WorkflowPreferencesSelection.overview)
+                Label("Coordinator", systemImage: "arrow.triangle.branch")
+                    .tag(WorkflowPreferencesSelection.coordinator)
+            }
+
+            Divider()
+                .padding(.vertical, 8)
+                .accessibilityHidden(true)
+
+            Section("Steps") {
+                ForEach(WorkflowSection.allCases, id: \.self) { section in
+                    let steps = workflow?.steps(in: section) ?? []
+                    if !steps.isEmpty {
+                        Text(section.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(
+                                .top,
+                                section == firstPopulatedSection ? 0 : 6
+                            )
+                            .accessibilityAddTraits(.isHeader)
+
+                        ForEach(steps) { step in
+                            Label(
+                                step.name,
+                                systemImage: stepIcon(for: section)
+                            )
+                            .tag(WorkflowPreferencesSelection.step(step.id))
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .accessibilityLabel("Workflow preferences")
+        .background(.quaternary.opacity(0.22))
+    }
+
+    @ViewBuilder
+    private var workflowDetail: some View {
+        switch selection ?? .overview {
+        case .overview:
+            ScrollView {
+                overviewDetail
+                    .workflowPreferencesDetailLayout()
+            }
+        case .coordinator:
+            ScrollView {
+                coordinatorDetail
+                    .workflowPreferencesDetailLayout()
+            }
+        case let .step(stepID):
+            ScrollView {
+                stepDetail(stepID: stepID)
+                    .workflowPreferencesDetailLayout()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var overviewDetail: some View {
+        if let workflow {
+            VStack(alignment: .leading, spacing: 20) {
+                detailHeading(
+                    workflow.name,
+                    description: workflow.summary
+                )
+
+                activityStateNotice
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Structure")
+                        .font(.headline)
+                    ForEach(WorkflowSection.allCases, id: \.self) { section in
+                        let count = workflow.steps(in: section).count
+                        if count > 0 {
+                            HStack(spacing: 10) {
+                                Image(systemName: stepIcon(for: section))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 18)
+                                Text(section.displayName)
+                                Spacer()
+                                Text("\(count)")
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
+                        Text("Coordinator")
+                    }
+                }
+
+                Divider()
+
+                Label(
+                    "The workflow structure and instructions are frozen for this activity.",
+                    systemImage: "lock"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func stepDetail(stepID: String) -> some View {
+        if let step = workflow?.step(id: stepID) {
+            VStack(alignment: .leading, spacing: 20) {
+                detailHeading(
+                    step.name,
+                    description: sectionDescription(step.section)
+                )
+
+                if !targetsAreEditable {
+                    activityStateNotice
+                }
+
+                readOnlyInstructions(
+                    step.instructions,
+                    title: "Instructions"
+                )
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Agent")
+                        .font(.headline)
+                    WorkflowTargetFields(
+                        title: step.name,
+                        target: stepBinding(for: step).target
+                    )
+                    .disabled(!targetsAreEditable)
+                }
+            }
+        } else {
+            ContentUnavailableView(
+                "Step Not Found",
+                systemImage: "exclamationmark.triangle",
+                description: Text("Choose another workflow step.")
+            )
+        }
+    }
+
+    private var coordinatorDetail: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            detailHeading(
+                "Handoff Coordinator",
+                description: "Filters each completed step into a concise handoff and decides whether the repeating loop is complete."
+            )
+
+            if !targetsAreEditable {
+                activityStateNotice
+            }
+
+            readOnlyInstructions(
+                workflow?.coordinator.instructions ?? "",
+                title: "Instructions"
+            )
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Agent")
+                    .font(.headline)
+                WorkflowTargetFields(
+                    title: "Coordinator",
+                    target: coordinatorTargetBinding
+                )
+                .disabled(!targetsAreEditable)
+            }
+        }
+    }
+
+    private func detailHeading(
+        _ title: String,
+        description: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.title2.weight(.semibold))
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func readOnlyInstructions(
+        _ instructions: String,
+        title: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            Text(instructions)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(
+                    .quaternary.opacity(0.35),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+        }
+    }
+
+    private var activityStateNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: activityStatusIcon)
+                .foregroundStyle(activityStatusColor)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activityNoticeTitle)
+                    .font(.headline)
+                Text(activityStatusDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            activityStatusColor.opacity(0.10),
+            in: RoundedRectangle(cornerRadius: 9)
+        )
     }
 
     private var legacyRepositorySettings: some View {
@@ -131,51 +447,134 @@ struct RepositorySettingsSheet: View {
         .formStyle(.grouped)
     }
 
-    private var genericWorkflowSettings: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let workflow {
-                    Text(workflow.name)
-                        .font(.title2.weight(.semibold))
-                    Text(
-                        "The workflow definition is frozen for this activity. While paused, you can change each step's provider, model, effort, mode, and speed; provider, model, or mode changes start a new session lineage."
-                    )
-                    .foregroundStyle(.secondary)
-                    if coordinator.record.activity?.status != .paused {
-                        Label(
-                            "Pause the activity before changing its agent targets.",
-                            systemImage: "pause.circle"
-                        )
-                        .foregroundStyle(.orange)
-                    }
-                    WorkflowTemplateFields(
-                        workflow: workflowBinding,
-                        allowsDefinitionEditing: false
-                    )
-                    .disabled(coordinator.record.activity?.status != .paused)
-                    if let message = workflow.validationMessage {
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                    }
-                }
-            }
-            .padding(24)
+    private var firstPopulatedSection: WorkflowSection? {
+        WorkflowSection.allCases.first {
+            !(workflow?.steps(in: $0).isEmpty ?? true)
         }
     }
 
-    private var workflowBinding: Binding<WorkflowTemplate> {
+    private var targetsAreEditable: Bool {
+        coordinator.record.activity?.status == .paused
+    }
+
+    private var activityStatusTitle: String {
+        switch coordinator.record.activity?.status {
+        case .running: "Running"
+        case .paused: "Paused — editable"
+        case .completed: "Completed"
+        case .cancelled: "Cancelled"
+        case .failed: "Failed"
+        case nil: "Not started"
+        }
+    }
+
+    private var activityStatusIcon: String {
+        switch coordinator.record.activity?.status {
+        case .running: "play.circle.fill"
+        case .paused: "pause.circle.fill"
+        case .completed: "checkmark.circle.fill"
+        case .cancelled: "xmark.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        case nil: "circle"
+        }
+    }
+
+    private var activityStatusColor: Color {
+        switch coordinator.record.activity?.status {
+        case .paused: .accentColor
+        case .running: .orange
+        case .completed: .green
+        case .failed: .red
+        case .cancelled, nil: .secondary
+        }
+    }
+
+    private var activityStatusDetail: String {
+        switch coordinator.record.activity?.status {
+        case .paused:
+            "You can change agent targets for future steps. Provider, model, or mode changes start a new session lineage."
+        case .running:
+            "Pause the activity before changing agent targets."
+        case .completed:
+            "This activity is complete. Use Start Over to run it with different workflow preferences."
+        case .cancelled:
+            "This activity was cancelled. Use Start Over to run it with different workflow preferences."
+        case .failed:
+            "This activity failed. Resume and pause it before changing agent targets, or use Start Over."
+        case nil:
+            "Start an activity before changing its workflow preferences."
+        }
+    }
+
+    private var activityNoticeTitle: String {
+        switch coordinator.record.activity?.status {
+        case .paused: "Targets editable"
+        case .running: "Pause to edit targets"
+        case .completed, .cancelled, .failed: "Targets locked"
+        case nil: "Targets unavailable"
+        }
+    }
+
+    private var validationMessage: String? {
+        if let workflow {
+            return workflow.validationMessage
+                ?? application.workflowCompatibilityMessage(workflow)
+        }
+        return nil
+    }
+
+    private func stepBinding(for fallback: WorkflowStep) -> Binding<WorkflowStep> {
         Binding(
             get: {
-                workflow ?? coordinator.record.activity?.workflow
-                    ?? application.workflowCatalog.defaultTemplate!
+                workflow?.step(id: fallback.id) ?? fallback
             },
-            set: { workflow = $0 }
+            set: { updatedStep in
+                guard var workflow,
+                      let index = workflow.steps.firstIndex(where: {
+                          $0.id == fallback.id
+                      }) else { return }
+                workflow.steps[index] = updatedStep
+                self.workflow = workflow
+            }
         )
+    }
+
+    private var coordinatorTargetBinding: Binding<AgentTarget> {
+        Binding(
+            get: {
+                workflow?.coordinator.target
+                    ?? application.workflowCatalog.defaultTemplate!.coordinator.target
+            },
+            set: { updatedTarget in
+                guard var workflow else { return }
+                workflow.coordinator.target = updatedTarget
+                self.workflow = workflow
+            }
+        )
+    }
+
+    private func stepIcon(for section: WorkflowSection) -> String {
+        switch section {
+        case .prefix: "arrow.right.to.line"
+        case .loop: "repeat"
+        case .postfix: "checkmark"
+        }
+    }
+
+    private func sectionDescription(_ section: WorkflowSection) -> String {
+        switch section {
+        case .prefix:
+            "Runs once before the repeating loop."
+        case .loop:
+            "Runs in order each time the workflow repeats."
+        case .postfix:
+            "Runs once after the coordinator declares the loop complete."
+        }
     }
 
     private var canSave: Bool {
         if let workflow {
-            return coordinator.record.activity?.status == .paused
+            return targetsAreEditable
                 && workflow.validationMessage == nil
                 && application.workflowCompatibilityMessage(workflow) == nil
                 && workflow != coordinator.record.activity?.workflow
@@ -186,7 +585,7 @@ struct RepositorySettingsSheet: View {
     private var saveHelp: String {
         workflow == nil
             ? "Save these model, reasoning, and handoff settings for this repository"
-            : "Save provider, model, effort, mode, and speed for future workflow steps"
+            : "Save agent targets for future workflow steps"
     }
 
     private func save() async -> Bool {
@@ -227,6 +626,20 @@ struct RepositorySettingsSheet: View {
         }
 
         return names.sorted()
+    }
+}
+
+private enum WorkflowPreferencesSelection: Hashable {
+    case overview
+    case coordinator
+    case step(String)
+}
+
+private extension View {
+    func workflowPreferencesDetailLayout() -> some View {
+        frame(maxWidth: 720, alignment: .leading)
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 

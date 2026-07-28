@@ -3,8 +3,6 @@ import SwiftUI
 
 struct ApplicationSettingsView: View {
     let application: CodenessApplicationModel
-    @State private var prompts: ActivityPrompts
-    @State private var modelDefaults: RepositoryModelDefaults
     @State private var executablePath: String
     @State private var claudeExecutablePath: String
     @State private var workflowCatalog: WorkflowCatalog
@@ -12,11 +10,10 @@ struct ApplicationSettingsView: View {
     @State private var workflowEditor: WorkflowEditorPresentation?
     @State private var separatesRunTranscripts: Bool
     @State private var isSaving = false
+    @State private var closeRequestID = 0
 
     init(application: CodenessApplicationModel) {
         self.application = application
-        _prompts = State(initialValue: application.promptDefaults)
-        _modelDefaults = State(initialValue: application.repositoryModelDefaults)
         _executablePath = State(initialValue: application.configuredExecutablePath)
         _claudeExecutablePath = State(
             initialValue: application.configuredClaudeExecutablePath
@@ -34,51 +31,55 @@ struct ApplicationSettingsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("Agent CLIs")
                         .font(.title2.weight(.semibold))
-                    LabeledContent("Codex executable") {
-                        FilePathField(
-                            path: $executablePath,
-                            placeholder: "Automatic discovery",
-                            panelTitle: "Choose the Codex Executable",
-                            prompt: "Choose",
-                            requiresExecutable: true
-                        )
-                        .help("Choose or drop the Codex executable; use the advanced path menu for manual entry, or clear it for automatic discovery")
-                    }
-                    LabeledContent("Codex status") {
-                        HStack {
-                            Text(application.serverState.label)
-                                .foregroundStyle(.secondary)
-                            if codexCanRetry {
-                                Button("Retry") {
-                                    Task {
-                                        _ = await application.restartServer(
-                                            configuredPath: cleanExecutablePath
-                                        )
+                    VStack(alignment: .leading, spacing: 7) {
+                        LabeledContent("Codex executable") {
+                            FilePathField(
+                                path: $executablePath,
+                                placeholder: "Automatic discovery",
+                                panelTitle: "Choose the Codex Executable",
+                                prompt: "Choose",
+                                requiresExecutable: true
+                            )
+                            .help("Choose or drop the Codex executable; use the advanced path menu for manual entry, or clear it for automatic discovery")
+                        }
+                        LabeledContent("Codex status") {
+                            HStack {
+                                Text(application.serverState.label)
+                                    .foregroundStyle(.secondary)
+                                if codexCanRetry {
+                                    Button("Retry") {
+                                        Task {
+                                            _ = await application.restartServer(
+                                                configuredPath: cleanExecutablePath
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    LabeledContent("Claude executable") {
-                        FilePathField(
-                            path: $claudeExecutablePath,
-                            placeholder: "Automatic discovery",
-                            panelTitle: "Choose the Claude Executable",
-                            prompt: "Choose",
-                            requiresExecutable: true
-                        )
-                        .help("Choose or drop the Claude executable, or clear the field for automatic discovery")
-                    }
-                    LabeledContent("Claude status") {
-                        HStack {
-                            Text(application.claudeState.label)
-                                .foregroundStyle(.secondary)
-                            if claudeCanRetry {
-                                Button("Retry") {
-                                    Task {
-                                        _ = await application.restartClaude(
-                                            configuredPath: cleanClaudeExecutablePath
-                                        )
+                    VStack(alignment: .leading, spacing: 7) {
+                        LabeledContent("Claude executable") {
+                            FilePathField(
+                                path: $claudeExecutablePath,
+                                placeholder: "Automatic discovery",
+                                panelTitle: "Choose the Claude Executable",
+                                prompt: "Choose",
+                                requiresExecutable: true
+                            )
+                            .help("Choose or drop the Claude executable, or clear the field for automatic discovery")
+                        }
+                        LabeledContent("Claude status") {
+                            HStack {
+                                Text(application.claudeState.label)
+                                    .foregroundStyle(.secondary)
+                                if claudeCanRetry {
+                                    Button("Retry") {
+                                        Task {
+                                            _ = await application.restartClaude(
+                                                configuredPath: cleanClaudeExecutablePath
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -99,20 +100,6 @@ struct ApplicationSettingsView: View {
                     Divider()
 
                     workflowLibrary
-
-                    Divider()
-
-                    DisclosureGroup {
-                        VStack(alignment: .leading, spacing: 16) {
-                            Text("These settings are retained for activities created by versions of Codeness before configurable workflows.")
-                                .foregroundStyle(.secondary)
-                            legacyDefaults
-                        }
-                        .padding(.top, 10)
-                    } label: {
-                        Text("Legacy Activity Defaults")
-                            .font(.title2.weight(.semibold))
-                    }
                 }
                 .padding(24)
             }
@@ -123,17 +110,14 @@ struct ApplicationSettingsView: View {
                     workflowCatalog = application.builtInWorkflowCatalog
                     selectedWorkflowID = workflowCatalog.defaultTemplateID
                 }
-                .help("Discard local workflow-library edits and restore all bundled workflows")
-                Button("Use Built-in Legacy Defaults") {
-                    prompts = .builtInDefaults
-                    modelDefaults = .builtInDefaults
-                }
-                .help("Replace the legacy prompt and model defaults with their built-in values")
+                .help("Discard local workflow edits and restore all bundled workflows")
                 Spacer()
-                Button("Revert") {
+                Button("Cancel", role: .cancel) {
                     revert()
+                    closeRequestID &+= 1
                 }
-                .help("Discard unsaved changes and restore the currently saved preferences")
+                .keyboardShortcut(.cancelAction)
+                .help("Discard unsaved changes and close Settings")
                 Button {
                     Task {
                         _ = await saveSettings()
@@ -147,11 +131,10 @@ struct ApplicationSettingsView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .help("Save agent executables, workflow library, defaults, and transcript preferences")
+                .help("Save agent executables, workflows, and transcript preferences")
                 .disabled(
                     isSaving
                         || serverIsStarting
-                        || prompts.validationMessage != nil
                         || workflowValidationMessage != nil
                         || !hasSavableChanges
                 )
@@ -163,7 +146,8 @@ struct ApplicationSettingsView: View {
             SettingsWindowCloseGuard(
                 isDirty: isDirty,
                 save: { await saveSettings() },
-                discard: { revert() }
+                discard: { revert() },
+                closeRequestID: closeRequestID
             )
             .frame(width: 0, height: 0)
         }
@@ -196,36 +180,55 @@ struct ApplicationSettingsView: View {
 
     private var workflowLibrary: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Workflow Library")
+            Text("Workflows")
                 .font(.title2.weight(.semibold))
-            Text("Each new activity copies one reusable workflow. Select a workflow to manage it, or open its editor to change steps, instructions, agents, models, modes, and speeds.")
+            Text("Each new activity copies one reusable workflow. Select a workflow to manage it, or open its editor to change steps, instructions, agents, models, and options.")
                 .foregroundStyle(.secondary)
 
-            ScrollViewReader { proxy in
-                List(selection: workflowSelectionBinding) {
-                    ForEach(workflowCatalog.templates) { workflow in
-                        WorkflowLibraryRow(
-                            workflow: workflow,
-                            isDefault: workflow.id == workflowCatalog.defaultTemplateID,
-                            kind: workflowKind(for: workflow),
-                            stepSummary: stepSummary(for: workflow)
-                        )
-                        .id(workflow.id)
-                        .tag(workflow.id)
+            VStack(spacing: 4) {
+                ForEach(workflowCatalog.templates) { workflow in
+                    let isSelected = workflow.id == selectedWorkflowID
+                    WorkflowLibraryRow(
+                        workflow: workflow,
+                        isDefault: workflow.id == workflowCatalog.defaultTemplateID,
+                        isSelected: isSelected,
+                        kind: workflowKind(for: workflow),
+                        stepSummary: stepSummary(for: workflow)
+                    )
+                    .onTapGesture(count: 2) {
+                        selectedWorkflowID = workflow.id
+                        presentSelectedWorkflowEditor()
                     }
-                    Color.clear
-                        .frame(height: 60)
-                        .listRowSeparator(.hidden)
-                        .accessibilityHidden(true)
-                }
-                .onChange(of: selectedWorkflowID) { _, identifier in
-                    withAnimation {
-                        proxy.scrollTo(identifier, anchor: .center)
+                    .onTapGesture {
+                        selectedWorkflowID = workflow.id
+                    }
+                    .draggable(workflow.id)
+                    .dropDestination(for: String.self) {
+                        workflowIDs,
+                        location in
+                        moveDraggedWorkflow(
+                            workflowIDs.first,
+                            relativeTo: workflow.id,
+                            placeAfter: location.y > 34
+                        )
+                    }
+                    .help("Select this workflow; double-click to edit it")
+                    .accessibilityAction {
+                        selectedWorkflowID = workflow.id
+                    }
+                    .accessibilityAction(named: "Edit") {
+                        selectedWorkflowID = workflow.id
+                        presentSelectedWorkflowEditor()
                     }
                 }
             }
-            .frame(height: 205)
-            .accessibilityLabel("Workflow library")
+            .padding(6)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(.separator.opacity(0.55), lineWidth: 1)
+            }
+            .accessibilityLabel("Workflows")
 
             HStack(spacing: 8) {
                 Button {
@@ -256,8 +259,8 @@ struct ApplicationSettingsView: View {
                 .disabled(!canDeleteSelectedWorkflow)
                 .help(
                     canDeleteSelectedWorkflow
-                        ? "Delete the selected custom workflow"
-                        : "Bundled workflows cannot be deleted"
+                        ? "Delete the selected workflow"
+                        : "At least one workflow is required"
                 )
                 if canResetSelectedWorkflow {
                     Button {
@@ -281,50 +284,6 @@ struct ApplicationSettingsView: View {
                 Label(workflowValidationMessage, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
             }
-        }
-    }
-
-    private var legacyDefaults: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Default Repository Models")
-                        .font(.title2.weight(.semibold))
-                    Text("A new repository window copies these model and reasoning choices. Every window keeps its own editable settings afterward, so changing these defaults never changes an existing window.")
-                        .foregroundStyle(.secondary)
-                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
-                        ModelSelectionGridHeader()
-                        ModelSelectionGridRow(
-                            title: "Implement",
-                            selection: $modelDefaults.implementer,
-                            models: application.models
-                        )
-                        ModelSelectionGridRow(
-                            title: "Review",
-                            selection: $modelDefaults.reviewer,
-                            models: application.models
-                        )
-                        ModelSelectionGridRow(
-                            title: "Fix",
-                            selection: $modelDefaults.fixer,
-                            models: application.models
-                        )
-                        ModelSelectionGridRow(
-                            title: "Handoff",
-                            selection: $modelDefaults.handoff,
-                            models: application.models
-                        )
-                    }
-
-                    Divider()
-
-                    Text("Default Activity Prompts")
-                        .font(.title2.weight(.semibold))
-                    Text("A repository window copies these suggestions when it has not started. Editing a window’s prompts does not change these defaults.")
-                        .foregroundStyle(.secondary)
-                    PromptTemplateFields(prompts: $prompts)
-                    if let validationMessage = prompts.validationMessage {
-                        Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                    }
         }
     }
 
@@ -385,9 +344,7 @@ struct ApplicationSettingsView: View {
     }
 
     private var isDirty: Bool {
-        prompts != application.promptDefaults
-            || modelDefaults != application.repositoryModelDefaults
-            || workflowCatalog != application.workflowCatalog
+        workflowCatalog != application.workflowCatalog
             || separatesRunTranscripts != application.separatesRunTranscripts
             || cleanExecutablePath != application.configuredExecutablePath
             || cleanClaudeExecutablePath != application.configuredClaudeExecutablePath
@@ -398,8 +355,6 @@ struct ApplicationSettingsView: View {
     }
 
     private func revert() {
-        prompts = application.promptDefaults
-        modelDefaults = application.repositoryModelDefaults
         executablePath = application.configuredExecutablePath
         claudeExecutablePath = application.configuredClaudeExecutablePath
         workflowCatalog = application.workflowCatalog
@@ -410,7 +365,6 @@ struct ApplicationSettingsView: View {
     @discardableResult
     private func saveSettings() async -> Bool {
         guard !isSaving,
-              prompts.validationMessage == nil,
               workflowValidationMessage == nil,
               !serverIsStarting else { return false }
         isSaving = true
@@ -429,25 +383,12 @@ struct ApplicationSettingsView: View {
         executablePath = cleanExecutablePath
         claudeExecutablePath = cleanClaudeExecutablePath
         application.updateWorkflowCatalog(workflowCatalog)
-        application.updatePromptDefaults(prompts)
-        application.updateRepositoryModelDefaults(modelDefaults)
         application.setSeparatesRunTranscripts(separatesRunTranscripts)
         return true
     }
 
     private var selectedWorkflow: WorkflowTemplate? {
         workflowCatalog.template(id: selectedWorkflowID)
-    }
-
-    private var workflowSelectionBinding: Binding<String?> {
-        Binding(
-            get: { selectedWorkflowID },
-            set: { identifier in
-                if let identifier {
-                    selectedWorkflowID = identifier
-                }
-            }
-        )
     }
 
     private var defaultWorkflowBinding: Binding<String> {
@@ -465,7 +406,7 @@ struct ApplicationSettingsView: View {
 
     private var workflowValidationMessage: String? {
         if workflowCatalog.templates.isEmpty {
-            return "The workflow library needs at least one workflow."
+            return "At least one workflow is required."
         }
         if !workflowCatalog.templates.contains(where: {
             $0.id == workflowCatalog.defaultTemplateID
@@ -480,8 +421,7 @@ struct ApplicationSettingsView: View {
     }
 
     private var canDeleteSelectedWorkflow: Bool {
-        guard workflowCatalog.templates.count > 1 else { return false }
-        return application.builtInWorkflowCatalog.template(id: selectedWorkflowID) == nil
+        workflowCatalog.templates.count > 1 && selectedWorkflow != nil
     }
 
     private var canResetSelectedWorkflow: Bool {
@@ -608,6 +548,35 @@ struct ApplicationSettingsView: View {
         )
     }
 
+    private func moveDraggedWorkflow(
+        _ workflowID: String?,
+        relativeTo targetWorkflowID: String,
+        placeAfter: Bool
+    ) -> Bool {
+        guard let workflowID,
+              workflowID != targetWorkflowID else { return false }
+
+        var templates = workflowCatalog.templates
+        guard let sourceIndex = templates.firstIndex(where: {
+            $0.id == workflowID
+        }) else { return false }
+        let movedWorkflow = templates.remove(at: sourceIndex)
+        guard let targetIndex = templates.firstIndex(where: {
+            $0.id == targetWorkflowID
+        }) else { return false }
+        templates.insert(
+            movedWorkflow,
+            at: targetIndex + (placeAfter ? 1 : 0)
+        )
+        workflowCatalog = WorkflowCatalog(
+            schemaVersion: workflowCatalog.schemaVersion,
+            defaultTemplateID: workflowCatalog.defaultTemplateID,
+            templates: templates
+        )
+        selectedWorkflowID = workflowID
+        return true
+    }
+
     private func uniqueWorkflowID(base: String) -> String {
         let existing = Set(workflowCatalog.templates.map(\.id))
         var candidate = base
@@ -631,6 +600,7 @@ private struct WorkflowEditorPresentation: Identifiable {
 private struct WorkflowLibraryRow: View {
     let workflow: WorkflowTemplate
     let isDefault: Bool
+    let isSelected: Bool
     let kind: String
     let stepSummary: String
 
@@ -648,6 +618,9 @@ private struct WorkflowLibraryRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
             Text(workflow.summary)
                 .font(.caption)
@@ -658,8 +631,21 @@ private struct WorkflowLibraryRow: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 7)
+                .fill(isSelected ? Color.accentColor.opacity(0.2) : .clear)
+        }
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+            }
+        }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

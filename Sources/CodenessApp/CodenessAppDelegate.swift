@@ -13,6 +13,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
 
     private var windowManager: RepositoryWindowManager?
     private var isTerminating = false
+    private var terminationWasApproved = false
     private var terminationPanel: NSPanel?
     private weak var terminationParentWindow: NSWindow?
 
@@ -78,6 +79,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !Self.isRunningUnitTests else { return .terminateNow }
+        guard !terminationWasApproved else { return .terminateNow }
         guard !isTerminating else { return .terminateLater }
         isTerminating = true
         let activeCoordinators = applicationModel.activeCoordinators
@@ -202,7 +204,15 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             dismissTerminationPanel()
+            terminationWasApproved = true
             sender.reply(toApplicationShouldTerminate: true)
+            // Some NSRunningApplication quit requests leave a SwiftUI app alive
+            // after the deferred reply even though every window has closed. A
+            // follow-up termination pass is safe now and returns .terminateNow.
+            Task { @MainActor in
+                await Task.yield()
+                sender.terminate(nil)
+            }
         }
     }
 
@@ -212,6 +222,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
         applicationModel.allCoordinators.forEach { $0.cancelClosePreparation() }
         applicationModel.applicationError = message
         isTerminating = false
+        terminationWasApproved = false
         sender.reply(toApplicationShouldTerminate: false)
     }
 

@@ -198,7 +198,24 @@ public enum RunTranscriptPresentation {
         }
         if isVisible(section, separatesRuns: separatesRuns, visibility: visibility) {
             result += text
+        } else if section == .action,
+                  !visibility.actions,
+                  visibility.reasoning,
+                  let recovered = legacyClaudeTextAfterAction(in: text) {
+            result += recovered
         }
+    }
+
+    private static func legacyClaudeTextAfterAction(in text: String) -> String? {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let toolLine = lines.firstIndex(where: { $0.hasPrefix("› ") }) else {
+            return nil
+        }
+        lines.remove(at: toolLine)
+        let recovered = lines.joined(separator: "\n")
+        return recovered.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? nil
+            : recovered
     }
 
     private static func isVisible(
