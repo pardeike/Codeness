@@ -219,6 +219,7 @@ struct RepositoryWindowView: View {
                         coordinator.selectedRunID = nil
                     }
                 }
+                .modifier(RunListTopEdgeProtection())
                 .onAppear {
                     guard followedRunID != nil else { return }
                     proxy.scrollTo(RunListScrollAnchor.bottom, anchor: .bottom)
@@ -449,6 +450,17 @@ struct RepositoryWindowView: View {
 
 private enum RunListScrollAnchor {
     static let bottom = "run-list-follow-bottom"
+}
+
+private struct RunListTopEdgeProtection: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectStyle(.hard, for: .top)
+        } else {
+            content
+        }
+    }
 }
 
 private struct RunGroupHeader: View {
