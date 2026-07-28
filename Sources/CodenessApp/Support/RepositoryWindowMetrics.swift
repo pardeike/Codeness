@@ -1,5 +1,16 @@
 import AppKit
 
+enum RunListFollowPolicy {
+    static func targetRunID(
+        selectedRunID: UUID?,
+        liveRunID: UUID?,
+        selectedRunFollowsOutput: Bool
+    ) -> UUID? {
+        guard selectedRunFollowsOutput, selectedRunID == liveRunID else { return nil }
+        return selectedRunID
+    }
+}
+
 enum RepositoryWindowMetrics {
     static let defaultContentSize = NSSize(width: 1_260, height: 820)
     static let minimumWindowSize = NSSize(width: 700, height: 560)

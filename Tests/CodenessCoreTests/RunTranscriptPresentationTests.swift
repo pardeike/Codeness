@@ -67,7 +67,7 @@ struct RunTranscriptPresentationTests {
                 section: .reasoning
             ),
             RunTranscriptPresentation.storedText("\n› Bash\n", section: .action),
-            "Claude status: requesting\nNarrative after Bash.",
+            "Claude status: requestingClaude status: requestingNarrative after Bash.",
             RunTranscriptPresentation.storedText("\n› Read\n", section: .action),
             "Narrative after Read."
         ].joined()
@@ -79,6 +79,16 @@ struct RunTranscriptPresentationTests {
         #expect(recommended.contains("Narrative after Read."))
         #expect(!recommended.contains("› Bash"))
         #expect(!recommended.contains("› Read"))
+        #expect(!recommended.contains("Claude status:"))
+
+        let withActions = RunTranscriptPresentation.text(
+            for: run,
+            separatesRuns: true,
+            visibility: .all
+        )
+        #expect(withActions.contains("› Bash"))
+        #expect(withActions.contains("Narrative after Bash."))
+        #expect(!withActions.contains("Claude status:"))
     }
 
     @Test

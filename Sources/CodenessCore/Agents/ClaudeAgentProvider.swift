@@ -469,16 +469,10 @@ public actor ClaudeAgentProvider: AgentProviding {
             if message["subtype"]?.stringValue == "init" {
                 let executionID = message["session_id"]?.stringValue ?? run.sessionID
                 run.continuation.yield(.started(executionID: executionID))
-            } else if message["subtype"]?.stringValue == "status",
-                      let status = message["status"]?.stringValue {
-                run.continuation.yield(
-                    .diagnostic(transcriptText(
-                        "Claude status: \(status)",
-                        section: .diagnostic,
-                        run: &run
-                    ))
-                )
             }
+            // Claude emits transient status messages (currently "requesting")
+            // around virtually every tool call. They are transport state, not
+            // transcript content, and can arrive without line boundaries.
         case "stream_event":
             consumeStreamEvent(message["event"] ?? .null, run: &run)
         case "assistant":

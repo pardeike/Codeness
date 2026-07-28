@@ -129,6 +129,12 @@ struct ClaudeAgentProviderTests {
         )
         #expect(presentedTranscript.contains("Narrative after tool."))
         #expect(!presentedTranscript.contains("› Bash"))
+        #expect(!firstEvents.contains {
+            if case .diagnostic(let text) = $0 {
+                return text.contains("Claude status:")
+            }
+            return false
+        })
         #expect(resumedEvents.contains {
             if case .interaction(let interaction) = $0 {
                 return interaction.kind == .questions
@@ -383,6 +389,7 @@ for line in sys.stdin:
     elif value.get("type") == "user":
         session_id = value.get("session_id", "")
         emit({"type": "system", "subtype": "init", "session_id": session_id})
+        emit({"type": "system", "subtype": "status", "status": "requesting"})
         if is_utility:
             emit({
                 "type": "result",
@@ -448,6 +455,7 @@ for line in sys.stdin:
     elif value.get("type") == "control_response":
         request_id = value.get("response", {}).get("request_id", "")
         if request_id.startswith("permission-"):
+            emit({"type": "system", "subtype": "status", "status": "requesting"})
             emit({
                 "type": "stream_event",
                 "event": {

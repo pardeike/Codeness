@@ -39,6 +39,7 @@ public enum RunDetailPresentation: String, Codable, Sendable, CaseIterable {
 public enum RunTranscriptPresentation {
     private static let markerPrefix = "\u{001E}codeness:"
     private static let markerSuffix = "\u{001F}"
+    private static let transientClaudeStatus = "Claude status: requesting"
 
     public static func storedText(for update: TranscriptUpdate) -> String {
         guard !update.text.isEmpty else { return "" }
@@ -118,7 +119,7 @@ public enum RunTranscriptPresentation {
                 range: nameStart..<transcript.endIndex
             ) else {
                 result += String(transcript[markerRange.lowerBound...])
-                return cleanLeadingWhitespace(result)
+                return cleanPresentedText(result)
             }
             section = TranscriptSectionKind(rawValue: String(transcript[nameStart..<suffixRange.lowerBound]))
             cursor = suffixRange.upperBound
@@ -130,7 +131,7 @@ public enum RunTranscriptPresentation {
             visibility: visibility,
             to: &result
         )
-        return cleanLeadingWhitespace(result)
+        return cleanPresentedText(result)
     }
 
     private static func legacyText(
@@ -168,7 +169,7 @@ public enum RunTranscriptPresentation {
                 result.append(value)
             }
         }
-        return cleanLeadingWhitespace(result.joined(separator: "\n"))
+        return cleanPresentedText(result.joined(separator: "\n"))
     }
 
     private static func legacySection(for line: String) -> TranscriptSectionKind? {
@@ -238,5 +239,11 @@ public enum RunTranscriptPresentation {
 
     private static func cleanLeadingWhitespace(_ text: String) -> String {
         String(text.drop(while: { $0 == "\n" || $0 == "\r" }))
+    }
+
+    private static func cleanPresentedText(_ text: String) -> String {
+        cleanLeadingWhitespace(
+            text.replacingOccurrences(of: transientClaudeStatus, with: "")
+        )
     }
 }

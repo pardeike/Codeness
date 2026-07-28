@@ -183,31 +183,44 @@ struct RepositoryWindowView: View {
 
     private var runList: some View {
         VStack(spacing: 0) {
-            List(selection: $coordinator.selectedRunID) {
-                if let activity = coordinator.activity {
-                    ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
-                        Section {
-                            ForEach(group.runs) { run in
-                                RunRow(
-                                    run: run,
-                                    isActive: coordinator.activeActivity?.status == .running
-                                        && coordinator.liveRunID == run.id
-                                )
-                                .tag(run.id)
-                                .help(
-                                    "Show \(run.displayName) "
-                                        + "(\(run.status.rawValue)) transcript"
-                                )
+            ScrollViewReader { proxy in
+                List(selection: $coordinator.selectedRunID) {
+                    if let activity = coordinator.activity {
+                        ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
+                            Section {
+                                ForEach(group.runs) { run in
+                                    RunRow(
+                                        run: run,
+                                        isActive: coordinator.activeActivity?.status == .running
+                                            && coordinator.liveRunID == run.id
+                                    )
+                                    .tag(run.id)
+                                    .id(run.id)
+                                    .help(
+                                        "Show \(run.displayName) "
+                                            + "(\(run.status.rawValue)) transcript"
+                                    )
+                                }
+                            } header: {
+                                RunGroupHeader(group: group)
                             }
-                        } header: {
-                            RunGroupHeader(group: group)
                         }
                     }
                 }
-            }
-            .background {
-                ListBackgroundDeselectionBridge {
-                    coordinator.selectedRunID = nil
+                .background {
+                    ListBackgroundDeselectionBridge {
+                        coordinator.selectedRunID = nil
+                    }
+                }
+                .onAppear {
+                    guard let followedRunID else { return }
+                    proxy.scrollTo(followedRunID, anchor: .bottom)
+                }
+                .onChange(of: followedRunID) { _, runID in
+                    guard let runID else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(runID, anchor: .bottom)
+                    }
                 }
             }
 
@@ -216,6 +229,17 @@ struct RepositoryWindowView: View {
                 workflowControlBar
             }
         }
+    }
+
+    private var followedRunID: UUID? {
+        let selectedRunFollowsOutput = coordinator.selectedRunID.map {
+            coordinator.transcriptViewport(for: $0).followsOutput
+        } ?? false
+        return RunListFollowPolicy.targetRunID(
+            selectedRunID: coordinator.selectedRunID,
+            liveRunID: coordinator.liveRunID,
+            selectedRunFollowsOutput: selectedRunFollowsOutput
+        )
     }
 
     private var workflowControlBar: some View {

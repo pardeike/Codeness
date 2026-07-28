@@ -198,6 +198,34 @@ struct RepositoryWindowGeometryTests {
     }
 
     @Test
+    func runListFollowsOnlyTheSelectedLiveRunWhoseTranscriptIsFollowingOutput() {
+        let liveRunID = UUID()
+        let previousRunID = UUID()
+
+        #expect(
+            RunListFollowPolicy.targetRunID(
+                selectedRunID: liveRunID,
+                liveRunID: liveRunID,
+                selectedRunFollowsOutput: true
+            ) == liveRunID
+        )
+        #expect(
+            RunListFollowPolicy.targetRunID(
+                selectedRunID: liveRunID,
+                liveRunID: liveRunID,
+                selectedRunFollowsOutput: false
+            ) == nil
+        )
+        #expect(
+            RunListFollowPolicy.targetRunID(
+                selectedRunID: previousRunID,
+                liveRunID: liveRunID,
+                selectedRunFollowsOutput: true
+            ) == nil
+        )
+    }
+
+    @Test
     func systemSidebarToolbarItemsAreHiddenWithoutChangingToolbarStructure() {
         let splitView = NSSplitView()
         let privateTrackingSeparatorItem = NSTrackingSeparatorToolbarItem(
