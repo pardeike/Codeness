@@ -36,7 +36,7 @@ struct ServerInteractionSheet: View {
                     Button("Cancel Turn Request") {
                         Task { await coordinator.cancelInteraction() }
                     }
-                    .help("Cancel this request and interrupt the agent turn that issued it")
+                    .help("Cancel this request and stop the agent that issued it")
                     Button("Submit") {
                         let values = answers.mapValues { [$0] }
                         Task { await coordinator.resolveQuestions(values) }
@@ -155,7 +155,7 @@ struct ServerInteractionSheet: View {
                 Button("Cancel Request") {
                     Task { await coordinator.cancelInteraction() }
                 }
-                .help("Cancel this request and interrupt the agent turn that issued it")
+                .help("Cancel this request and stop the agent that issued it")
                 Button("Respond") {
                     Task { await coordinator.resolveRawInteraction(rawResponse) }
                 }

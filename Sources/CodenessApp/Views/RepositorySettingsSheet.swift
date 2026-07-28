@@ -237,7 +237,7 @@ struct RepositorySettingsSheet: View {
                 Divider()
 
                 Label(
-                    "The workflow structure and instructions are frozen for this activity.",
+                    "Step names, stages, and order stay fixed. Instructions and agents can be changed while paused.",
                     systemImage: "lock"
                 )
                 .font(.caption)
@@ -255,14 +255,31 @@ struct RepositorySettingsSheet: View {
                     description: sectionDescription(step.section)
                 )
 
-                if !targetsAreEditable {
+                if !preferencesAreEditable {
                     activityStateNotice
                 }
 
-                readOnlyInstructions(
-                    step.instructions,
-                    title: "Instructions"
-                )
+                if preferencesAreEditable {
+                    instructionsEditor(
+                        stepBinding(for: step).instructions,
+                        accessibilityLabel: "\(step.name) instructions",
+                        helpText: "Edit the instructions used the next time this step starts."
+                    )
+                } else {
+                    readOnlyInstructions(
+                        step.instructions,
+                        title: "Instructions"
+                    )
+                }
+
+                if isCurrentRecoveryStep(stepID) {
+                    Label(
+                        "Restart uses these instructions. Resume continues with the saved prompt from the failed run.",
+                        systemImage: "info.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
 
                 Divider()
 
@@ -273,7 +290,7 @@ struct RepositorySettingsSheet: View {
                         title: step.name,
                         target: stepBinding(for: step).target
                     )
-                    .disabled(!targetsAreEditable)
+                    .disabled(!preferencesAreEditable)
                 }
             }
         } else {
@@ -292,14 +309,22 @@ struct RepositorySettingsSheet: View {
                 description: "Filters each completed step into a concise handoff and decides whether the repeating loop is complete."
             )
 
-            if !targetsAreEditable {
+            if !preferencesAreEditable {
                 activityStateNotice
             }
 
-            readOnlyInstructions(
-                workflow?.coordinator.instructions ?? "",
-                title: "Instructions"
-            )
+            if preferencesAreEditable {
+                instructionsEditor(
+                    coordinatorInstructionsBinding,
+                    accessibilityLabel: "Coordinator instructions",
+                    helpText: "Edit the instructions used for the next handoff."
+                )
+            } else {
+                readOnlyInstructions(
+                    workflow?.coordinator.instructions ?? "",
+                    title: "Instructions"
+                )
+            }
 
             Divider()
 
@@ -310,7 +335,7 @@ struct RepositorySettingsSheet: View {
                     title: "Coordinator",
                     target: coordinatorTargetBinding
                 )
-                .disabled(!targetsAreEditable)
+                .disabled(!preferencesAreEditable)
             }
         }
     }
@@ -325,6 +350,23 @@ struct RepositorySettingsSheet: View {
             Text(description)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func instructionsEditor(
+        _ instructions: Binding<String>,
+        accessibilityLabel: String,
+        helpText: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Instructions")
+                .font(.headline)
+            ActivityTextEditor(
+                text: instructions,
+                minHeight: 190,
+                accessibilityLabel: accessibilityLabel,
+                helpText: helpText
+            )
         }
     }
 
@@ -453,7 +495,7 @@ struct RepositorySettingsSheet: View {
         }
     }
 
-    private var targetsAreEditable: Bool {
+    private var preferencesAreEditable: Bool {
         coordinator.record.activity?.status == .paused
     }
 
@@ -492,15 +534,15 @@ struct RepositorySettingsSheet: View {
     private var activityStatusDetail: String {
         switch coordinator.record.activity?.status {
         case .paused:
-            "You can change agent targets for future steps. Provider, model, or mode changes start a new session lineage."
+            "You can change instructions and agents. Provider, model, or mode changes start a new session lineage."
         case .running:
-            "Pause the activity before changing agent targets."
+            "Pause the activity before changing instructions or agents."
         case .completed:
             "This activity is complete. Use Start Over to run it with different workflow preferences."
         case .cancelled:
             "This activity was cancelled. Use Start Over to run it with different workflow preferences."
         case .failed:
-            "This activity failed. Resume and pause it before changing agent targets, or use Start Over."
+            "This activity failed. Resume and pause it before changing workflow preferences, or use Start Over."
         case nil:
             "Start an activity before changing its workflow preferences."
         }
@@ -508,10 +550,10 @@ struct RepositorySettingsSheet: View {
 
     private var activityNoticeTitle: String {
         switch coordinator.record.activity?.status {
-        case .paused: "Targets editable"
-        case .running: "Pause to edit targets"
-        case .completed, .cancelled, .failed: "Targets locked"
-        case nil: "Targets unavailable"
+        case .paused: "Preferences editable"
+        case .running: "Pause to edit"
+        case .completed, .cancelled, .failed: "Preferences locked"
+        case nil: "Preferences unavailable"
         }
     }
 
@@ -553,6 +595,29 @@ struct RepositorySettingsSheet: View {
         )
     }
 
+    private var coordinatorInstructionsBinding: Binding<String> {
+        Binding(
+            get: {
+                workflow?.coordinator.instructions ?? ""
+            },
+            set: { updatedInstructions in
+                guard var workflow else { return }
+                workflow.coordinator.instructions = updatedInstructions
+                self.workflow = workflow
+            }
+        )
+    }
+
+    private func isCurrentRecoveryStep(_ stepID: String) -> Bool {
+        guard let activity = coordinator.record.activity,
+              case .recoverRun(let runID)? = activity.workflowResumeCheckpoint,
+              let run = activity.runs.first(where: { $0.id == runID }),
+              [.failed, .interrupted].contains(run.status) else {
+            return false
+        }
+        return run.workflowStep?.id == stepID
+    }
+
     private func stepIcon(for section: WorkflowSection) -> String {
         switch section {
         case .prefix: "arrow.right.to.line"
@@ -574,7 +639,7 @@ struct RepositorySettingsSheet: View {
 
     private var canSave: Bool {
         if let workflow {
-            return targetsAreEditable
+            return preferencesAreEditable
                 && workflow.validationMessage == nil
                 && application.workflowCompatibilityMessage(workflow) == nil
                 && workflow != coordinator.record.activity?.workflow
@@ -585,12 +650,12 @@ struct RepositorySettingsSheet: View {
     private var saveHelp: String {
         workflow == nil
             ? "Save these model, reasoning, and handoff settings for this repository"
-            : "Save agent targets for future workflow steps"
+            : "Save instruction and agent changes for this paused activity"
     }
 
     private func save() async -> Bool {
         if let workflow {
-            return await coordinator.updateWorkflowTargets(workflow)
+            return await coordinator.updateWorkflowPreferences(workflow)
         }
         return await coordinator.updateSettings(settings)
     }

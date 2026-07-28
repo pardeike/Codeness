@@ -104,7 +104,7 @@ private struct RepositoryWindowCommands: Commands {
             .keyboardShortcut("s", modifiers: [.command, .option])
             .disabled(state.currentCoordinator?.canInterrupt != true)
 
-            Button("Interrupt Active Turn") {
+            Button(WorkflowImmediateControl.stopCurrentStep.menuTitle) {
                 guard let coordinator = state.currentCoordinator else { return }
                 Task { await coordinator.interrupt() }
             }

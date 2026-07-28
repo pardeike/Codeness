@@ -21,12 +21,46 @@ struct RunDetailView: View {
             header
             Divider()
             transcriptAndFinalResult
-            if let relayError = run.relayError {
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if let liveStatusPresentation {
+                        RunLiveStatusView(presentation: liveStatusPresentation)
+                            .padding(.bottom, 10)
+                    }
+                }
+            if let recoveryPresentation {
                 Divider()
-                RelayRecoveryView(coordinator: coordinator, run: run, error: relayError)
-                    .frame(maxHeight: 270)
+                RunRecoveryView(
+                    coordinator: coordinator,
+                    run: run,
+                    presentation: recoveryPresentation
+                )
+                .frame(maxHeight: 180)
             }
         }
+    }
+
+    private var recoveryPresentation: RunRecoveryPresentation? {
+        RunRecoveryPresentation(activity: coordinator.activity, run: run)
+    }
+
+    private var liveStatusPresentation: RunLiveStatusPresentation? {
+        RunLiveStatusPresentation(
+            run: run,
+            liveRunID: coordinator.liveRunID,
+            pauseAfterCurrent: coordinator.pauseAfterCurrent,
+            pausedWorkflowMessage: pausedWorkflowMessage
+        )
+    }
+
+    private var pausedWorkflowMessage: String? {
+        guard let activity = coordinator.activity,
+              activity.status == .paused,
+              activity.runs.last?.id == run.id,
+              case .perform? = activity.workflowResumeCheckpoint
+        else {
+            return nil
+        }
+        return coordinator.statusMessage
     }
 
     @ViewBuilder
@@ -107,10 +141,10 @@ struct RunDetailView: View {
     private var runIdentity: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 7) {
-                Text(run.handoff?.runLabel ?? run.kind.displayName)
+                Text(run.displayName)
                     .font(.headline)
                     .lineLimit(1)
-                Text(run.status.rawValue.capitalized)
+                Text(run.status.displayName)
                     .font(.caption.weight(.medium))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
@@ -126,6 +160,10 @@ struct RunDetailView: View {
 
     private var expandedControls: some View {
         HStack(spacing: 8) {
+            if recoveryPresentation == nil,
+               coordinator.canRestartWorkflowStep(run.id) {
+                RestartWorkflowStepButton(coordinator: coordinator, run: run)
+            }
             visibilityMenu
             jumpToEndButton
         }
@@ -133,6 +171,11 @@ struct RunDetailView: View {
 
     private var compactControls: some View {
         Menu {
+            if recoveryPresentation == nil,
+               coordinator.canRestartWorkflowStep(run.id) {
+                RestartWorkflowStepButton(coordinator: coordinator, run: run)
+                Divider()
+            }
             transcriptVisibilityControls
             Divider()
             Button("Jump to End") {
@@ -222,6 +265,41 @@ struct RunDetailView: View {
     }
 }
 
+private struct RunLiveStatusView: View {
+    let presentation: RunLiveStatusPresentation
+
+    var body: some View {
+        HStack(spacing: 7) {
+            if presentation.showsProgress {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(tint)
+            } else if let systemImage = presentation.systemImage {
+                Image(systemName: systemImage)
+                    .foregroundStyle(tint)
+            }
+            Text(presentation.text)
+                .font(.caption.weight(.medium))
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(tint.opacity(0.28))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(presentation.text)
+    }
+
+    private var tint: Color {
+        switch presentation.tone {
+        case .active: .green
+        case .attention: .orange
+        }
+    }
+}
+
 private struct FinalResultView: View {
     let text: String
     let repositoryPath: String
@@ -263,95 +341,270 @@ private struct FinalResultView: View {
     }
 }
 
-private struct RelayRecoveryView: View {
+private struct RunRecoveryView: View {
     let coordinator: RepositoryCoordinator
     let run: RunRecord
-    let error: String
+    let presentation: RunRecoveryPresentation
 
-    @State private var handoffText: String
-    @State private var disposition: SourceDisposition
-    @State private var workflowOutcome: WorkflowOutcome
-    @State private var label = "Unfiltered handoff"
-
-    init(coordinator: RepositoryCoordinator, run: RunRecord, error: String) {
-        self.coordinator = coordinator
-        self.run = run
-        self.error = error
-        _handoffText = State(initialValue: run.finalOutput ?? "")
-        _disposition = State(initialValue: Self.defaultDisposition(for: run.kind))
-        _workflowOutcome = State(initialValue: .continueWorkflow)
-    }
+    @State private var showsFullMessage = false
+    @State private var showsManualHandoff = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
                     .foregroundStyle(.orange)
-                Text("Relay paused")
-                    .font(.headline)
-                Text(error)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 3) {
+                    if let title {
+                        Text(title)
+                            .font(.headline)
+                    }
+                    Text(presentation.message)
+                        .foregroundStyle(title == nil ? .primary : .secondary)
+                        .lineLimit(showsFullMessage || !hasMoreDetails ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                if hasMoreDetails {
+                    Button(showsFullMessage ? "Less" : "Details…") {
+                        showsFullMessage.toggle()
+                    }
+                    .buttonStyle(.link)
+                }
+            }
+
+            if presentation.kind == .workflowPaused,
+               let handoff = presentation.handoffText,
+               !handoff.isEmpty {
+                Text(handoff)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer()
-                Button("Retry Relay") {
-                    Task { await coordinator.retryRelay() }
-                }
-                .help("Retry filtering and routing this run's final result through the handoff model")
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.leading, 24)
             }
-            HStack {
-                if run.workflowStep != nil {
-                    Picker("Outcome", selection: $workflowOutcome) {
-                        ForEach(WorkflowOutcome.allCases, id: \.self) { value in
-                            Text(value.displayName).tag(value)
+
+            if presentation.isActionable {
+                HStack(spacing: 8) {
+                    switch presentation.kind {
+                    case .stepStopped:
+                        Button("Resume") {
+                            Task { await coordinator.resume() }
                         }
-                    }
-                    .help("Choose whether the configured workflow should continue, finish, or pause")
-                } else {
-                    Picker("Source state", selection: $disposition) {
-                        ForEach(validDispositions, id: \.self) { value in
-                            Text(value.displayName).tag(value)
+                        .buttonStyle(.borderedProminent)
+                        if coordinator.canRestartWorkflowStep(run.id) {
+                            RestartWorkflowStepButton(coordinator: coordinator, run: run)
                         }
-                    }
-                    .help("Choose how the preceding run ended so Codeness can select the next phase")
-                }
-                TextField("Run label", text: $label)
-                    .help("Enter the short label shown for this run in the sidebar")
-            }
-            TextEditor(text: $handoffText)
-                .font(.system(.caption, design: .monospaced))
-                .frame(minHeight: 90)
-                .border(.separator)
-                .help("Edit the handoff text that will be sent to the next workflow phase")
-            HStack {
-                Spacer()
-                Button("Use This Handoff") {
-                    Task {
-                        if run.workflowStep != nil {
-                            await coordinator.useWorkflowHandoff(
-                                text: handoffText,
-                                outcome: workflowOutcome,
-                                label: label
-                            )
-                        } else {
-                            await coordinator.useHandoff(
-                                text: handoffText,
-                                disposition: disposition,
-                                label: label
-                            )
+
+                    case .handoffFailed:
+                        Button("Try Again") {
+                            Task { await coordinator.retryRelay() }
                         }
+                        .buttonStyle(.borderedProminent)
+                        Button("Continue with Result…") {
+                            showsManualHandoff = true
+                        }
+                        .disabled(manualHandoffText.isEmpty)
+
+                    case .workflowPaused:
+                        Button("Try Again") {
+                            Task { await coordinator.retryRelay() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Continue Anyway…") {
+                            showsManualHandoff = true
+                        }
+                        .disabled(manualHandoffText.isEmpty)
+
+                    case .historical:
+                        EmptyView()
                     }
                 }
-                .buttonStyle(.borderedProminent)
-                .help("Use this edited handoff and continue to the next workflow phase")
-                .disabled(handoffText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(12)
         .background(Color.orange.opacity(0.08))
+        .sheet(isPresented: $showsManualHandoff) {
+            ManualHandoffSheet(
+                coordinator: coordinator,
+                run: run,
+                presentation: presentation,
+                initialText: manualHandoffText
+            )
+        }
     }
 
-    private var validDispositions: [SourceDisposition] {
-        SourceDisposition.validValues(for: run.kind)
+    private var title: String? {
+        switch presentation.kind {
+        case .stepStopped, .historical:
+            nil
+        case .handoffFailed:
+            if let nextStepName = presentation.nextStepName {
+                "Couldn’t prepare \(nextStepName)"
+            } else {
+                "Couldn’t prepare the next step"
+            }
+        case .workflowPaused:
+            "Workflow needs attention"
+        }
+    }
+
+    private var hasMoreDetails: Bool {
+        presentation.message.count > 180 || presentation.message.contains("\n")
+    }
+
+    private var manualHandoffText: String {
+        (
+            run.workflowHandoff?.text
+                ?? run.handoff?.handoffText
+                ?? run.finalOutput
+                ?? ""
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct ManualHandoffSheet: View {
+    let coordinator: RepositoryCoordinator
+    let run: RunRecord
+    let presentation: RunRecoveryPresentation
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var handoffText: String
+    @State private var completesWorkflow = false
+    @State private var legacyDisposition: SourceDisposition
+
+    init(
+        coordinator: RepositoryCoordinator,
+        run: RunRecord,
+        presentation: RunRecoveryPresentation,
+        initialText: String
+    ) {
+        self.coordinator = coordinator
+        self.run = run
+        self.presentation = presentation
+        _handoffText = State(initialValue: initialText)
+        _legacyDisposition = State(initialValue: Self.defaultDisposition(for: run.kind))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(
+                presentation.kind == .workflowPaused
+                    ? "Continue Anyway"
+                    : "Continue with Result"
+            )
+            .font(.headline)
+
+            if presentation.isGenericWorkflow, presentation.canFinishWorkflow {
+                Picker("", selection: $completesWorkflow) {
+                    Text("Another Cycle").tag(false)
+                    Text("Finish Workflow").tag(true)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            } else if !presentation.isGenericWorkflow, legacyChoices.count > 1 {
+                Picker("", selection: $legacyDisposition) {
+                    ForEach(legacyChoices, id: \.self) { disposition in
+                        Text(legacyLabel(for: disposition)).tag(disposition)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            } else if let nextStepName = presentation.nextStepName {
+                Text("This will be sent to \(nextStepName).")
+                    .foregroundStyle(.secondary)
+            }
+
+            TextEditor(text: $handoffText)
+                .font(.body)
+                .frame(minHeight: 220)
+                .border(.separator)
+                .accessibilityLabel("Handoff text")
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    dismiss()
+                }
+                Button(submitTitle) {
+                    submit()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    handoffText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 560, minHeight: 340)
+    }
+
+    private var submitTitle: String {
+        if presentation.isGenericWorkflow, completesWorkflow {
+            return "Finish"
+        }
+        if !presentation.isGenericWorkflow, legacyDisposition == .fixComplete {
+            return "Finish"
+        }
+        return "Continue"
+    }
+
+    private var legacyChoices: [SourceDisposition] {
+        switch run.kind {
+        case .implementation:
+            [.implementationCheckpoint, .implementationComplete]
+        case .review:
+            [.reviewComplete]
+        case .fix:
+            [.fixCheckpoint, .fixComplete]
+        }
+    }
+
+    private func legacyLabel(for disposition: SourceDisposition) -> String {
+        switch disposition {
+        case .implementationCheckpoint:
+            "More Work"
+        case .implementationComplete:
+            "Implementation Complete"
+        case .reviewComplete:
+            "Continue to Fixes"
+        case .fixCheckpoint:
+            "Continue Implementation"
+        case .fixComplete:
+            "Finish Activity"
+        case .blocked, .failed, .unclear:
+            disposition.displayName
+        }
+    }
+
+    private func submit() {
+        let text = handoffText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = run.workflowHandoff?.runLabel
+            ?? run.handoff?.runLabel
+            ?? run.workflowStep?.name
+            ?? run.kind.displayName
+        let isGenericWorkflow = presentation.isGenericWorkflow
+        let outcome: WorkflowOutcome = completesWorkflow ? .complete : .continueWorkflow
+        let disposition = legacyDisposition
+        dismiss()
+        Task {
+            if isGenericWorkflow {
+                await coordinator.useWorkflowHandoff(
+                    text: text,
+                    outcome: outcome,
+                    label: label
+                )
+            } else {
+                await coordinator.useHandoff(
+                    text: text,
+                    disposition: disposition,
+                    label: label
+                )
+            }
+        }
     }
 
     private static func defaultDisposition(for kind: RunKind) -> SourceDisposition {
@@ -360,5 +613,43 @@ private struct RelayRecoveryView: View {
         case .review: .reviewComplete
         case .fix: .fixCheckpoint
         }
+    }
+}
+
+private struct RestartWorkflowStepButton: View {
+    let coordinator: RepositoryCoordinator
+    let run: RunRecord
+
+    @State private var showsConfirmation = false
+
+    var body: some View {
+        Button {
+            showsConfirmation = true
+        } label: {
+            Label("Restart…", systemImage: "arrow.counterclockwise.circle")
+        }
+        .help(
+            "Rerun \(stepName) in a fresh agent session while preserving the repository and previous run history"
+        )
+        .confirmationDialog(
+            "Restart \(stepName) in a Fresh Session?",
+            isPresented: $showsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Restart") {
+                Task {
+                    await coordinator.restartWorkflowStep(run.id)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "The previous run and transcript remain in history. Repository files are not reverted; the fresh agent will inspect their current state before continuing."
+            )
+        }
+    }
+
+    private var stepName: String {
+        run.workflowStep?.name ?? run.kind.displayName
     }
 }

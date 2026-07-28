@@ -31,11 +31,49 @@ enum WorkflowTransportControl: Equatable {
             "Cancel the pending pause and continue automatically after this run"
         }
     }
+
+    var emphasis: Emphasis {
+        switch self {
+        case .pauseAfterCurrent: .caution
+        case .resume, .keepRunning: .proceed
+        }
+    }
+
+    var pauseNotice: String? {
+        self == .keepRunning
+            ? "Finishing this step, then pausing"
+            : nil
+    }
+
+    enum Emphasis: Equatable {
+        case caution
+        case proceed
+    }
+}
+
+enum WorkflowImmediateControl: Equatable {
+    case stopCurrentStep
+
+    var buttonTitle: String {
+        "Stop Now"
+    }
+
+    var menuTitle: String {
+        "Stop Current Step"
+    }
+
+    var accessibilityLabel: String {
+        "Stop Current Step Now"
+    }
+
+    var help: String {
+        "Stop the current agent now. You can resume or restart this step afterward."
+    }
 }
 
 struct WorkflowControlPresentation: Equatable {
     let transport: WorkflowTransportControl?
-    let showsInterrupt: Bool
+    let immediateControl: WorkflowImmediateControl?
 
     init(
         canResume: Bool,
@@ -50,10 +88,10 @@ struct WorkflowControlPresentation: Equatable {
         } else {
             transport = nil
         }
-        showsInterrupt = canInterrupt
+        immediateControl = canInterrupt ? .stopCurrentStep : nil
     }
 
     var isVisible: Bool {
-        transport != nil || showsInterrupt
+        transport != nil || immediateControl != nil
     }
 }

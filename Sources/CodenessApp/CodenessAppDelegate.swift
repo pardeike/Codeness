@@ -290,12 +290,12 @@ private struct ApplicationPauseProgressView: View {
             }
             HStack {
                 Spacer()
-                Button("Interrupt Remaining Now") {
+                Button("Stop Remaining Now") {
                     for coordinator in coordinators {
                         Task { await coordinator.interruptCloseWait() }
                     }
                 }
-                .help("Interrupt agents still reaching checkpoints so Codeness can finish quitting")
+                .help("Stop agents still reaching checkpoints so Codeness can finish quitting")
             }
         }
         .padding(20)

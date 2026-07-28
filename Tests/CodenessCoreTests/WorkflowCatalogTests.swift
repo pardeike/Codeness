@@ -43,6 +43,33 @@ struct WorkflowCatalogTests {
     }
 
     @Test
+    func bundledWorkflowPromptsKeepScopeAndRoutingTopologyIndependent() throws {
+        let bundle = Bundle(for: WorkflowCatalogTestBundleToken.self)
+        let workflows = try WorkflowCatalogLoader.loadBundledWorkflowCatalog(
+            bundles: [bundle]
+        )
+
+        for workflow in workflows.templates {
+            let coordinator = workflow.coordinator.instructions
+            #expect(coordinator.contains("actual next configured step"))
+            #expect(coordinator.contains("current active work unit as scope authority"))
+            #expect(coordinator.contains("blocking, parked, and resolved work distinct"))
+            #expect(coordinator.contains("last repeating step"))
+            #expect(!coordinator.contains("so Code receives"))
+            #expect(!coordinator.contains("Only after Fix"))
+
+            for review in workflow.steps.filter({
+                $0.name.localizedCaseInsensitiveContains("review")
+            }) {
+                #expect(review.instructions.contains("active work unit"))
+                #expect(review.instructions.contains("block this work unit"))
+                #expect(review.instructions.contains("parked for later planning"))
+                #expect(review.instructions.contains("overall-goal completion separately"))
+            }
+        }
+    }
+
+    @Test
     func rejectsDuplicateWorkflowIdentifiers() {
         let data = Data(
             """

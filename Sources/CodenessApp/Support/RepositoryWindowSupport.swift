@@ -675,16 +675,16 @@ private struct RepositoryPauseProgressView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
-            Text("You can wait for a coherent stopping point or interrupt the current turn immediately. The window closes only after its resume state is saved.")
+            Text("You can wait for a coherent stopping point or stop the current step immediately. The window closes only after its resume state is saved.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
-                Button("Interrupt Now") {
+                Button("Stop Now") {
                     Task { await coordinator.interruptCloseWait() }
                 }
-                .help("Interrupt the active turn immediately so its resume state can be saved")
+                .help("Stop the current step immediately so its resume state can be saved")
                 .disabled(
                     coordinator.pauseState != .requestingCheckpoint
                         && coordinator.pauseState != .waitingForTurn

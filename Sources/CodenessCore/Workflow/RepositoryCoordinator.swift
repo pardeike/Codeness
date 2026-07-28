@@ -257,7 +257,7 @@ public final class RepositoryCoordinator {
 
     /// Starting over is intentionally unavailable while any repository-changing
     /// work, handoff routing, close preparation, or server interaction is live.
-    /// The user can pause/interrupt first and then reset from a durable checkpoint.
+    /// The user can pause or stop the active turn first and then reset from a durable checkpoint.
     public var canStartOver: Bool {
         guard isLoaded,
               record.activity != nil,
@@ -326,6 +326,10 @@ public final class RepositoryCoordinator {
         if run.status == .interrupted { return true }
         guard run.finalOutput?.isEmpty == false else { return false }
         return run.status == .routing || (run.status == .paused && run.relayError != nil)
+    }
+
+    public func canRestartWorkflowStep(_ runID: UUID) -> Bool {
+        restartableWorkflowContext(for: runID) != nil
     }
 
     public var canAmendGoal: Bool {
@@ -847,7 +851,7 @@ public final class RepositoryCoordinator {
             guard let agentProviders else { return }
             do {
                 try await agentProviders.interrupt(providerID: target.providerID, runID: run.id)
-                statusMessage = "Interrupting \(run.displayName.lowercased())…"
+                statusMessage = "Stopping \(run.displayName.lowercased())…"
             } catch {
                 if canInterrupt {
                     errorMessage = error.localizedDescription
@@ -858,7 +862,7 @@ public final class RepositoryCoordinator {
         guard let run = activeRun, let threadID = run.threadID, let turnID = run.turnID else { return }
         do {
             try await appServer.interrupt(threadID: threadID, turnID: turnID)
-            statusMessage = "Interrupting " + run.kind.displayName.lowercased() + "…"
+            statusMessage = "Stopping " + run.kind.displayName.lowercased() + "…"
         } catch {
             if canInterrupt {
                 errorMessage = error.localizedDescription
@@ -935,7 +939,7 @@ public final class RepositoryCoordinator {
                     }
                 } else {
                     pauseState = .interrupting
-                    statusMessage = "Interrupting " + run.kind.displayName.lowercased() + "…"
+                    statusMessage = "Stopping " + run.kind.displayName.lowercased() + "…"
                     try await appServer.interrupt(threadID: threadID, turnID: turnID)
                 }
                 return await waitForCloseCompletion()
@@ -960,7 +964,7 @@ public final class RepositoryCoordinator {
             guard let agentProviders else { return }
             do {
                 pauseState = .interrupting
-                statusMessage = "Interrupting \(run.displayName.lowercased())…"
+                statusMessage = "Stopping \(run.displayName.lowercased())…"
                 try await agentProviders.interrupt(providerID: target.providerID, runID: run.id)
             } catch {
                 _ = await reconcileCloseControlFailure(error.localizedDescription)
@@ -971,7 +975,7 @@ public final class RepositoryCoordinator {
               let turnID = run.turnID else { return }
         do {
             pauseState = .interrupting
-            statusMessage = "Interrupting " + run.kind.displayName.lowercased() + "…"
+            statusMessage = "Stopping " + run.kind.displayName.lowercased() + "…"
             try await appServer.interrupt(threadID: threadID, turnID: turnID)
         } catch {
             _ = await reconcileCloseControlFailure(error.localizedDescription)
@@ -1102,6 +1106,81 @@ public final class RepositoryCoordinator {
         }
     }
 
+    public func restartWorkflowStep(_ runID: UUID) async {
+        guard var context = restartableWorkflowContext(for: runID) else {
+            errorMessage = "Only the current failed or stopped workflow step can be restarted."
+            return
+        }
+        guard agentProviders != nil, workflowRouter != nil else {
+            errorMessage = "The agent providers are not configured."
+            return
+        }
+
+        let previousActivity = context.activity
+        let previousPauseAfterCurrent = pauseAfterCurrent
+        let previousViewPauseAfterCurrent = viewState.pauseAfterCurrent
+        let interruptedRun = context.activity.runs[context.runIndex]
+        let previousHandoff = context.activity.runs[..<context.runIndex]
+            .last(where: { $0.workflowHandoff != nil })?
+            .workflowHandoff
+
+        var session = context.activity.stepSessions[context.step.id]
+            ?? WorkflowSessionState(
+                stepID: context.step.id,
+                lineage: (interruptedRun.sessionLineage ?? 1) + 1,
+                target: context.step.target
+            )
+        if session.lineage <= (interruptedRun.sessionLineage ?? 0) {
+            session.lineage = (interruptedRun.sessionLineage ?? session.lineage) + 1
+        }
+        session.target = context.step.target
+        session.providerSessionID = nil
+        context.activity.stepSessions[context.step.id] = session
+        context.activity.workflowResumeCheckpoint = .perform(context.cursor)
+        record.activity = context.activity
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        errorMessage = nil
+        statusMessage = "Restarting \(context.step.name.lowercased()) in a fresh session…"
+
+        do {
+            try await persist()
+        } catch {
+            record.activity = previousActivity
+            pauseAfterCurrent = previousPauseAfterCurrent
+            viewState.pauseAfterCurrent = previousViewPauseAfterCurrent
+            scheduleViewStateSave()
+            errorMessage = "Could not save the fresh step restart: \(error.localizedDescription)"
+            statusMessage = pausedStatusMessage
+            return
+        }
+
+        let stepPrompt = GenericPromptBuilder.stepPrompt(
+            goal: context.activity.goal,
+            workflow: context.workflow,
+            step: context.step,
+            cursor: context.cursor,
+            previousHandoff: previousHandoff
+        )
+        let restartPrompt = """
+        FRESH STEP RESTART
+
+        This step is being rerun in a new provider session because the previous attempt did not \
+        finish cleanly. The previous run remains in history and may have partially changed the \
+        repository. Inspect the current repository state before editing. Do not assume either that \
+        nothing ran or that prior edits are correct. Treat the current step instruction and latest \
+        completed handoff below as scope authority.
+
+        \(stepPrompt)
+        """
+        await performGeneric(
+            cursor: context.cursor,
+            previousHandoff: previousHandoff,
+            promptOverride: restartPrompt
+        )
+    }
+
     public func retryRelay() async {
         guard let run = activeRun ?? record.activity?.runs.last,
               let finalOutput = run.finalOutput else { return }
@@ -1198,15 +1277,15 @@ public final class RepositoryCoordinator {
     }
 
     @discardableResult
-    public func updateWorkflowTargets(_ updatedWorkflow: WorkflowTemplate) async -> Bool {
+    public func updateWorkflowPreferences(_ updatedWorkflow: WorkflowTemplate) async -> Bool {
         guard var activity = record.activity,
               let currentWorkflow = activity.workflow,
               activity.status == .paused else {
-            errorMessage = "Workflow targets can only be changed while the activity is paused."
+            errorMessage = "Workflow preferences can only be changed while the activity is paused."
             return false
         }
-        guard Self.sameFrozenWorkflowDefinition(currentWorkflow, updatedWorkflow) else {
-            errorMessage = "Step topology, names, and instructions are frozen after an activity starts."
+        guard Self.sameFrozenWorkflowTopology(currentWorkflow, updatedWorkflow) else {
+            errorMessage = "Workflow identity, step names, stages, and order are frozen after an activity starts."
             return false
         }
         if let validationMessage = updatedWorkflow.validationMessage {
@@ -1233,7 +1312,7 @@ public final class RepositoryCoordinator {
             return true
         } catch {
             record.activity = previousActivity
-            errorMessage = "Could not save the workflow targets: \(error.localizedDescription)"
+            errorMessage = "Could not save the workflow preferences: \(error.localizedDescription)"
             return false
         }
     }
@@ -1815,7 +1894,7 @@ public final class RepositoryCoordinator {
 
         if isClosing {
             pauseState = .interrupting
-            statusMessage = "Interrupting \(kind.displayName.lowercased())…"
+            statusMessage = "Stopping \(kind.displayName.lowercased())…"
             do {
                 try await appServer.interrupt(threadID: threadID, turnID: turnID)
             } catch {
@@ -2045,7 +2124,7 @@ public final class RepositoryCoordinator {
             }
             if isClosing {
                 pauseState = .interrupting
-                statusMessage = "Interrupting \(step.name.lowercased())…"
+                statusMessage = "Stopping \(step.name.lowercased())…"
                 try await agentProviders.interrupt(
                     providerID: step.target.providerID,
                     runID: run.id
@@ -2446,7 +2525,7 @@ public final class RepositoryCoordinator {
                     pauseState = .waitingForTurn
                 } else {
                     pauseState = .interrupting
-                    statusMessage = "Interrupting \(run.displayName.lowercased())…"
+                    statusMessage = "Stopping \(run.displayName.lowercased())…"
                     try await agentProviders.interrupt(
                         providerID: target.providerID,
                         runID: run.id
@@ -2534,19 +2613,18 @@ public final class RepositoryCoordinator {
         return (.implementer, .implementation)
     }
 
-    private static func sameFrozenWorkflowDefinition(
+    private static func sameFrozenWorkflowTopology(
         _ lhs: WorkflowTemplate,
         _ rhs: WorkflowTemplate
     ) -> Bool {
         guard lhs.id == rhs.id,
               lhs.name == rhs.name,
-              lhs.steps.count == rhs.steps.count,
-              lhs.coordinator.instructions == rhs.coordinator.instructions else { return false }
+              lhs.summary == rhs.summary,
+              lhs.steps.count == rhs.steps.count else { return false }
         return zip(lhs.steps, rhs.steps).allSatisfy { old, new in
             old.id == new.id
                 && old.name == new.name
                 && old.section == new.section
-                && old.instructions == new.instructions
         }
     }
 
@@ -2557,6 +2635,37 @@ public final class RepositoryCoordinator {
         old.providerID != new.providerID
             || old.model != new.model
             || old.options.mode != new.options.mode
+    }
+
+    private func restartableWorkflowContext(
+        for runID: UUID
+    ) -> (
+        activity: ActivityRecord,
+        workflow: WorkflowTemplate,
+        cursor: WorkflowCursor,
+        step: WorkflowStep,
+        runIndex: Int
+    )? {
+        guard isLoaded,
+              !isClosing,
+              !pauseState.isInProgress,
+              pendingInteractions.isEmpty,
+              routingTasks.isEmpty,
+              completingRunIDs.isEmpty,
+              let activity = record.activity,
+              activity.status == .paused,
+              let workflow = activity.workflow,
+              let cursor = activity.workflowCursor,
+              case .recoverRun(let checkpointRunID)? = activity.workflowResumeCheckpoint,
+              checkpointRunID == runID,
+              let runIndex = activity.runs.firstIndex(where: { $0.id == runID }),
+              [.failed, .interrupted].contains(activity.runs[runIndex].status),
+              let snapshot = activity.runs[runIndex].workflowStep,
+              let step = GenericWorkflowStateMachine.step(at: cursor, in: workflow),
+              step.id == snapshot.id else {
+            return nil
+        }
+        return (activity, workflow, cursor, step, runIndex)
     }
 
     private func reusableProviderSessionID(

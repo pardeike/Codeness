@@ -123,7 +123,7 @@ struct GenericCoordinatorIntegrationTests {
             )
         )
 
-        #expect(await coordinator.updateWorkflowTargets(updated))
+        #expect(await coordinator.updateWorkflowPreferences(updated))
         let session = try #require(
             coordinator.record.activity?.stepSessions["code"]
         )
@@ -131,6 +131,95 @@ struct GenericCoordinatorIntegrationTests {
         #expect(session.providerSessionID == nil)
         #expect(session.target == updated.steps[codeIndex].target)
         #expect(coordinator.record.activity?.stepSessions["review"]?.lineage == 1)
+    }
+
+    @Test
+    func changingInstructionsEffortAndSpeedWhilePausedPreservesTheStepLineage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            failuresBeforeStart: 1
+        )
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-prompt-edit-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Edit prompts without losing context",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.status == .failed
+        }
+
+        let previousSession = try #require(
+            coordinator.record.activity?.stepSessions["work"]
+        )
+        var updated = try #require(coordinator.record.activity?.workflow)
+        updated.steps[0].instructions = "Use the newly planned work."
+        updated.steps[0].target.options.effort = "max"
+        updated.steps[0].target.options.speed = .fast
+        updated.coordinator.instructions = "Route the next handoff using the new policy."
+
+        #expect(await coordinator.updateWorkflowPreferences(updated))
+        #expect(coordinator.record.activity?.workflow == updated)
+        let updatedSession = try #require(
+            coordinator.record.activity?.stepSessions["work"]
+        )
+        #expect(updatedSession.lineage == previousSession.lineage)
+        #expect(updatedSession.providerSessionID == previousSession.providerSessionID)
+        #expect(updatedSession.target == updated.steps[0].target)
+    }
+
+    @Test
+    func changingWorkflowTopologyWhilePausedIsRejected() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            failuresBeforeStart: 1
+        )
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-topology-edit-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Keep the active workflow shape stable",
+            workflow: loopWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.status == .failed
+        }
+
+        let original = try #require(coordinator.record.activity?.workflow)
+        var renamed = original
+        renamed.steps[0].name = "Renamed"
+        #expect(!(await coordinator.updateWorkflowPreferences(renamed)))
+
+        var reordered = original
+        reordered.steps.swapAt(0, 1)
+        #expect(!(await coordinator.updateWorkflowPreferences(reordered)))
+        #expect(coordinator.record.activity?.workflow == original)
+        #expect(coordinator.errorMessage?.contains("order are frozen") == true)
     }
 
     @Test
@@ -170,7 +259,7 @@ struct GenericCoordinatorIntegrationTests {
     }
 
     @Test
-    func retryDoesNotResumeAProviderSessionThatNeverStarted() async throws {
+    func resumingAFailedStepUsesItsSavedPromptWithoutResumingAMissingProviderSession() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -199,6 +288,13 @@ struct GenericCoordinatorIntegrationTests {
                 && coordinator.record.activity?.runs.last?.status == .failed
         }
 
+        let failedPrompt = try #require(
+            coordinator.record.activity?.runs.last?.prompt
+        )
+        var updated = try #require(coordinator.record.activity?.workflow)
+        updated.steps[0].instructions = "NEW INSTRUCTIONS FOR A LATER FRESH RUN"
+        #expect(await coordinator.updateWorkflowPreferences(updated))
+
         await coordinator.resume()
         try await waitUntil {
             coordinator.record.activity?.status == .completed
@@ -211,6 +307,129 @@ struct GenericCoordinatorIntegrationTests {
             coordinator.record.activity?.stepSessions["work"]?.providerSessionID
                 == "codex-session-2"
         )
+        let recoveryPrompt = try #require(
+            coordinator.record.activity?.runs.last?.prompt
+        )
+        #expect(recoveryPrompt.contains("PREVIOUS STEP INSTRUCTION"))
+        #expect(recoveryPrompt.contains(failedPrompt))
+        #expect(!recoveryPrompt.contains("NEW INSTRUCTIONS FOR A LATER FRESH RUN"))
+    }
+
+    @Test
+    func changingProviderBeforeRecoveringAFailedStepUsesTheNewProviderImmediately() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            failuresBeforeStart: 1
+        )
+        let claude = ScriptedAgentProvider(id: .claude, delay: .zero)
+        let providers = AgentProviderRegistry(providers: [codex, claude])
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-provider-switch-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: providers,
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Switch providers before recovery",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.status == .failed
+        }
+
+        var updated = try #require(coordinator.record.activity?.workflow)
+        updated.steps[0].target = AgentTarget(
+            providerID: .claude,
+            model: "sonnet"
+        )
+        #expect(await coordinator.updateWorkflowPreferences(updated))
+
+        await coordinator.resume()
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.map { $0.agentTarget?.providerID } == [.codex, .claude])
+        #expect(activity.stepSessions["work"]?.lineage == 2)
+        #expect(activity.stepSessions["work"]?.target == updated.steps[0].target)
+        let claudeSessions = await claude.sessionRequests()
+        #expect(claudeSessions.count == 1)
+        #expect(claudeSessions[0].existingSessionID == nil)
+    }
+
+    @Test
+    func restartingAFailedStepPreservesHistoryAndUsesAFreshSessionLineage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            failuresBeforeStart: 1
+        )
+        let providers = AgentProviderRegistry(providers: [codex])
+        let router = IterationCompletingWorkflowRouter(completionIteration: 1)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-fresh-restart-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: providers,
+            workflowRouter: router
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Restart the failed step cleanly",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.status == .failed
+        }
+
+        let failedRun = try #require(coordinator.record.activity?.runs.last)
+        #expect(coordinator.canRestartWorkflowStep(failedRun.id))
+
+        var updated = try #require(coordinator.record.activity?.workflow)
+        updated.steps[0].instructions = "USE THE CURRENT PLANNED WORK"
+        updated.coordinator.instructions = "USE THE EDITED HANDOFF POLICY"
+        #expect(await coordinator.updateWorkflowPreferences(updated))
+        #expect(coordinator.record.activity?.stepSessions["work"]?.lineage == 1)
+
+        await coordinator.restartWorkflowStep(failedRun.id)
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.count == 2)
+        #expect(activity.runs[0].id == failedRun.id)
+        #expect(activity.runs[0].status == .failed)
+        #expect(activity.runs[1].status == .completed)
+        #expect(activity.runs[1].prompt.contains("FRESH STEP RESTART"))
+        #expect(activity.runs[1].prompt.contains("current repository state before editing"))
+        #expect(activity.runs[1].prompt.contains("USE THE CURRENT PLANNED WORK"))
+        #expect(activity.stepSessions["work"]?.lineage == 2)
+        #expect(!coordinator.canRestartWorkflowStep(failedRun.id))
+        #expect(
+            await router.configurations().last?.instructions
+                == "USE THE EDITED HANDOFF POLICY"
+        )
+
+        let sessions = await codex.sessionRequests()
+        #expect(sessions.count == 2)
+        #expect(sessions.map(\.existingSessionID) == [nil, nil])
     }
 
     private func waitUntil(
@@ -422,6 +641,7 @@ private actor ScriptedAgentProvider: AgentProviding {
 private actor IterationCompletingWorkflowRouter: WorkflowHandoffRouting {
     private let completionIteration: Int
     private var calls: [WorkflowHandoffContext] = []
+    private var routeConfigurations: [WorkflowCoordinatorConfiguration] = []
     private var summaryCalls: [WorkflowCoordinatorConfiguration] = []
 
     init(completionIteration: Int) {
@@ -433,9 +653,9 @@ private actor IterationCompletingWorkflowRouter: WorkflowHandoffRouting {
         configuration: WorkflowCoordinatorConfiguration,
         cwd: String
     ) -> WorkflowHandoff {
-        _ = configuration
         _ = cwd
         calls.append(context)
+        routeConfigurations.append(configuration)
         let outcome: WorkflowOutcome = context.makesLoopDecision
             && context.sourceStep.loopIteration >= completionIteration
             ? .complete
@@ -449,6 +669,10 @@ private actor IterationCompletingWorkflowRouter: WorkflowHandoffRouting {
 
     func routeCount() -> Int {
         calls.count
+    }
+
+    func configurations() -> [WorkflowCoordinatorConfiguration] {
+        routeConfigurations
     }
 
     func summarizeWork(

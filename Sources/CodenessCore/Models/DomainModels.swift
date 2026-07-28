@@ -55,6 +55,19 @@ public enum RunStatus: String, Codable, Sendable {
     case completed
     case interrupted
     case failed
+
+    public var displayName: String {
+        switch self {
+        case .queued: "Queued"
+        case .running: "Running"
+        case .routing: "Preparing Handoff"
+        case .awaitingApproval: "Waiting for Input"
+        case .paused: "Paused"
+        case .completed: "Completed"
+        case .interrupted: "Stopped"
+        case .failed: "Failed"
+        }
+    }
 }
 
 public struct RunTokenUsage: Codable, Sendable, Equatable {

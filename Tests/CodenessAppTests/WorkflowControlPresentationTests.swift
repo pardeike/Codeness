@@ -1,3 +1,4 @@
+import CodenessCore
 import Testing
 @testable import Codeness
 
@@ -7,6 +8,14 @@ struct WorkflowControlPresentationTests {
         #expect(WorkflowTransportControl.resume.buttonTitle == "Resume")
         #expect(WorkflowTransportControl.pauseAfterCurrent.buttonTitle == "Pause")
         #expect(WorkflowTransportControl.keepRunning.buttonTitle == "Continue")
+        #expect(WorkflowTransportControl.resume.emphasis == .proceed)
+        #expect(WorkflowTransportControl.pauseAfterCurrent.emphasis == .caution)
+        #expect(WorkflowTransportControl.keepRunning.emphasis == .proceed)
+        #expect(
+            WorkflowTransportControl.keepRunning.pauseNotice
+                == "Finishing this step, then pausing"
+        )
+        #expect(WorkflowImmediateControl.stopCurrentStep.buttonTitle == "Stop Now")
     }
 
     @Test
@@ -19,7 +28,7 @@ struct WorkflowControlPresentationTests {
         )
 
         #expect(presentation.transport == .resume)
-        #expect(!presentation.showsInterrupt)
+        #expect(presentation.immediateControl == nil)
         #expect(presentation.isVisible)
     }
 
@@ -43,7 +52,7 @@ struct WorkflowControlPresentationTests {
     }
 
     @Test
-    func interruptAppearsBesideRunningTransport() {
+    func stopNowAppearsBesideRunningTransport() {
         let presentation = WorkflowControlPresentation(
             canResume: false,
             isActivityRunning: true,
@@ -52,7 +61,7 @@ struct WorkflowControlPresentationTests {
         )
 
         #expect(presentation.transport == .pauseAfterCurrent)
-        #expect(presentation.showsInterrupt)
+        #expect(presentation.immediateControl == .stopCurrentStep)
         #expect(presentation.isVisible)
     }
 
@@ -66,7 +75,7 @@ struct WorkflowControlPresentationTests {
         )
 
         #expect(presentation.transport == nil)
-        #expect(!presentation.showsInterrupt)
+        #expect(presentation.immediateControl == nil)
         #expect(!presentation.isVisible)
     }
 
@@ -80,7 +89,13 @@ struct WorkflowControlPresentationTests {
         )
 
         #expect(presentation.transport == nil)
-        #expect(!presentation.showsInterrupt)
+        #expect(presentation.immediateControl == nil)
         #expect(!presentation.isVisible)
+    }
+
+    @Test
+    func interruptedRunStatusIsPresentedAsStopped() {
+        #expect(RunStatus.interrupted.displayName == "Stopped")
+        #expect(RunStatus.awaitingApproval.displayName == "Waiting for Input")
     }
 }

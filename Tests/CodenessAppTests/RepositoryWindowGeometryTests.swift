@@ -206,6 +206,7 @@ struct RepositoryWindowGeometryTests {
             RunListFollowPolicy.targetRunID(
                 selectedRunID: liveRunID,
                 liveRunID: liveRunID,
+                latestRunID: liveRunID,
                 selectedRunFollowsOutput: true
             ) == liveRunID
         )
@@ -213,6 +214,7 @@ struct RepositoryWindowGeometryTests {
             RunListFollowPolicy.targetRunID(
                 selectedRunID: liveRunID,
                 liveRunID: liveRunID,
+                latestRunID: liveRunID,
                 selectedRunFollowsOutput: false
             ) == nil
         )
@@ -220,8 +222,23 @@ struct RepositoryWindowGeometryTests {
             RunListFollowPolicy.targetRunID(
                 selectedRunID: previousRunID,
                 liveRunID: liveRunID,
+                latestRunID: liveRunID,
                 selectedRunFollowsOutput: true
             ) == nil
+        )
+    }
+
+    @Test
+    func runListKeepsFollowingTheLatestSelectedRunWhilePaused() {
+        let latestRunID = UUID()
+
+        #expect(
+            RunListFollowPolicy.targetRunID(
+                selectedRunID: latestRunID,
+                liveRunID: nil,
+                latestRunID: latestRunID,
+                selectedRunFollowsOutput: true
+            ) == latestRunID
         )
     }
 

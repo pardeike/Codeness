@@ -198,7 +198,7 @@ struct RepositoryWindowView: View {
                                     .id(run.id)
                                     .help(
                                         "Show \(run.displayName) "
-                                            + "(\(run.status.rawValue)) transcript"
+                                            + "(\(run.status.displayName.lowercased())) transcript"
                                     )
                                 }
                             } header: {
@@ -206,6 +206,13 @@ struct RepositoryWindowView: View {
                             }
                         }
                     }
+
+                    Color.clear
+                        .frame(height: 8)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .accessibilityHidden(true)
+                        .id(RunListScrollAnchor.bottom)
                 }
                 .background {
                     ListBackgroundDeselectionBridge {
@@ -213,13 +220,19 @@ struct RepositoryWindowView: View {
                     }
                 }
                 .onAppear {
-                    guard let followedRunID else { return }
-                    proxy.scrollTo(followedRunID, anchor: .bottom)
+                    guard followedRunID != nil else { return }
+                    proxy.scrollTo(RunListScrollAnchor.bottom, anchor: .bottom)
                 }
                 .onChange(of: followedRunID) { _, runID in
-                    guard let runID else { return }
+                    guard runID != nil else { return }
                     withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(runID, anchor: .bottom)
+                        proxy.scrollTo(RunListScrollAnchor.bottom, anchor: .bottom)
+                    }
+                }
+                .onChange(of: workflowControls) {
+                    guard followedRunID != nil else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(RunListScrollAnchor.bottom, anchor: .bottom)
                     }
                 }
             }
@@ -238,6 +251,7 @@ struct RepositoryWindowView: View {
         return RunListFollowPolicy.targetRunID(
             selectedRunID: coordinator.selectedRunID,
             liveRunID: coordinator.liveRunID,
+            latestRunID: coordinator.activity?.runs.last?.id,
             selectedRunFollowsOutput: selectedRunFollowsOutput
         )
     }
@@ -252,39 +266,55 @@ struct RepositoryWindowView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(transportTint(for: transport))
                 .accessibilityLabel(transport.title)
                 .accessibilityHint(transport.help)
                 .help(transport.help)
             }
 
-            if workflowControls.showsInterrupt {
+            if let immediateControl = workflowControls.immediateControl {
                 Button {
                     Task { await coordinator.interrupt() }
                 } label: {
-                    Text("Interrupt")
+                    Text(immediateControl.buttonTitle)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .accessibilityLabel("Interrupt Active Turn")
-                .accessibilityHint(
-                    "Interrupt the active agent turn and preserve a resumable checkpoint"
-                )
-                .help("Interrupt the active agent turn and preserve a resumable checkpoint")
+                .tint(.red)
+                .accessibilityLabel(immediateControl.accessibilityLabel)
+                .accessibilityHint(immediateControl.help)
+                .help(immediateControl.help)
             }
         }
         .controlSize(.regular)
         .padding(.horizontal, 12)
         .padding(.vertical, 12)
-        .background(.bar)
+        .background {
+            Rectangle()
+                .fill(.bar)
+                .overlay {
+                    if workflowControls.transport?.pauseNotice != nil {
+                        Color.orange.opacity(0.08)
+                    }
+                }
+        }
     }
 
     private var workflowControls: WorkflowControlPresentation {
         WorkflowControlPresentation(
-            canResume: coordinator.canResume,
+            canResume: coordinator.canResume && !selectedRunHasInlineRecoveryActions,
             isActivityRunning: coordinator.activity?.status == .running,
             pauseAfterCurrent: coordinator.pauseAfterCurrent,
             canInterrupt: coordinator.canInterrupt
         )
+    }
+
+    private var selectedRunHasInlineRecoveryActions: Bool {
+        guard let selectedRun = coordinator.selectedRun else { return false }
+        return RunRecoveryPresentation(
+            activity: coordinator.activity,
+            run: selectedRun
+        )?.isActionable == true
     }
 
     private var optimalSidebarWidth: CGFloat {
@@ -295,8 +325,8 @@ struct RepositoryWindowView: View {
         var controlTitles = workflowControls.transport.map {
             [$0.buttonTitle]
         } ?? []
-        if workflowControls.showsInterrupt {
-            controlTitles.append("Interrupt")
+        if let immediateControl = workflowControls.immediateControl {
+            controlTitles.append(immediateControl.buttonTitle)
         }
         return RepositoryWindowMetrics.optimalSidebarWidth(
             rowTitles: runs.map(\.displayName),
@@ -408,6 +438,17 @@ struct RepositoryWindowView: View {
             coordinator.setPauseAfterCurrent(false)
         }
     }
+
+    private func transportTint(for transport: WorkflowTransportControl) -> Color {
+        switch transport.emphasis {
+        case .caution: .orange
+        case .proceed: .green
+        }
+    }
+}
+
+private enum RunListScrollAnchor {
+    static let bottom = "run-list-follow-bottom"
 }
 
 private struct RunGroupHeader: View {
@@ -422,7 +463,7 @@ private func runSidebarMetadata(_ run: RunRecord) -> String {
     let target = run.agentTarget.map {
         "\($0.providerID.rawValue.capitalized) · \($0.model)"
     } ?? run.kind.displayName
-    return "\(target) · \(run.status.rawValue.capitalized)"
+    return "\(target) · \(run.status.displayName)"
 }
 
 private struct RunRow: View {
@@ -451,7 +492,7 @@ private struct RunRow: View {
                         "\($0.providerID.rawValue.capitalized) · \($0.model)"
                     } ?? run.kind.displayName)
                     Text("·")
-                    Text(run.status.rawValue.capitalized)
+                    Text(run.status.displayName)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

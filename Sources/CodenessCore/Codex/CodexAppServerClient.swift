@@ -85,7 +85,7 @@ public actor CodexAppServerClient {
                     "clientInfo": .object([
                         "name": .string("codeness"),
                         "title": .string("Codeness"),
-                        "version": .string("0.8.1")
+                        "version": .string("0.9.0")
                     ]),
                     "capabilities": .object([
                         "experimentalApi": .bool(true),

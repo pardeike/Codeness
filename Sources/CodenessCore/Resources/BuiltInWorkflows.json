@@ -11,7 +11,7 @@
           "id": "implement",
           "name": "Implement",
           "section": "loop",
-          "instructions": "Start or continue implementing the goal. Stop when a review is useful. If the whole goal is implemented, say so clearly. Inspect the repository and leave it in a coherent, tested state.",
+          "instructions": "Start or continue one coherent, bounded work unit toward the goal. If the current handoff contains blocking findings, remediate that same work unit before selecting unrelated work; otherwise choose the next useful unit. Treat session history as context and the current handoff as scope authority. Necessary detours are allowed when they directly unblock correctness or validation: record why they are needed, keep them bounded, and return to the active work. Park unrelated discoveries for later planning. Inspect the repository, test the result, and stop at a coherent review point. Report work-unit readiness separately from overall-goal completion.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -26,7 +26,7 @@
           "id": "review",
           "name": "Review",
           "section": "loop",
-          "instructions": "Review the preceding implementation against the full goal. Inspect the actual repository, tests, and diff. Do not modify files. Report concrete findings and also say whether the entire goal is now complete.",
+          "instructions": "Quality-assure the active work unit against its acceptance criteria and relevant goal constraints. Inspect the actual repository, tests, and diff, but do not modify files. Separate findings that block this work unit from optional improvements and unrelated discoveries that should be parked for later planning. Do not reopen resolved findings unless new evidence invalidates them. Classify the work unit as accepted, changes required, or blocked, and report overall-goal completion separately.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -41,7 +41,7 @@
           "id": "fix",
           "name": "Fix",
           "section": "loop",
-          "instructions": "Address the preceding review findings in the context of the full goal. Do not start an unrelated next work unit. Test the resulting repository and say clearly whether more goal work remains.",
+          "instructions": "Address only the blocking review findings for the active work unit. Do not start an unrelated next unit. Necessary detours are allowed when they directly unblock a correct or testable fix: record them, keep them bounded, and return to the active work. Park optional or unrelated discoveries. Test the resulting repository and report whether the work unit is ready for review separately from whether the full goal still has work remaining.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -63,7 +63,7 @@
             "speed": "fast"
           }
         },
-        "instructions": "Create a concise, loss-minimizing handoff for the next configured step. Preserve facts, changed files, tests, unresolved findings, and blockers. Only after the last repeating step, decide whether the full goal is complete, should continue for another loop, is blocked, or failed. Do not infer completion merely because one work unit finished."
+        "instructions": "Create a concise, loss-minimizing handoff for the actual next configured step named in the routing context. Treat session history as memory and the current active work unit as scope authority. Preserve its objective and acceptance criteria, still-relevant plan decisions, changed files, validation evidence, unresolved blocking findings, necessary detours, parked discoveries, and blockers. Keep blocking, parked, and resolved work distinct; do not carry resolved findings forward as active work or promote unrelated discoveries into the current scope. Use the run label to describe the source step that just completed, not its recipient. Only at the last repeating step decide whether the full goal is complete, should continue for another loop, is blocked, or failed; do not infer overall completion merely because one work unit finished."
       }
     },
     {
@@ -75,7 +75,7 @@
           "id": "code",
           "name": "Code",
           "section": "loop",
-          "instructions": "Implement or correct the next useful portion of the goal. Incorporate the preceding review handoff when present. Test the work and say clearly whether the full goal is complete.",
+          "instructions": "Implement one coherent, bounded work unit toward the goal. If the current handoff contains blocking review findings, remediate that same unit before selecting unrelated work; if the prior unit is accepted or none is active, choose the next useful unit. Treat session history as context and the current handoff as scope authority. Necessary detours are allowed when they directly unblock correctness or validation: record why they are needed, keep them bounded, and return to the active work. Park unrelated discoveries for later planning. Test the result and report work-unit readiness separately from overall-goal completion.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -90,7 +90,7 @@
           "id": "review",
           "name": "Review",
           "section": "loop",
-          "instructions": "Review the current repository against the full goal. Do not modify files. Report actionable findings and decide whether all goal requirements are satisfied.",
+          "instructions": "Quality-assure the active work unit against its acceptance criteria and relevant goal constraints. Inspect the actual repository, tests, and diff, but do not modify files. Separate findings that block this work unit from optional improvements and unrelated discoveries that should be parked for later planning. Do not reopen resolved findings unless new evidence invalidates them. Classify the work unit as accepted, changes required, or blocked, and report overall-goal completion separately.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -112,7 +112,7 @@
             "speed": "fast"
           }
         },
-        "instructions": "Pass a concise factual work summary to the next step. After Review, mark complete only when the repository satisfies the entire goal; otherwise continue so Code receives the findings."
+        "instructions": "Create a concise, loss-minimizing handoff for the actual next configured step named in the routing context. Treat session history as memory and the current active work unit as scope authority. Preserve its objective and acceptance criteria, still-relevant plan decisions, changed files, validation evidence, unresolved blocking findings, necessary detours, parked discoveries, and blockers. Keep blocking, parked, and resolved work distinct; do not carry resolved findings forward as active work or promote unrelated discoveries into the current scope. Use the run label to describe the source step that just completed, not its recipient. Only at the last repeating step decide whether the full goal is complete, should continue for another loop, is blocked, or failed; do not infer overall completion merely because one work unit finished."
       }
     },
     {
@@ -124,7 +124,7 @@
           "id": "plan",
           "name": "Plan",
           "section": "prefix",
-          "instructions": "Inspect the repository and produce a concrete implementation plan for the full goal. Resolve important architectural questions and identify validation work. Do not modify files.",
+          "instructions": "Inspect the repository and produce a durable plan for the full goal without modifying files. Divide the goal into coherent, bounded work units, identify breadth priorities and important architectural constraints, and select the first active unit. Define its objective, acceptance criteria, explicit non-goals, expected implementation surface, validation work, and any allowed necessary detours with a clear return condition. Park speculative or unrelated ideas for later work instead of expanding the active unit.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -139,7 +139,7 @@
           "id": "implement",
           "name": "Implement",
           "section": "loop",
-          "instructions": "Implement the next useful portion of the goal, using the plan and latest handoff as context. Test the work and stop at a coherent review point.",
+          "instructions": "Implement the active bounded work unit from the durable plan and latest handoff. If the handoff contains blocking findings, remediate that same unit before advancing; if the prior unit is accepted, select the next planned unit. Treat session history as context and the current handoff as scope authority. Necessary detours are allowed when they directly unblock correctness or validation: record why they are needed, keep them bounded, and return to the active work. Park unrelated discoveries. Test the result and stop at a coherent review point.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -154,7 +154,7 @@
           "id": "review",
           "name": "Review",
           "section": "loop",
-          "instructions": "Review the current repository against the goal and original plan. Do not modify files. Report actionable findings and whether the entire goal is complete.",
+          "instructions": "Quality-assure the active work unit against its acceptance criteria, the durable plan, and relevant goal constraints. Inspect the actual repository, tests, and diff, but do not modify files. Separate findings that block this work unit from optional improvements and unrelated discoveries that should be parked for later planning. Do not reopen resolved findings unless new evidence invalidates them. Classify the work unit as accepted, changes required, or blocked, and report overall-goal completion separately.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -169,7 +169,7 @@
           "id": "fix",
           "name": "Fix",
           "section": "loop",
-          "instructions": "Address the review findings without starting unrelated work. Test the result and state whether the full goal still needs another loop.",
+          "instructions": "Address only the blocking review findings for the active work unit. Do not start unrelated work. Necessary detours are allowed when they directly unblock a correct or testable fix: record them, keep them bounded, and return to the active work. Park optional or unrelated discoveries. Test the result and report whether the work unit is ready for review separately from whether the full goal still needs another loop.",
           "target": {
             "providerID": "codex",
             "model": "gpt-5.6-sol",
@@ -191,7 +191,7 @@
             "speed": "fast"
           }
         },
-        "instructions": "Preserve plan decisions and current implementation state in each handoff. Only after Fix, decide whether the full goal is complete, should continue, is blocked, or failed."
+        "instructions": "Create a concise, loss-minimizing handoff for the actual next configured step named in the routing context. Treat session history as memory and the current active work unit as scope authority. Preserve its objective and acceptance criteria, still-relevant plan decisions, changed files, validation evidence, unresolved blocking findings, necessary detours, parked discoveries, and blockers. Keep blocking, parked, and resolved work distinct; do not carry resolved findings forward as active work or promote unrelated discoveries into the current scope. Use the run label to describe the source step that just completed, not its recipient. Only at the last repeating step decide whether the full goal is complete, should continue for another loop, is blocked, or failed; do not infer overall completion merely because one work unit finished."
       }
     }
   ]

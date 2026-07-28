@@ -4,9 +4,14 @@ enum RunListFollowPolicy {
     static func targetRunID(
         selectedRunID: UUID?,
         liveRunID: UUID?,
+        latestRunID: UUID?,
         selectedRunFollowsOutput: Bool
     ) -> UUID? {
-        guard selectedRunFollowsOutput, selectedRunID == liveRunID else { return nil }
+        guard selectedRunFollowsOutput,
+              selectedRunID == liveRunID || selectedRunID == latestRunID
+        else {
+            return nil
+        }
         return selectedRunID
     }
 }
