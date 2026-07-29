@@ -16,6 +16,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
     private var terminationWasApproved = false
     private var terminationPanel: NSPanel?
     private weak var terminationParentWindow: NSWindow?
+    private var aboutWindowController: AboutWindowController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         windowManager = RepositoryWindowManager(
@@ -75,6 +76,18 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
 
     func saveCurrentRepository() {
         Task { _ = await windowManager?.saveCurrentRepositoryState() }
+    }
+
+    func showAbout() {
+        if aboutWindowController == nil {
+            aboutWindowController = AboutWindowController()
+        }
+        guard let aboutWindow = aboutWindowController?.window else { return }
+        if !aboutWindow.isVisible {
+            aboutWindow.center()
+        }
+        aboutWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

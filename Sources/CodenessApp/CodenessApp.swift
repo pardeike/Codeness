@@ -27,6 +27,12 @@ private struct RepositoryWindowCommands: Commands {
     let state: RepositoryWindowCommandState
 
     var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About Codeness") {
+                appDelegate.showAbout()
+            }
+        }
+
         CommandGroup(replacing: .newItem) {
             Button("Open Workspace…") {
                 appDelegate.openRepository()
