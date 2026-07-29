@@ -350,6 +350,34 @@ private struct RunRecoveryView: View {
     @State private var showsManualHandoff = false
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                recoveryDetails
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                    .padding(.bottom, presentation.isActionable ? 10 : 12)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+
+            if presentation.isActionable {
+                recoveryActions
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+            }
+        }
+        .background(Color.orange.opacity(0.08))
+        .sheet(isPresented: $showsManualHandoff) {
+            ManualHandoffSheet(
+                coordinator: coordinator,
+                run: run,
+                presentation: presentation,
+                initialText: manualHandoffText
+            )
+        }
+    }
+
+    private var recoveryDetails: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
@@ -380,59 +408,49 @@ private struct RunRecoveryView: View {
                !handoff.isEmpty {
                 Text(handoff)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .padding(.leading, 24)
             }
-
-            if presentation.isActionable {
-                HStack(spacing: 8) {
-                    switch presentation.kind {
-                    case .stepStopped:
-                        Button("Resume") {
-                            Task { await coordinator.resume() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        if coordinator.canRestartWorkflowStep(run.id) {
-                            RestartWorkflowStepButton(coordinator: coordinator, run: run)
-                        }
-
-                    case .handoffFailed:
-                        Button("Try Again") {
-                            Task { await coordinator.retryRelay() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        Button("Continue with Result…") {
-                            showsManualHandoff = true
-                        }
-                        .disabled(manualHandoffText.isEmpty)
-
-                    case .workflowPaused:
-                        Button("Try Again") {
-                            Task { await coordinator.retryRelay() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        Button("Continue Anyway…") {
-                            showsManualHandoff = true
-                        }
-                        .disabled(manualHandoffText.isEmpty)
-
-                    case .historical:
-                        EmptyView()
-                    }
-                }
-            }
         }
-        .padding(12)
-        .background(Color.orange.opacity(0.08))
-        .sheet(isPresented: $showsManualHandoff) {
-            ManualHandoffSheet(
-                coordinator: coordinator,
-                run: run,
-                presentation: presentation,
-                initialText: manualHandoffText
-            )
+    }
+
+    @ViewBuilder
+    private var recoveryActions: some View {
+        HStack(spacing: 8) {
+            switch presentation.kind {
+            case .stepStopped:
+                Button("Resume") {
+                    Task { await coordinator.resume() }
+                }
+                .buttonStyle(.borderedProminent)
+                if coordinator.canRestartWorkflowStep(run.id) {
+                    RestartWorkflowStepButton(coordinator: coordinator, run: run)
+                }
+
+            case .handoffFailed:
+                Button("Try Again") {
+                    Task { await coordinator.retryRelay() }
+                }
+                .buttonStyle(.borderedProminent)
+                Button("Continue with Result…") {
+                    showsManualHandoff = true
+                }
+                .disabled(manualHandoffText.isEmpty)
+
+            case .workflowPaused:
+                Button("Try Again") {
+                    Task { await coordinator.retryRelay() }
+                }
+                .buttonStyle(.borderedProminent)
+                Button("Continue Anyway…") {
+                    showsManualHandoff = true
+                }
+                .disabled(manualHandoffText.isEmpty)
+
+            case .historical:
+                EmptyView()
+            }
         }
     }
 
