@@ -679,9 +679,14 @@ final class CodenessApplicationModel {
             // turn continues. Preserve them for Console diagnostics without interrupting
             // every repository window with a modal application error.
             Self.appServerLogger.debug("\(clean, privacy: .public)")
-        case .exited(let status):
+        case .exited(let termination):
             guard !intentionalShutdown else { return }
-            serverState = .failed("App Server exited with status \(status)")
+            Self.appServerLogger.error(
+                "\(termination.diagnosticDescription(subject: "Codex App Server"), privacy: .public)"
+            )
+            serverState = .failed(
+                termination.userFacingDescription(subject: "Codex App Server")
+            )
             for coordinator in coordinators.values {
                 await coordinator.appServerRestarted()
             }

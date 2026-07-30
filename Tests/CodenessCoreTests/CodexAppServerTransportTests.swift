@@ -52,7 +52,12 @@ struct CodexAppServerTransportTests {
             return false
         }
         let exitIndex = events.firstIndex {
-            if case .exited(7) = $0 { return true }
+            if case .exited(let termination) = $0 {
+                return termination == SubprocessTermination(
+                    reason: .exit,
+                    status: 7
+                )
+            }
             return false
         }
         #expect(notificationIndex != nil)
@@ -60,6 +65,39 @@ struct CodexAppServerTransportTests {
         if let notificationIndex, let exitIndex {
             #expect(notificationIndex < exitIndex)
         }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func preservesSignalTerminationForFriendlyPresentation() async throws {
+        let fixture = try TransportFixture(script: Self.terminatedServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        let stream = await client.events()
+        let terminationTask = Task { () -> SubprocessTermination? in
+            for await event in stream {
+                if case .exited(let termination) = event {
+                    return termination
+                }
+            }
+            return nil
+        }
+
+        let threadID = try await client.startThread(
+            cwd: "/tmp",
+            model: "fixture",
+            developerInstructions: "fixture"
+        )
+        #expect(threadID == "thread-before-signal")
+
+        let termination = await terminationTask.value
+        #expect(termination?.reason == .uncaughtSignal)
+        #expect(termination?.status == 15)
+        #expect(
+            termination?.userFacingDescription(subject: "Codex App Server")
+                == "Codex App Server was stopped."
+        )
     }
 
     @Test
@@ -126,6 +164,29 @@ for line in sys.stdin:
             os._exit(0)
     elif identifier is not None:
         emit_chunked({"id": identifier, "result": {}})
+"""#
+
+    private static let terminatedServer = #"""
+import json
+import os
+import signal
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "terminated-fixture"}})
+    elif method == "thread/start":
+        emit({"id": identifier, "result": {"thread": {"id": "thread-before-signal"}}})
+        os.kill(os.getpid(), signal.SIGTERM)
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
 """#
 
     private static let exitAfterResponseServer = #"""

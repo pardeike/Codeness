@@ -270,6 +270,46 @@ struct ClaudeAgentProviderTests {
         await provider.shutdown()
     }
 
+    @Test
+    func translatesSignalTerminationForLiveRuns() async throws {
+        let fixture = try ClaudeCLIFixture(terminateOnRun: true)
+        defer { fixture.remove() }
+        let provider = ClaudeAgentProvider(
+            executableURL: fixture.executableURL,
+            environment: fixture.environment
+        )
+        let target = AgentTarget(providerID: .claude, model: "sonnet")
+        let session = try await provider.prepareSession(
+            AgentSessionRequest(
+                existingSessionID: nil,
+                name: "Terminated Claude fixture",
+                cwd: fixture.directory.path,
+                target: target,
+                developerInstructions: "Continue the workflow."
+            )
+        )
+        let events = try await run(
+            provider: provider,
+            session: session,
+            target: target,
+            cwd: fixture.directory.path
+        )
+
+        #expect(events.contains {
+            if case .failed(let detail) = $0 {
+                return detail == "Claude was stopped."
+            }
+            return false
+        })
+        #expect(!events.contains {
+            if case .failed(let detail) = $0 {
+                return detail.contains("15") || detail.contains("status")
+            }
+            return false
+        })
+        await provider.shutdown()
+    }
+
     private func run(
         provider: ClaudeAgentProvider,
         session: AgentSession,
@@ -323,6 +363,7 @@ private struct ClaudeCLIFixture {
     let executableURL: URL
     let logURL: URL
     let missingOnResume: Bool
+    let terminateOnRun: Bool
 
     var environment: [String: String] {
         var environment = CodexExecutableLocator.processEnvironment()
@@ -330,16 +371,23 @@ private struct ClaudeCLIFixture {
         if missingOnResume {
             environment["CLAUDE_FIXTURE_MISSING_ON_RESUME"] = "1"
         }
+        if terminateOnRun {
+            environment["CLAUDE_FIXTURE_TERMINATE_ON_RUN"] = "1"
+        }
         return environment
     }
 
-    init(missingOnResume: Bool = false) throws {
+    init(
+        missingOnResume: Bool = false,
+        terminateOnRun: Bool = false
+    ) throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "codeness-claude-fixture-\(UUID().uuidString)",
                 isDirectory: true
             )
         self.missingOnResume = missingOnResume
+        self.terminateOnRun = terminateOnRun
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
@@ -371,6 +419,7 @@ private struct ClaudeCLIFixture {
 #!/usr/bin/python3
 import json
 import os
+import signal
 import sys
 
 log_path = os.environ["CLAUDE_FIXTURE_LOG"]
@@ -431,6 +480,9 @@ for line in sys.stdin:
             })
     elif value.get("type") == "user":
         session_id = value.get("session_id", "")
+        if os.environ.get("CLAUDE_FIXTURE_TERMINATE_ON_RUN") == "1":
+            os.kill(os.getpid(), signal.SIGTERM)
+            break
         if is_resume and os.environ.get("CLAUDE_FIXTURE_MISSING_ON_RESUME") == "1":
             emit({
                 "type": "result",

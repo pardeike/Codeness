@@ -4,7 +4,7 @@ public enum AppServerEvent: Sendable, Equatable {
     case notification(method: String, params: JSONValue, rawLine: String)
     case request(id: JSONValue, method: String, params: JSONValue, rawLine: String)
     case standardError(String)
-    case exited(Int32)
+    case exited(SubprocessTermination)
 
     public var threadID: String? {
         switch self {
@@ -37,7 +37,7 @@ public enum AppServerClientError: LocalizedError, Sendable {
     case notRunning
     case invalidResponse(String)
     case requestFailed(code: Int64?, message: String)
-    case processExited(Int32)
+    case processExited(SubprocessTermination)
 
     public var errorDescription: String? {
         switch self {
@@ -46,7 +46,8 @@ public enum AppServerClientError: LocalizedError, Sendable {
         case .invalidResponse(let detail): "Codex App Server returned an invalid response: \(detail)"
         case .requestFailed(let code, let message):
             code.map { "Codex App Server request failed (\($0)): \(message)" } ?? "Codex App Server request failed: \(message)"
-        case .processExited(let status): "Codex App Server exited with status \(status)."
+        case .processExited(let termination):
+            termination.userFacingDescription(subject: "Codex App Server")
         }
     }
 }

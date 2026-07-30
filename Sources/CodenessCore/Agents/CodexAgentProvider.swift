@@ -236,11 +236,15 @@ public actor CodexAgentProvider: AgentProviding {
         switch event {
         case .standardError:
             return
-        case .exited(let status):
+        case .exited(let termination):
             let runIDs = Array(activeRuns.keys)
             for runID in runIDs {
                 activeRuns[runID]?.continuation.yield(
-                    .failed("Codex App Server exited with status \(status).")
+                    .failed(
+                        termination.userFacingDescription(
+                            subject: "Codex App Server"
+                        )
+                    )
                 )
                 finish(runID: runID)
             }

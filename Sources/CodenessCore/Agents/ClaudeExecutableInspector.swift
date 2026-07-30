@@ -61,9 +61,19 @@ public enum ClaudeExecutableInspector {
         }
         let models = response?["response"]?["response"]?["models"]?.arrayValue?
             .compactMap(modelDescriptor) ?? []
-        guard process.terminationStatus == 0, !models.isEmpty else {
-            let detail = String(decoding: errorData, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = String(decoding: errorData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let termination = SubprocessTermination(process: process)
+        guard termination.succeeded else {
+            throw AgentProviderError.processExited(
+                provider: .claude,
+                termination: termination,
+                detail: detail.isEmpty
+                    ? "Codeness could not discover its model catalog."
+                    : detail
+            )
+        }
+        guard !models.isEmpty else {
             throw AgentProviderError.invalidResponse(
                 detail.isEmpty
                     ? "Claude did not return a model catalog"

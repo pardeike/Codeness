@@ -4,15 +4,25 @@ public enum CodexExecutableError: LocalizedError, Sendable {
     case notFound
     case invalidExecutable(String)
     case versionCheckFailed(String)
+    case versionCheckTerminated(
+        termination: SubprocessTermination,
+        detail: String
+    )
 
     public var errorDescription: String? {
         switch self {
         case .notFound:
-            "Codex was not found. Configure its executable path in Codeness settings."
+            return "Codex was not found. Configure its executable path in Codeness settings."
         case .invalidExecutable(let path):
-            "Codex is not executable at \(path)."
+            return "Codex is not executable at \(path)."
         case .versionCheckFailed(let detail):
-            "Codex could not be verified: \(detail)"
+            return "Codex could not be verified: \(detail)"
+        case .versionCheckTerminated(let termination, let detail):
+            let summary = termination.userFacingDescription(
+                subject: "Codex",
+                context: "while Codeness was verifying it"
+            )
+            return detail.isEmpty ? summary : "\(summary) \(detail)"
         }
     }
 }
@@ -59,7 +69,14 @@ public enum CodexExecutableLocator {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let error = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard process.terminationStatus == 0, output.contains("codex-cli") else {
+        let termination = SubprocessTermination(process: process)
+        guard termination.succeeded else {
+            throw CodexExecutableError.versionCheckTerminated(
+                termination: termination,
+                detail: error.isEmpty ? output : error
+            )
+        }
+        guard output.contains("codex-cli") else {
             throw CodexExecutableError.versionCheckFailed(error.isEmpty ? output : error)
         }
         return output

@@ -204,7 +204,11 @@ public enum AgentProviderError: LocalizedError, Sendable {
     case invalidSession(String)
     case missingRun(UUID)
     case invalidResponse(String)
-    case processExited(provider: AgentProviderID, status: Int32, detail: String)
+    case processExited(
+        provider: AgentProviderID,
+        termination: SubprocessTermination,
+        detail: String
+    )
 
     public var errorDescription: String? {
         switch self {
@@ -220,9 +224,11 @@ public enum AgentProviderError: LocalizedError, Sendable {
             return "The agent run \(runID.uuidString) is no longer active."
         case .invalidResponse(let detail):
             return "The agent CLI returned an invalid response: \(detail)"
-        case .processExited(let provider, let status, let detail):
-            let suffix = detail.isEmpty ? "" : ": \(detail)"
-            return "\(provider.rawValue.capitalized) exited with status \(status)\(suffix)"
+        case .processExited(let provider, let termination, let detail):
+            let summary = termination.userFacingDescription(
+                subject: provider.rawValue.capitalized
+            )
+            return detail.isEmpty ? summary : "\(summary) \(detail)"
         }
     }
 }

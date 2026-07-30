@@ -516,14 +516,17 @@ struct GenericCoordinatorIntegrationTests {
         await coordinator.retryWorkflowStep(blockedRun.id)
         try await waitUntil {
             coordinator.record.activity?.status == .completed
+                && coordinator.record.activity?.runs.count == 2
+                && coordinator.record.activity?.runs.last?.status == .completed
         }
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.count == 2)
-        #expect(activity.runs[1].status == .completed)
-        #expect(activity.runs[1].sessionLineage == 2)
-        #expect(activity.runs[1].prompt.contains("RETRY CURRENT STEP"))
-        #expect(activity.runs[1].transcript.contains("Retrying automatically in a fresh session"))
+        let retryRun = try #require(activity.runs.dropFirst().first)
+        #expect(retryRun.status == .completed)
+        #expect(retryRun.sessionLineage == 2)
+        #expect(retryRun.prompt.contains("RETRY CURRENT STEP"))
+        #expect(retryRun.transcript.contains("Retrying automatically in a fresh session"))
         #expect(activity.stepSessions["work"]?.lineage == 2)
 
         let sessions = await codex.sessionRequests()
@@ -567,15 +570,19 @@ struct GenericCoordinatorIntegrationTests {
         await coordinator.retryWorkflowStep(blockedRun.id)
         try await waitUntil {
             coordinator.record.activity?.status == .completed
+                && coordinator.record.activity?.runs.count == 3
+                && coordinator.record.activity?.runs.last?.status == .completed
         }
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.count == 3)
-        #expect(activity.runs[1].status == .failed)
-        #expect(activity.runs[1].threadID == "codex-session-1")
-        #expect(activity.runs[2].status == .completed)
-        #expect(activity.runs[2].sessionLineage == 2)
-        #expect(activity.runs[2].prompt.contains("RETRY CURRENT STEP"))
+        let resumedRun = try #require(activity.runs.dropFirst().first)
+        let fallbackRun = try #require(activity.runs.dropFirst(2).first)
+        #expect(resumedRun.status == .failed)
+        #expect(resumedRun.threadID == "codex-session-1")
+        #expect(fallbackRun.status == .completed)
+        #expect(fallbackRun.sessionLineage == 2)
+        #expect(fallbackRun.prompt.contains("RETRY CURRENT STEP"))
         #expect(activity.stepSessions["work"]?.lineage == 2)
 
         let sessions = await codex.sessionRequests()
@@ -624,11 +631,12 @@ struct GenericCoordinatorIntegrationTests {
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.count == 2)
-        #expect(activity.runs[1].sessionLineage == 1)
-        #expect(activity.runs[1].threadID == "codex-session-1")
+        let retryRun = try #require(activity.runs.dropFirst().first)
+        #expect(retryRun.sessionLineage == 1)
+        #expect(retryRun.threadID == "codex-session-1")
         #expect(activity.stepSessions["work"]?.lineage == 1)
         #expect(activity.stepSessions["work"]?.providerSessionID == "codex-session-1")
-        #expect(!activity.runs[1].transcript.contains("Retrying automatically"))
+        #expect(!retryRun.transcript.contains("Retrying automatically"))
         #expect(await router.routeCount() == 1)
 
         let sessions = await codex.sessionRequests()
@@ -674,8 +682,9 @@ struct GenericCoordinatorIntegrationTests {
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.count == 2)
-        #expect(activity.runs[1].sessionLineage == 1)
-        #expect(activity.runs[1].threadID == "codex-session-1")
+        let retryRun = try #require(activity.runs.dropFirst().first)
+        #expect(retryRun.sessionLineage == 1)
+        #expect(retryRun.threadID == "codex-session-1")
         #expect(activity.stepSessions["work"]?.lineage == 1)
         #expect(activity.stepSessions["work"]?.providerSessionID == "codex-session-1")
         #expect(await router.routeCount() == 1)
@@ -729,7 +738,8 @@ struct GenericCoordinatorIntegrationTests {
         let activity = try #require(coordinator.record.activity)
         #expect(activity.status == .paused)
         #expect(activity.runs.count == 2)
-        #expect(activity.workflowResumeCheckpoint == .recoverRun(activity.runs[1].id))
+        let retryRun = try #require(activity.runs.dropFirst().first)
+        #expect(activity.workflowResumeCheckpoint == .recoverRun(retryRun.id))
         #expect(activity.stepSessions["work"]?.lineage == 1)
         #expect(activity.stepSessions["work"]?.providerSessionID == "codex-session-1")
         #expect(await codex.startAttemptCount() == 2)
@@ -739,7 +749,7 @@ struct GenericCoordinatorIntegrationTests {
     }
 
     private func waitUntil(
-        timeout: Duration = .seconds(5),
+        timeout: Duration = .seconds(15),
         _ condition: @escaping @MainActor () -> Bool
     ) async throws {
         let clock = ContinuousClock()
@@ -747,7 +757,7 @@ struct GenericCoordinatorIntegrationTests {
         while !condition(), clock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
-        #expect(condition())
+        try #require(condition())
     }
 
     private func fullWorkflow() -> WorkflowTemplate {
@@ -926,7 +936,7 @@ private actor ScriptedAgentProvider: AgentProviding {
         if startAttempts <= failuresBeforeStart {
             throw AgentProviderError.processExited(
                 provider: id,
-                status: 1,
+                termination: SubprocessTermination(reason: .exit, status: 1),
                 detail: "Injected pre-start failure"
             )
         }

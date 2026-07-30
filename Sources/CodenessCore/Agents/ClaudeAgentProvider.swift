@@ -1,8 +1,13 @@
 import Dispatch
 import Foundation
+import OSLog
 
 public actor ClaudeAgentProvider: AgentProviding {
     public nonisolated let id = AgentProviderID.claude
+    private static let processLogger = Logger(
+        subsystem: "ap.codeness",
+        category: "ClaudeProcess"
+    )
 
     private struct SessionConfiguration {
         let name: String
@@ -42,7 +47,7 @@ public actor ClaudeAgentProvider: AgentProviding {
         var transcriptSection: TranscriptSectionKind?
         var terminalDelivered: Bool
         var interruptRequested: Bool
-        var terminationStatus: Int32?
+        var termination: SubprocessTermination?
         var outputReachedEOF: Bool
     }
 
@@ -304,12 +309,17 @@ public actor ClaudeAgentProvider: AgentProviding {
             transcriptSection: nil,
             terminalDelivered: false,
             interruptRequested: false,
-            terminationStatus: nil,
+            termination: nil,
             outputReachedEOF: false
         )
         process.terminationHandler = { [weak self] process in
-            let status = process.terminationStatus
-            Task { await self?.processTerminated(runID: runID, status: status) }
+            let termination = SubprocessTermination(process: process)
+            Task {
+                await self?.processTerminated(
+                    runID: runID,
+                    termination: termination
+                )
+            }
         }
 
         do {
@@ -660,9 +670,12 @@ public actor ClaudeAgentProvider: AgentProviding {
         finishIfProcessDrained(runID: runID)
     }
 
-    private func processTerminated(runID: UUID, status: Int32) {
+    private func processTerminated(
+        runID: UUID,
+        termination: SubprocessTermination
+    ) {
         guard var run = activeRuns[runID] else { return }
-        run.terminationStatus = status
+        run.termination = termination
         activeRuns[runID] = run
         finishIfProcessDrained(runID: runID)
     }
@@ -670,7 +683,7 @@ public actor ClaudeAgentProvider: AgentProviding {
     private func finishIfProcessDrained(runID: UUID) {
         guard let run = activeRuns[runID],
               run.outputReachedEOF,
-              let status = run.terminationStatus else { return }
+              let termination = run.termination else { return }
         if !run.terminalDelivered {
             let detail = run.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
             if run.interruptRequested {
@@ -682,11 +695,14 @@ public actor ClaudeAgentProvider: AgentProviding {
                     .sessionUnavailable(detail)
                 )
             } else {
+                Self.processLogger.error(
+                    "\(termination.diagnosticDescription(subject: "Claude"), privacy: .public)"
+                )
                 run.continuation.yield(
                     .failed(
                         AgentProviderError.processExited(
                             provider: id,
-                            status: status,
+                            termination: termination,
                             detail: detail
                         ).localizedDescription
                     )

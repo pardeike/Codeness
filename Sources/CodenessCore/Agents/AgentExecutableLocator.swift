@@ -4,18 +4,29 @@ public enum AgentExecutableError: LocalizedError, Sendable {
     case notFound(provider: String)
     case invalidExecutable(provider: String, path: String)
     case versionCheckFailed(provider: String, detail: String)
+    case versionCheckTerminated(
+        provider: String,
+        termination: SubprocessTermination,
+        detail: String
+    )
     case versionTooOld(provider: String, installed: String, minimum: String)
 
     public var errorDescription: String? {
         switch self {
         case .notFound(let provider):
-            "\(provider) was not found. Configure its executable path in Codeness settings."
+            return "\(provider) was not found. Configure its executable path in Codeness settings."
         case .invalidExecutable(let provider, let path):
-            "\(provider) is not executable at \(path)."
+            return "\(provider) is not executable at \(path)."
         case .versionCheckFailed(let provider, let detail):
-            "\(provider) could not be verified: \(detail)"
+            return "\(provider) could not be verified: \(detail)"
+        case .versionCheckTerminated(let provider, let termination, let detail):
+            let summary = termination.userFacingDescription(
+                subject: provider,
+                context: "while Codeness was verifying it"
+            )
+            return detail.isEmpty ? summary : "\(summary) \(detail)"
         case .versionTooOld(let provider, let installed, let minimum):
-            "\(provider) \(installed) is too old. Codeness requires \(minimum) or later."
+            return "\(provider) \(installed) is too old. Codeness requires \(minimum) or later."
         }
     }
 }
@@ -87,10 +98,20 @@ public enum AgentExecutableLocator {
             decoding: stderr.fileHandleForReading.readDataToEndOfFile(),
             as: UTF8.self
         ).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard process.terminationStatus == 0, !output.isEmpty else {
+        let termination = SubprocessTermination(process: process)
+        guard termination.succeeded else {
+            throw AgentExecutableError.versionCheckTerminated(
+                provider: descriptor.displayName,
+                termination: termination,
+                detail: error.isEmpty ? output : error
+            )
+        }
+        guard !output.isEmpty else {
             throw AgentExecutableError.versionCheckFailed(
                 provider: descriptor.displayName,
-                detail: error.isEmpty ? output : error
+                detail: error.isEmpty
+                    ? "the executable returned no version information"
+                    : error
             )
         }
         try validateVersion(output, descriptor: descriptor)

@@ -13,7 +13,10 @@ public actor CodexAppServerClient {
     private var pendingRequests: [Int64: CheckedContinuation<JSONValue, any Error>] = [:]
     private var processGeneration: Int64 = 0
     private var activeProcessGeneration: Int64?
-    private var terminatedProcess: (generation: Int64, status: Int32)?
+    private var terminatedProcess: (
+        generation: Int64,
+        termination: SubprocessTermination
+    )?
     private var outputEOFGeneration: Int64?
     private let eventStream: AsyncStream<AppServerEvent>
     private let eventContinuation: AsyncStream<AppServerEvent>.Continuation
@@ -52,8 +55,13 @@ public actor CodexAppServerClient {
         outputEOFGeneration = nil
 
         launchedProcess.terminationHandler = { [weak self] process in
-            let status = process.terminationStatus
-            Task { await self?.processTerminated(status, generation: generation) }
+            let termination = SubprocessTermination(process: process)
+            Task {
+                await self?.processTerminated(
+                    termination,
+                    generation: generation
+                )
+            }
         }
 
         process = launchedProcess
@@ -85,7 +93,7 @@ public actor CodexAppServerClient {
                     "clientInfo": .object([
                         "name": .string("codeness"),
                         "title": .string("Codeness"),
-                        "version": .string("0.9.2")
+                        "version": .string("0.9.5")
                     ]),
                     "capabilities": .object([
                         "experimentalApi": .bool(true),
@@ -382,9 +390,12 @@ public actor CodexAppServerClient {
         finishProcessExitIfReady(generation: generation)
     }
 
-    private func processTerminated(_ status: Int32, generation: Int64) {
+    private func processTerminated(
+        _ termination: SubprocessTermination,
+        generation: Int64
+    ) {
         guard activeProcessGeneration == generation else { return }
-        terminatedProcess = (generation, status)
+        terminatedProcess = (generation, termination)
         finishProcessExitIfReady(generation: generation)
     }
 
@@ -393,9 +404,9 @@ public actor CodexAppServerClient {
               outputEOFGeneration == generation,
               let terminatedProcess,
               terminatedProcess.generation == generation else { return }
-        let status = terminatedProcess.status
-        failPendingRequests(with: AppServerClientError.processExited(status))
-        eventContinuation.yield(.exited(status))
+        let termination = terminatedProcess.termination
+        failPendingRequests(with: AppServerClientError.processExited(termination))
+        eventContinuation.yield(.exited(termination))
         clearProcess()
     }
 
