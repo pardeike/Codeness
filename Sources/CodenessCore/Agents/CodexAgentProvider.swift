@@ -35,13 +35,24 @@ public actor CodexAgentProvider: AgentProviding {
             throw AgentProviderError.unsupportedProvider(request.target.providerID)
         }
         if let existingSessionID = request.existingSessionID {
-            try await appServer.resumeThread(
-                id: existingSessionID,
-                cwd: request.cwd,
-                model: request.target.model,
-                developerInstructions: request.developerInstructions,
-                approvalPolicy: "never"
-            )
+            do {
+                try await appServer.resumeThread(
+                    id: existingSessionID,
+                    cwd: request.cwd,
+                    model: request.target.model,
+                    developerInstructions: request.developerInstructions,
+                    approvalPolicy: "never"
+                )
+            } catch {
+                if Self.confirmsMissingSession(error) {
+                    throw AgentProviderError.sessionUnavailable(
+                        provider: id,
+                        sessionID: existingSessionID,
+                        detail: error.localizedDescription
+                    )
+                }
+                throw error
+            }
             return AgentSession(providerID: id, id: existingSessionID, target: request.target)
         }
 
@@ -105,6 +116,13 @@ public actor CodexAgentProvider: AgentProviding {
             )
         } catch {
             finish(runID: request.runID)
+            if Self.confirmsMissingSession(error) {
+                throw AgentProviderError.sessionUnavailable(
+                    provider: id,
+                    sessionID: request.session.id,
+                    detail: error.localizedDescription
+                )
+            }
             throw error
         }
     }
@@ -184,6 +202,8 @@ public actor CodexAgentProvider: AgentProviding {
                 return AgentUtilityResult(output: output, tokenUsage: usage)
             case .failed(let detail):
                 throw AgentProviderError.invalidResponse(detail)
+            case .sessionUnavailable(let detail):
+                throw AgentProviderError.invalidResponse(detail)
             case .interrupted(let detail):
                 throw AgentProviderError.invalidResponse(detail ?? "The coordinator run was interrupted.")
             case .started, .transcript, .diagnostic, .tokenUsage, .interaction,
@@ -192,6 +212,17 @@ public actor CodexAgentProvider: AgentProviding {
             }
         }
         throw AgentProviderError.invalidResponse("the coordinator run ended without a result")
+    }
+
+    private static func confirmsMissingSession(_ error: any Error) -> Bool {
+        guard let error = error as? AppServerClientError,
+              case .requestFailed(let code, let message) = error,
+              code == -32600 else {
+            return false
+        }
+        return message.localizedCaseInsensitiveContains(
+            "no rollout found for thread id"
+        )
     }
 
     public func shutdown() {

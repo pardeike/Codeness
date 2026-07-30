@@ -432,6 +432,312 @@ struct GenericCoordinatorIntegrationTests {
         #expect(sessions.map(\.existingSessionID) == [nil, nil])
     }
 
+    @Test
+    func retryingABlockedStepPreservesItsSessionInsteadOfReclassifyingItsResult() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let router = BlockingOnceWorkflowRouter()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-blocked-retry-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: router
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Retry the blocked step",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.workflowHandoff?.outcome == .blocked
+        }
+
+        let blockedRun = try #require(coordinator.record.activity?.runs.last)
+        #expect(coordinator.canRestartWorkflowStep(blockedRun.id))
+
+        await coordinator.retryWorkflowStep(blockedRun.id)
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.count == 2)
+        #expect(activity.runs[0].id == blockedRun.id)
+        #expect(activity.runs[0].status == .paused)
+        #expect(activity.runs[0].workflowHandoff?.outcome == .blocked)
+        #expect(activity.runs[1].status == .completed)
+        #expect(activity.runs[1].prompt.contains("RETRY CURRENT STEP"))
+        #expect(activity.runs.map(\.workflowStep?.loopIteration) == [1, 1])
+        #expect(activity.stepSessions["work"]?.lineage == 1)
+        #expect(await router.routeCount() == 2)
+
+        let sessions = await codex.sessionRequests()
+        #expect(sessions.count == 2)
+        #expect(sessions.map(\.existingSessionID) == [nil, "codex-session-1"])
+    }
+
+    @Test
+    func blockedStepRetryFallsBackSilentlyWhenSessionPreparationFails() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            rejectsExistingSessions: true
+        )
+        let router = BlockingOnceWorkflowRouter()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-blocked-prepare-fallback-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: router
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Fall back after session preparation fails",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.workflowHandoff?.outcome == .blocked
+        }
+
+        let blockedRun = try #require(coordinator.record.activity?.runs.last)
+        await coordinator.retryWorkflowStep(blockedRun.id)
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.count == 2)
+        #expect(activity.runs[1].status == .completed)
+        #expect(activity.runs[1].sessionLineage == 2)
+        #expect(activity.runs[1].prompt.contains("RETRY CURRENT STEP"))
+        #expect(activity.runs[1].transcript.contains("Retrying automatically in a fresh session"))
+        #expect(activity.stepSessions["work"]?.lineage == 2)
+
+        let sessions = await codex.sessionRequests()
+        #expect(
+            sessions.map(\.existingSessionID)
+                == [nil, "codex-session-1", nil]
+        )
+    }
+
+    @Test
+    func blockedStepRetryFallsBackSilentlyWhenResumedRunCannotStart() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            resumedRunsFailBeforeStart: true
+        )
+        let router = BlockingOnceWorkflowRouter()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-blocked-start-fallback-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: router
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Fall back after a resumed run cannot start",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.workflowHandoff?.outcome == .blocked
+        }
+
+        let blockedRun = try #require(coordinator.record.activity?.runs.last)
+        await coordinator.retryWorkflowStep(blockedRun.id)
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.count == 3)
+        #expect(activity.runs[1].status == .failed)
+        #expect(activity.runs[1].threadID == "codex-session-1")
+        #expect(activity.runs[2].status == .completed)
+        #expect(activity.runs[2].sessionLineage == 2)
+        #expect(activity.runs[2].prompt.contains("RETRY CURRENT STEP"))
+        #expect(activity.stepSessions["work"]?.lineage == 2)
+
+        let sessions = await codex.sessionRequests()
+        #expect(
+            sessions.map(\.existingSessionID)
+                == [nil, "codex-session-1", nil]
+        )
+    }
+
+    @Test
+    func blockedStepRetryPreservesSessionWhenResumePreparationFailsTransiently() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            transientlyRejectsExistingSessions: true
+        )
+        let router = BlockingOnceWorkflowRouter()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-blocked-transient-prepare-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: router
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Preserve a session through a transient preparation failure",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.workflowHandoff?.outcome == .blocked
+        }
+
+        let blockedRun = try #require(coordinator.record.activity?.runs.last)
+        await coordinator.retryWorkflowStep(blockedRun.id)
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.status == .failed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.count == 2)
+        #expect(activity.runs[1].sessionLineage == 1)
+        #expect(activity.runs[1].threadID == "codex-session-1")
+        #expect(activity.stepSessions["work"]?.lineage == 1)
+        #expect(activity.stepSessions["work"]?.providerSessionID == "codex-session-1")
+        #expect(!activity.runs[1].transcript.contains("Retrying automatically"))
+        #expect(await router.routeCount() == 1)
+
+        let sessions = await codex.sessionRequests()
+        #expect(sessions.map(\.existingSessionID) == [nil, "codex-session-1"])
+    }
+
+    @Test
+    func blockedStepRetryPreservesSessionWhenResumedRunFailsTransientlyBeforeStart() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            resumedRunsFailTransientlyBeforeStart: true
+        )
+        let router = BlockingOnceWorkflowRouter()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-blocked-transient-start-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: router
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Preserve a session through a transient pre-start failure",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.workflowHandoff?.outcome == .blocked
+        }
+
+        let blockedRun = try #require(coordinator.record.activity?.runs.last)
+        await coordinator.retryWorkflowStep(blockedRun.id)
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.status == .failed
+        }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.count == 2)
+        #expect(activity.runs[1].sessionLineage == 1)
+        #expect(activity.runs[1].threadID == "codex-session-1")
+        #expect(activity.stepSessions["work"]?.lineage == 1)
+        #expect(activity.stepSessions["work"]?.providerSessionID == "codex-session-1")
+        #expect(await router.routeCount() == 1)
+
+        let sessions = await codex.sessionRequests()
+        #expect(sessions.map(\.existingSessionID) == [nil, "codex-session-1"])
+    }
+
+    @Test
+    func closePreparationPreventsFreshFallbackAfterResumedStartFailure() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let failureGate = ResumedStartFailureGate()
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            resumedStartFailureGate: failureGate
+        )
+        let router = BlockingOnceWorkflowRouter()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-close-during-fallback-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: router
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Do not launch a fallback after close",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.workflowHandoff?.outcome == .blocked
+        }
+
+        let blockedRun = try #require(coordinator.record.activity?.runs.last)
+        let retryTask = Task {
+            await coordinator.retryWorkflowStep(blockedRun.id)
+        }
+        await failureGate.waitUntilReached()
+
+        let closeResult = await coordinator.prepareForClose(strategy: .immediate)
+        #expect(closeResult == .ready)
+        await failureGate.release()
+        await retryTask.value
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.status == .paused)
+        #expect(activity.runs.count == 2)
+        #expect(activity.workflowResumeCheckpoint == .recoverRun(activity.runs[1].id))
+        #expect(activity.stepSessions["work"]?.lineage == 1)
+        #expect(activity.stepSessions["work"]?.providerSessionID == "codex-session-1")
+        #expect(await codex.startAttemptCount() == 2)
+
+        let sessions = await codex.sessionRequests()
+        #expect(sessions.map(\.existingSessionID) == [nil, "codex-session-1"])
+    }
+
     private func waitUntil(
         timeout: Duration = .seconds(5),
         _ condition: @escaping @MainActor () -> Bool
@@ -519,31 +825,95 @@ struct GenericCoordinatorIntegrationTests {
     }
 }
 
+private actor BlockingOnceWorkflowRouter: WorkflowHandoffRouting {
+    private var calls = 0
+
+    func route(
+        _ context: WorkflowHandoffContext,
+        configuration: WorkflowCoordinatorConfiguration,
+        cwd: String
+    ) -> WorkflowHandoff {
+        _ = configuration
+        _ = cwd
+        calls += 1
+        return WorkflowHandoff(
+            text: calls == 1 ? "The step is temporarily blocked." : "The retry succeeded.",
+            outcome: calls == 1 ? .blocked : .complete,
+            runLabel: "\(context.sourceStep.name) \(context.sourceStep.loopIteration)"
+        )
+    }
+
+    func summarizeWork(
+        _ context: WorkSummaryContext,
+        configuration: WorkflowCoordinatorConfiguration,
+        cwd: String
+    ) -> String {
+        _ = context
+        _ = configuration
+        _ = cwd
+        return "Retry summary"
+    }
+
+    func routeCount() -> Int {
+        calls
+    }
+}
+
 private actor ScriptedAgentProvider: AgentProviding {
     nonisolated let id: AgentProviderID
 
     private let delay: Duration
     private let failuresBeforeStart: Int
+    private let rejectsExistingSessions: Bool
+    private let transientlyRejectsExistingSessions: Bool
+    private let resumedRunsFailBeforeStart: Bool
+    private let resumedRunsFailTransientlyBeforeStart: Bool
+    private let resumedStartFailureGate: ResumedStartFailureGate?
     private var prepared: [AgentSessionRequest] = []
     private var started: [AgentRunRequest] = []
+    private var resumedSessionIDs: Set<String> = []
     private var sessionCounter = 0
     private var startAttempts = 0
 
     init(
         id: AgentProviderID,
         delay: Duration,
-        failuresBeforeStart: Int = 0
+        failuresBeforeStart: Int = 0,
+        rejectsExistingSessions: Bool = false,
+        transientlyRejectsExistingSessions: Bool = false,
+        resumedRunsFailBeforeStart: Bool = false,
+        resumedRunsFailTransientlyBeforeStart: Bool = false,
+        resumedStartFailureGate: ResumedStartFailureGate? = nil
     ) {
         self.id = id
         self.delay = delay
         self.failuresBeforeStart = failuresBeforeStart
+        self.rejectsExistingSessions = rejectsExistingSessions
+        self.transientlyRejectsExistingSessions = transientlyRejectsExistingSessions
+        self.resumedRunsFailBeforeStart = resumedRunsFailBeforeStart
+        self.resumedRunsFailTransientlyBeforeStart = resumedRunsFailTransientlyBeforeStart
+        self.resumedStartFailureGate = resumedStartFailureGate
     }
 
-    func prepareSession(_ request: AgentSessionRequest) -> AgentSession {
+    func prepareSession(_ request: AgentSessionRequest) throws -> AgentSession {
         prepared.append(request)
         let sessionID: String
         if let existing = request.existingSessionID {
+            if transientlyRejectsExistingSessions {
+                throw AgentProviderError.unavailable(
+                    id,
+                    "Injected transient transport failure"
+                )
+            }
+            if rejectsExistingSessions {
+                throw AgentProviderError.sessionUnavailable(
+                    provider: id,
+                    sessionID: existing,
+                    detail: "Injected missing session"
+                )
+            }
             sessionID = existing
+            resumedSessionIDs.insert(existing)
         } else {
             sessionCounter += 1
             sessionID = "\(id.rawValue)-session-\(sessionCounter)"
@@ -551,7 +921,7 @@ private actor ScriptedAgentProvider: AgentProviding {
         return AgentSession(providerID: id, id: sessionID, target: request.target)
     }
 
-    func startRun(_ request: AgentRunRequest) throws -> AgentRunHandle {
+    func startRun(_ request: AgentRunRequest) async throws -> AgentRunHandle {
         startAttempts += 1
         if startAttempts <= failuresBeforeStart {
             throw AgentProviderError.processExited(
@@ -560,7 +930,46 @@ private actor ScriptedAgentProvider: AgentProviding {
                 detail: "Injected pre-start failure"
             )
         }
+        let resumedExistingSession = resumedSessionIDs.remove(request.session.id) != nil
+        if resumedExistingSession, let resumedStartFailureGate {
+            await resumedStartFailureGate.blockUntilReleased()
+            throw AgentProviderError.sessionUnavailable(
+                provider: id,
+                sessionID: request.session.id,
+                detail: "Injected missing resumed session"
+            )
+        }
         started.append(request)
+        if resumedRunsFailBeforeStart, resumedExistingSession {
+            let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
+            Task {
+                pair.continuation.yield(
+                    .sessionUnavailable("Injected missing resumed session")
+                )
+                pair.continuation.finish()
+            }
+            return AgentRunHandle(
+                runID: request.runID,
+                providerID: id,
+                sessionID: request.session.id,
+                executionID: nil,
+                events: pair.stream
+            )
+        }
+        if resumedRunsFailTransientlyBeforeStart, resumedExistingSession {
+            let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
+            Task {
+                pair.continuation.yield(.failed("Injected transient transport failure"))
+                pair.continuation.finish()
+            }
+            return AgentRunHandle(
+                runID: request.runID,
+                providerID: id,
+                sessionID: request.session.id,
+                executionID: nil,
+                events: pair.stream
+            )
+        }
         let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
         let executionID = "\(id.rawValue)-execution-\(started.count)"
         let delay = delay
@@ -635,6 +1044,38 @@ private actor ScriptedAgentProvider: AgentProviding {
 
     func startCount() -> Int {
         started.count
+    }
+
+    func startAttemptCount() -> Int {
+        startAttempts
+    }
+}
+
+private actor ResumedStartFailureGate {
+    private var reached = false
+    private var reachedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func blockUntilReleased() async {
+        reached = true
+        let waiters = reachedWaiters
+        reachedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseWaiter = continuation
+        }
+    }
+
+    func waitUntilReached() async {
+        guard !reached else { return }
+        await withCheckedContinuation { continuation in
+            reachedWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
     }
 }
 

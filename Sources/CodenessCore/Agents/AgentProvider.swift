@@ -189,12 +189,18 @@ public enum AgentEvent: Sendable, Equatable {
         tokenUsage: RunTokenUsage?
     )
     case interrupted(String?)
+    case sessionUnavailable(String)
     case failed(String)
 }
 
 public enum AgentProviderError: LocalizedError, Sendable {
     case unavailable(AgentProviderID, String)
     case unsupportedProvider(AgentProviderID)
+    case sessionUnavailable(
+        provider: AgentProviderID,
+        sessionID: String,
+        detail: String
+    )
     case invalidSession(String)
     case missingRun(UUID)
     case invalidResponse(String)
@@ -206,6 +212,8 @@ public enum AgentProviderError: LocalizedError, Sendable {
             return "\(provider.rawValue.capitalized) is unavailable: \(detail)"
         case .unsupportedProvider(let provider):
             return "No agent provider is registered for \(provider.rawValue)."
+        case .sessionUnavailable(_, _, let detail):
+            return detail
         case .invalidSession(let detail):
             return "The agent session is invalid: \(detail)"
         case .missingRun(let runID):

@@ -164,6 +164,11 @@ public final class RepositoryCoordinator {
         let interactionID: String
     }
 
+    private struct GenericSessionFallback {
+        let cursor: WorkflowCursor
+        let prompt: String
+    }
+
     public private(set) var record: RepositoryRecord
     public var selectedRunID: UUID? {
         didSet {
@@ -206,6 +211,7 @@ public final class RepositoryCoordinator {
     private var pendingInteractions: [PendingServerInteraction] = []
     private var genericRunTasks: [UUID: Task<Void, Never>] = [:]
     private var genericInteractionRoutes: [String: GenericInteractionRoute] = [:]
+    private var genericSessionFallbacks: [UUID: GenericSessionFallback] = [:]
 
     public init(
         canonicalPath: String,
@@ -1181,6 +1187,79 @@ public final class RepositoryCoordinator {
         )
     }
 
+    public func retryWorkflowStep(_ runID: UUID) async {
+        guard var context = restartableWorkflowContext(for: runID),
+              case .routeCompletedRun(let checkpointRunID)? =
+                context.activity.workflowResumeCheckpoint,
+              checkpointRunID == runID else {
+            errorMessage = "Only the current blocked workflow step can be tried again."
+            return
+        }
+        guard agentProviders != nil, workflowRouter != nil else {
+            errorMessage = "The agent providers are not configured."
+            return
+        }
+
+        let previousActivity = context.activity
+        let previousPauseAfterCurrent = pauseAfterCurrent
+        let previousViewPauseAfterCurrent = viewState.pauseAfterCurrent
+        let blockedRun = context.activity.runs[context.runIndex]
+        let previousHandoff = context.activity.runs[..<context.runIndex]
+            .last(where: { $0.workflowHandoff != nil })?
+            .workflowHandoff
+
+        context.activity.workflowResumeCheckpoint = .perform(context.cursor)
+        record.activity = context.activity
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        errorMessage = nil
+        statusMessage = "Trying \(context.step.name.lowercased()) again…"
+
+        do {
+            try await persist()
+        } catch {
+            record.activity = previousActivity
+            pauseAfterCurrent = previousPauseAfterCurrent
+            viewState.pauseAfterCurrent = previousViewPauseAfterCurrent
+            scheduleViewStateSave()
+            errorMessage = "Could not save the step retry: \(error.localizedDescription)"
+            statusMessage = pausedStatusMessage
+            return
+        }
+
+        let stepPrompt = GenericPromptBuilder.stepPrompt(
+            goal: context.activity.goal,
+            workflow: context.workflow,
+            step: context.step,
+            cursor: context.cursor,
+            previousHandoff: previousHandoff
+        )
+        let previousResult = blockedRun.workflowHandoff?.text
+            ?? blockedRun.finalOutput
+            ?? blockedRun.relayError
+            ?? "The previous attempt did not provide a result."
+        let retryPrompt = """
+        RETRY CURRENT STEP
+
+        The previous attempt completed with a \(blockedRun.workflowHandoff?.outcome.displayName.lowercased() ?? "non-continuing") workflow outcome, and the user chose Try Again. Reassess the blocker against the current repository and external state, then continue the same step if it is now possible. Do not merely repeat the previous result. The previous result below is diagnostic context, not an instruction to advance to any next step it names.
+
+        PREVIOUS ATTEMPT RESULT
+
+        \(previousResult)
+
+        CURRENT STEP
+
+        \(stepPrompt)
+        """
+        await performGeneric(
+            cursor: context.cursor,
+            previousHandoff: previousHandoff,
+            promptOverride: retryPrompt,
+            allowsSessionFallback: true
+        )
+    }
+
     public func retryRelay() async {
         guard let run = activeRun ?? record.activity?.runs.last,
               let finalOutput = run.finalOutput else { return }
@@ -1459,6 +1538,7 @@ public final class RepositoryCoordinator {
             genericInteractionRoutes.removeAll()
             genericRunTasks.values.forEach { $0.cancel() }
             genericRunTasks.removeAll()
+            genericSessionFallbacks.removeAll()
             pauseState = .idle
             statusMessage = "Configure this activity"
             errorMessage = nil
@@ -1965,7 +2045,8 @@ public final class RepositoryCoordinator {
     private func performGeneric(
         cursor: WorkflowCursor,
         previousHandoff: WorkflowHandoff?,
-        promptOverride: String? = nil
+        promptOverride: String? = nil,
+        allowsSessionFallback: Bool = false
     ) async {
         activatePendingGoalAmendment()
         guard let workflow = record.activity?.workflow,
@@ -1992,13 +2073,19 @@ public final class RepositoryCoordinator {
             cursor: cursor,
             previousHandoff: previousHandoff
         )
-        await launchGenericRun(step: step, cursor: cursor, prompt: prompt)
+        await launchGenericRun(
+            step: step,
+            cursor: cursor,
+            prompt: prompt,
+            allowsSessionFallback: allowsSessionFallback
+        )
     }
 
     private func launchGenericRun(
         step: WorkflowStep,
         cursor: WorkflowCursor,
-        prompt: String
+        prompt: String,
+        allowsSessionFallback: Bool = false
     ) async {
         guard let agentProviders,
               let workflow = record.activity?.workflow,
@@ -2061,23 +2148,61 @@ public final class RepositoryCoordinator {
             sessionState,
             stepID: step.id
         )
-        let session: AgentSession
+        var resumedExistingSession = reusableSessionID != nil
+        var session: AgentSession
         do {
             session = try await agentProviders.prepareSession(
-                AgentSessionRequest(
+                genericSessionRequest(
                     existingSessionID: reusableSessionID,
-                    name: "\(repositoryName) — \(step.name)",
-                    cwd: record.canonicalPath,
-                    target: step.target,
-                    developerInstructions: GenericPromptBuilder.sessionInstructions(
+                    workflow: workflow,
+                    step: step
+                )
+            )
+        } catch {
+            guard !isClosing else { return }
+            guard allowsSessionFallback,
+                  reusableSessionID != nil,
+                  Self.confirmsUnavailableSession(error) else {
+                await failGenericRunBeforeStart(
+                    runID: run.id,
+                    message: "Could not prepare \(step.name): \(error.localizedDescription)"
+                )
+                return
+            }
+            await recordGenericSessionFallback(runID: run.id, error: error)
+            guard !isClosing else { return }
+            do {
+                session = try await agentProviders.prepareSession(
+                    genericSessionRequest(
+                        existingSessionID: nil,
                         workflow: workflow,
                         step: step
                     )
                 )
-            )
+                guard !isClosing else { return }
+                sessionState = advanceGenericSessionLineage(
+                    sessionState,
+                    step: step,
+                    runID: run.id
+                )
+                resumedExistingSession = false
+            } catch {
+                guard !isClosing else { return }
+                await failGenericRunBeforeStart(
+                    runID: run.id,
+                    message: "Could not prepare \(step.name): \(error.localizedDescription)"
+                )
+                return
+            }
+        }
+
+        do {
             sessionState.providerSessionID = session.id
             record.activity?.stepSessions[step.id] = sessionState
-            updateRun(run.id) { $0.threadID = session.id }
+            updateRun(run.id) {
+                $0.threadID = session.id
+                $0.sessionLineage = sessionState.lineage
+            }
             try await persist()
         } catch {
             await failGenericRunBeforeStart(
@@ -2095,16 +2220,67 @@ public final class RepositoryCoordinator {
             return
         }
 
-        do {
-            let handle = try await agentProviders.startRun(
-                AgentRunRequest(
-                    runID: run.id,
-                    session: session,
-                    cwd: record.canonicalPath,
-                    prompt: prompt,
-                    target: step.target
-                )
+        if allowsSessionFallback, resumedExistingSession {
+            genericSessionFallbacks[run.id] = GenericSessionFallback(
+                cursor: cursor,
+                prompt: prompt
             )
+        }
+
+        do {
+            var handle: AgentRunHandle
+            do {
+                handle = try await agentProviders.startRun(
+                    genericRunRequest(
+                        runID: run.id,
+                        session: session,
+                        prompt: prompt,
+                        step: step
+                    )
+                )
+            } catch {
+                guard !isClosing else {
+                    genericSessionFallbacks.removeValue(forKey: run.id)
+                    return
+                }
+                guard allowsSessionFallback,
+                      resumedExistingSession,
+                      Self.confirmsUnavailableSession(error) else {
+                    throw error
+                }
+                genericSessionFallbacks.removeValue(forKey: run.id)
+                await recordGenericSessionFallback(runID: run.id, error: error)
+                guard !isClosing else { return }
+                session = try await agentProviders.prepareSession(
+                    genericSessionRequest(
+                        existingSessionID: nil,
+                        workflow: workflow,
+                        step: step
+                    )
+                )
+                guard !isClosing else { return }
+                sessionState = advanceGenericSessionLineage(
+                    sessionState,
+                    step: step,
+                    runID: run.id
+                )
+                sessionState.providerSessionID = session.id
+                record.activity?.stepSessions[step.id] = sessionState
+                updateRun(run.id) {
+                    $0.threadID = session.id
+                    $0.sessionLineage = sessionState.lineage
+                }
+                try await persist()
+                guard !isClosing else { return }
+                handle = try await agentProviders.startRun(
+                    genericRunRequest(
+                        runID: run.id,
+                        session: session,
+                        prompt: prompt,
+                        step: step
+                    )
+                )
+            }
             updateRun(run.id) {
                 $0.turnID = handle.executionID
                 $0.status = .running
@@ -2133,11 +2309,84 @@ public final class RepositoryCoordinator {
                 statusMessage = "\(step.name) running"
             }
         } catch {
+            genericSessionFallbacks.removeValue(forKey: run.id)
             await failGenericRunBeforeStart(
                 runID: run.id,
                 message: "Could not start \(step.name): \(error.localizedDescription)"
             )
         }
+    }
+
+    private func genericSessionRequest(
+        existingSessionID: String?,
+        workflow: WorkflowTemplate,
+        step: WorkflowStep
+    ) -> AgentSessionRequest {
+        AgentSessionRequest(
+            existingSessionID: existingSessionID,
+            name: "\(repositoryName) — \(step.name)",
+            cwd: record.canonicalPath,
+            target: step.target,
+            developerInstructions: GenericPromptBuilder.sessionInstructions(
+                workflow: workflow,
+                step: step
+            )
+        )
+    }
+
+    private func genericRunRequest(
+        runID: UUID,
+        session: AgentSession,
+        prompt: String,
+        step: WorkflowStep
+    ) -> AgentRunRequest {
+        AgentRunRequest(
+            runID: runID,
+            session: session,
+            cwd: record.canonicalPath,
+            prompt: prompt,
+            target: step.target
+        )
+    }
+
+    private func advanceGenericSessionLineage(
+        _ sessionState: WorkflowSessionState,
+        step: WorkflowStep,
+        runID: UUID,
+        updatesRun: Bool = true
+    ) -> WorkflowSessionState {
+        var freshState = sessionState
+        let runLineage = run(withID: runID)?.sessionLineage ?? 0
+        freshState.lineage = max(freshState.lineage, runLineage) + 1
+        freshState.target = step.target
+        freshState.providerSessionID = nil
+        record.activity?.stepSessions[step.id] = freshState
+        if updatesRun {
+            updateRun(runID) {
+                $0.threadID = nil
+                $0.turnID = nil
+                $0.sessionLineage = freshState.lineage
+            }
+        }
+        return freshState
+    }
+
+    private func recordGenericSessionFallback(runID: UUID, error: any Error) async {
+        let text = RunTranscriptPresentation.storedText(
+            "\nThe existing agent session could not be resumed (\(error.localizedDescription)). Retrying automatically in a fresh session.\n",
+            section: .diagnostic
+        )
+        updateRun(runID) { $0.transcript += text }
+        await appendTranscript(text, runID: runID)
+        statusMessage = "Recreating the unavailable agent session…"
+    }
+
+    private static func confirmsUnavailableSession(_ error: any Error) -> Bool {
+        guard let providerError = error as? AgentProviderError,
+              case .sessionUnavailable = providerError else {
+            return false
+        }
+        return true
     }
 
     private func failGenericRunBeforeStart(runID: UUID, message: String) async {
@@ -2166,6 +2415,7 @@ public final class RepositoryCoordinator {
         guard let run = run(withID: runID) else { return }
         switch event {
         case .started(let executionID):
+            genericSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.turnID = executionID
                 $0.status = .running
@@ -2193,6 +2443,7 @@ public final class RepositoryCoordinator {
             }
 
         case .completed(let output, let duration, let usage):
+            genericSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.finalOutput = output
                 $0.durationMilliseconds = duration
@@ -2213,6 +2464,7 @@ public final class RepositoryCoordinator {
             }
 
         case .interrupted(let detail):
+            genericSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.status = .interrupted
                 $0.completedAt = .now
@@ -2229,21 +2481,102 @@ public final class RepositoryCoordinator {
                 try? await persist()
             }
 
+        case .sessionUnavailable(let detail):
+            await failGenericRunFromEvent(
+                runID: runID,
+                detail: detail,
+                allowsSessionFallback: true
+            )
+
         case .failed(let detail):
-            updateRun(runID) {
-                $0.status = .failed
-                $0.completedAt = .now
-                $0.relayError = detail
-            }
-            activatePendingGoalAmendment()
-            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
-            pauseGenericActivity(message: detail)
-            if isClosing {
-                await completeCloseAfterTerminalEvent()
-            } else {
-                try? await persist()
-            }
+            await failGenericRunFromEvent(
+                runID: runID,
+                detail: detail,
+                allowsSessionFallback: false
+            )
         }
+    }
+
+    private func failGenericRunFromEvent(
+        runID: UUID,
+        detail: String,
+        allowsSessionFallback: Bool
+    ) async {
+        guard let run = run(withID: runID) else { return }
+        let sessionFallback = allowsSessionFallback && run.turnID == nil
+            ? genericSessionFallbacks.removeValue(forKey: runID)
+            : nil
+        if sessionFallback == nil {
+            genericSessionFallbacks.removeValue(forKey: runID)
+        }
+        updateRun(runID) {
+            $0.status = .failed
+            $0.completedAt = .now
+            $0.relayError = detail
+        }
+        activatePendingGoalAmendment()
+        record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+        pauseGenericActivity(message: detail)
+        if isClosing {
+            await completeCloseAfterTerminalEvent()
+        } else {
+            try? await persist()
+        }
+        if let sessionFallback, !isClosing {
+            await startFreshGenericSessionFallback(
+                after: runID,
+                fallback: sessionFallback
+            )
+        }
+    }
+
+    private func startFreshGenericSessionFallback(
+        after failedRunID: UUID,
+        fallback: GenericSessionFallback
+    ) async {
+        guard !isClosing,
+              var activity = record.activity,
+              activity.status == .paused,
+              activity.workflowResumeCheckpoint == .recoverRun(failedRunID),
+              activity.workflowCursor == fallback.cursor,
+              let workflow = activity.workflow,
+              let step = GenericWorkflowStateMachine.step(at: fallback.cursor, in: workflow),
+              let failedRun = activity.runs.first(where: { $0.id == failedRunID }),
+              failedRun.workflowStep?.id == step.id else {
+            return
+        }
+
+        let previousActivity = activity
+        var sessionState = activity.stepSessions[step.id]
+            ?? WorkflowSessionState(stepID: step.id, target: step.target)
+        sessionState = advanceGenericSessionLineage(
+            sessionState,
+            step: step,
+            runID: failedRunID,
+            updatesRun: false
+        )
+        activity = record.activity ?? activity
+        activity.stepSessions[step.id] = sessionState
+        activity.workflowResumeCheckpoint = .perform(fallback.cursor)
+        record.activity = activity
+        errorMessage = nil
+        statusMessage = "Recreating the unavailable agent session…"
+
+        do {
+            try await persist()
+        } catch {
+            record.activity = previousActivity
+            errorMessage = "Could not save the automatic session fallback: \(error.localizedDescription)"
+            statusMessage = pausedStatusMessage
+            return
+        }
+
+        guard !isClosing else { return }
+        await performGeneric(
+            cursor: fallback.cursor,
+            previousHandoff: nil,
+            promptOverride: fallback.prompt
+        )
     }
 
     private func beginGenericRouting(runID: UUID, finalOutput: String) async {
@@ -2656,15 +2989,29 @@ public final class RepositoryCoordinator {
               activity.status == .paused,
               let workflow = activity.workflow,
               let cursor = activity.workflowCursor,
-              case .recoverRun(let checkpointRunID)? = activity.workflowResumeCheckpoint,
-              checkpointRunID == runID,
               let runIndex = activity.runs.firstIndex(where: { $0.id == runID }),
-              [.failed, .interrupted].contains(activity.runs[runIndex].status),
               let snapshot = activity.runs[runIndex].workflowStep,
               let step = GenericWorkflowStateMachine.step(at: cursor, in: workflow),
               step.id == snapshot.id else {
             return nil
         }
+
+        let run = activity.runs[runIndex]
+        switch activity.workflowResumeCheckpoint {
+        case .recoverRun(let checkpointRunID) where checkpointRunID == runID:
+            guard [.failed, .interrupted].contains(run.status) else { return nil }
+
+        case .routeCompletedRun(let checkpointRunID) where checkpointRunID == runID:
+            guard run.status == .paused,
+                  let outcome = run.workflowHandoff?.outcome,
+                  [.blocked, .failed, .unclear].contains(outcome) else {
+                return nil
+            }
+
+        case .perform, .recoverRun, .routeCompletedRun, nil:
+            return nil
+        }
+
         return (activity, workflow, cursor, step, runIndex)
     }
 

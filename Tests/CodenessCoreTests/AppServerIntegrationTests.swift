@@ -133,6 +133,40 @@ struct AppServerIntegrationTests {
     }
 
     @Test
+    func codexProviderClassifiesConfirmedMissingThreadsAsUnavailableSessions() async throws {
+        let fixture = try FakeAppServerFixture(rejectsResumes: true)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        let provider = CodexAgentProvider(appServer: client)
+        try await client.start(configuration: fixture.configuration)
+        let target = AgentTarget(
+            providerID: .codex,
+            model: "gpt-5.6-sol"
+        )
+
+        var unavailableSession: (provider: AgentProviderID, sessionID: String)?
+        do {
+            _ = try await provider.prepareSession(
+                AgentSessionRequest(
+                    existingSessionID: "missing-thread",
+                    name: "Missing provider fixture",
+                    cwd: "/tmp/repository",
+                    target: target,
+                    developerInstructions: "Continue the workflow."
+                )
+            )
+        } catch let error as AgentProviderError {
+            if case .sessionUnavailable(let provider, let sessionID, _) = error {
+                unavailableSession = (provider, sessionID)
+            }
+        }
+
+        #expect(unavailableSession?.provider == .codex)
+        #expect(unavailableSession?.sessionID == "missing-thread")
+        await client.shutdown()
+    }
+
+    @Test
     func codexProviderAutomaticallyApprovesTaggedMCPToolElicitations() async throws {
         let fixture = try MCPApprovalAppServerFixture()
         defer { fixture.remove() }
@@ -875,17 +909,19 @@ private struct AcceptingHandoffConfigurationValidator: HandoffConfigurationValid
 
 private struct FakeAppServerFixture: Sendable {
     let scriptURL: URL
+    let rejectsResumes: Bool
 
     var configuration: CodexLaunchConfiguration {
         CodexLaunchConfiguration(
             executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-            arguments: [scriptURL.path]
+            arguments: [scriptURL.path] + (rejectsResumes ? ["--reject-resume"] : [])
         )
     }
 
-    init() throws {
+    init(rejectsResumes: Bool = false) throws {
         scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("codeness-fake-app-server-\(UUID().uuidString).py")
+        self.rejectsResumes = rejectsResumes
         try Data(Self.script.utf8).write(to: scriptURL, options: .atomic)
     }
 
@@ -897,6 +933,7 @@ private struct FakeAppServerFixture: Sendable {
 import json
 import sys
 
+reject_resumes = "--reject-resume" in sys.argv[1:]
 thread_count = 0
 turn_count = 0
 outputs = [
@@ -924,7 +961,10 @@ for line in sys.stdin:
         thread_count += 1
         emit({"id": identifier, "result": {"thread": {"id": "thread-" + str(thread_count)}}})
     elif method == "thread/resume":
-        emit({"id": identifier, "result": {"thread": {"id": message["params"]["threadId"]}}})
+        if reject_resumes:
+            emit({"id": identifier, "error": {"code": -32600, "message": "no rollout found for thread id " + message["params"]["threadId"]}})
+        else:
+            emit({"id": identifier, "result": {"thread": {"id": message["params"]["threadId"]}}})
     elif method == "thread/name/set":
         emit({"id": identifier, "result": {}})
     elif method == "turn/start":

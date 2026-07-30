@@ -232,6 +232,44 @@ struct ClaudeAgentProviderTests {
         await provider.shutdown()
     }
 
+    @Test
+    func reportsConfirmedMissingResumedSessionsBeforeStarted() async throws {
+        let fixture = try ClaudeCLIFixture(missingOnResume: true)
+        defer { fixture.remove() }
+        let provider = ClaudeAgentProvider(
+            executableURL: fixture.executableURL,
+            environment: fixture.environment
+        )
+        let target = AgentTarget(providerID: .claude, model: "sonnet")
+        let session = try await provider.prepareSession(
+            AgentSessionRequest(
+                existingSessionID: "missing-claude-session",
+                name: "Missing Claude fixture",
+                cwd: fixture.directory.path,
+                target: target,
+                developerInstructions: "Continue the workflow."
+            )
+        )
+        let events = try await run(
+            provider: provider,
+            session: session,
+            target: target,
+            cwd: fixture.directory.path
+        )
+
+        #expect(events.contains {
+            if case .sessionUnavailable(let detail) = $0 {
+                return detail.contains("No conversation found with session ID")
+            }
+            return false
+        })
+        #expect(!events.contains {
+            if case .started = $0 { return true }
+            return false
+        })
+        await provider.shutdown()
+    }
+
     private func run(
         provider: ClaudeAgentProvider,
         session: AgentSession,
@@ -284,19 +322,24 @@ private struct ClaudeCLIFixture {
     let directory: URL
     let executableURL: URL
     let logURL: URL
+    let missingOnResume: Bool
 
     var environment: [String: String] {
         var environment = CodexExecutableLocator.processEnvironment()
         environment["CLAUDE_FIXTURE_LOG"] = logURL.path
+        if missingOnResume {
+            environment["CLAUDE_FIXTURE_MISSING_ON_RESUME"] = "1"
+        }
         return environment
     }
 
-    init() throws {
+    init(missingOnResume: Bool = false) throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "codeness-claude-fixture-\(UUID().uuidString)",
                 isDirectory: true
             )
+        self.missingOnResume = missingOnResume
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
@@ -388,6 +431,16 @@ for line in sys.stdin:
             })
     elif value.get("type") == "user":
         session_id = value.get("session_id", "")
+        if is_resume and os.environ.get("CLAUDE_FIXTURE_MISSING_ON_RESUME") == "1":
+            emit({
+                "type": "result",
+                "subtype": "error",
+                "is_error": True,
+                "errors": [
+                    "No conversation found with session ID: " + session_id
+                ]
+            })
+            break
         emit({"type": "system", "subtype": "init", "session_id": session_id})
         emit({"type": "system", "subtype": "status", "status": "requesting"})
         if is_utility:

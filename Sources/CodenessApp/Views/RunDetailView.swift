@@ -440,9 +440,20 @@ private struct RunRecoveryView: View {
 
             case .workflowPaused:
                 Button("Try Again") {
-                    Task { await coordinator.retryRelay() }
+                    Task {
+                        if presentation.isGenericWorkflow {
+                            await coordinator.retryWorkflowStep(run.id)
+                        } else {
+                            await coordinator.retryRelay()
+                        }
+                    }
                 }
                 .buttonStyle(.borderedProminent)
+                .help(
+                    presentation.isGenericWorkflow
+                        ? "Rerun this step in its existing agent session, falling back to a fresh session if needed"
+                        : "Prepare the handoff again"
+                )
                 Button("Continue Anyway…") {
                     showsManualHandoff = true
                 }

@@ -28,6 +28,8 @@ public actor ClaudeAgentProvider: AgentProviding {
         let error: Pipe
         let continuation: AsyncStream<AgentEvent>.Continuation
         let startedAt: ContinuousClock.Instant
+        let resumedSession: Bool
+        var didStart: Bool
         var outputReaderTask: Task<Void, Never>?
         var errorReaderTask: Task<Void, Never>?
         var outputBuffer: Data
@@ -217,6 +219,8 @@ public actor ClaudeAgentProvider: AgentProviding {
                 return AgentUtilityResult(output: output, tokenUsage: usage)
             case .failed(let detail):
                 throw AgentProviderError.invalidResponse(detail)
+            case .sessionUnavailable(let detail):
+                throw AgentProviderError.invalidResponse(detail)
             case .interrupted(let detail):
                 throw AgentProviderError.invalidResponse(
                     detail ?? "The Claude coordinator run was interrupted."
@@ -286,6 +290,8 @@ public actor ClaudeAgentProvider: AgentProviding {
             error: error,
             continuation: pair.continuation,
             startedAt: ContinuousClock().now,
+            resumedSession: session.hasStarted,
+            didStart: false,
             outputReaderTask: nil,
             errorReaderTask: nil,
             outputBuffer: Data(),
@@ -468,6 +474,7 @@ public actor ClaudeAgentProvider: AgentProviding {
         case "system":
             if message["subtype"]?.stringValue == "init" {
                 let executionID = message["session_id"]?.stringValue ?? run.sessionID
+                run.didStart = true
                 run.continuation.yield(.started(executionID: executionID))
             }
             // Claude emits transient status messages (currently "requesting")
@@ -593,6 +600,12 @@ public actor ClaudeAgentProvider: AgentProviding {
                 : message["result"]?.stringValue
             if run.interruptRequested {
                 run.continuation.yield(.interrupted(detail))
+            } else if run.resumedSession,
+                      !run.didStart,
+                      Self.confirmsMissingSession(detail ?? "") {
+                run.continuation.yield(
+                    .sessionUnavailable(detail ?? "The Claude session is unavailable.")
+                )
             } else {
                 run.continuation.yield(.failed(detail ?? "Claude returned an error result."))
             }
@@ -662,6 +675,12 @@ public actor ClaudeAgentProvider: AgentProviding {
             let detail = run.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
             if run.interruptRequested {
                 run.continuation.yield(.interrupted(detail.isEmpty ? nil : detail))
+            } else if run.resumedSession,
+                      !run.didStart,
+                      Self.confirmsMissingSession(detail) {
+                run.continuation.yield(
+                    .sessionUnavailable(detail)
+                )
             } else {
                 run.continuation.yield(
                     .failed(
@@ -676,6 +695,12 @@ public actor ClaudeAgentProvider: AgentProviding {
             run.continuation.finish()
         }
         cleanup(runID: runID)
+    }
+
+    private static func confirmsMissingSession(_ detail: String) -> Bool {
+        detail.localizedCaseInsensitiveContains(
+            "no conversation found with session id"
+        )
     }
 
     private func cleanup(runID: UUID) {
