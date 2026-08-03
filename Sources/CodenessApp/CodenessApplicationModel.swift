@@ -336,6 +336,39 @@ final class CodenessApplicationModel {
         return viewState.windowFrame
     }
 
+    func storedWorkspacePreview(canonicalPath: String) async throws -> RepositoryRecord? {
+        try await store.storedWorkspacePreview(canonicalPath: canonicalPath)
+    }
+
+    func inspectWorkspaceTransfer(at sourceURL: URL) async throws -> WorkspaceTransferPreview {
+        try await store.inspectWorkspaceTransfer(at: sourceURL)
+    }
+
+    @discardableResult
+    func exportWorkspace(canonicalPath: String, to destinationURL: URL) async throws
+        -> WorkspaceTransferManifest {
+        try await store.exportWorkspace(
+            canonicalPath: canonicalPath,
+            sourceAppVersion: WorkspaceTransferBundleInfo.version,
+            sourceAppBuild: WorkspaceTransferBundleInfo.build,
+            to: destinationURL
+        )
+    }
+
+    func importWorkspace(
+        from sourceURL: URL,
+        to canonicalPath: String,
+        replacingExisting: Bool
+    ) async throws -> WorkspaceImportResult {
+        try await store.importWorkspace(
+            from: sourceURL,
+            to: canonicalPath,
+            sourceAppVersion: WorkspaceTransferBundleInfo.version,
+            sourceAppBuild: WorkspaceTransferBundleInfo.build,
+            replacingExisting: replacingExisting
+        )
+    }
+
     func releaseCoordinator(_ coordinator: RepositoryCoordinator) {
         let path = coordinator.record.canonicalPath
         guard coordinators[path] === coordinator else { return }

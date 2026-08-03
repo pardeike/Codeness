@@ -855,6 +855,7 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
     public var activity: ActivityRecord?
     public let createdAt: Date
     public var updatedAt: Date
+    var requiresFreshProviderSessions: Bool
     private var legacyTasks: [LegacyTaskRecord]
 
     public init(
@@ -877,6 +878,7 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
         self.activity = activity
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        requiresFreshProviderSessions = false
         legacyTasks = []
     }
 
@@ -891,6 +893,7 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
         case tasks
         case createdAt
         case updatedAt
+        case requiresFreshProviderSessions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -906,6 +909,10 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
         )
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        requiresFreshProviderSessions = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresFreshProviderSessions
+        ) ?? false
         legacyTasks = try container.decodeIfPresent([LegacyTaskRecord].self, forKey: .tasks) ?? []
         activity = try container.decodeIfPresent(ActivityRecord.self, forKey: .activity)
             ?? legacyTasks.last.map(ActivityRecord.init(legacy:))
@@ -925,6 +932,47 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
         }
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
+        if requiresFreshProviderSessions {
+            try container.encode(true, forKey: .requiresFreshProviderSessions)
+        }
+    }
+
+    func relocatedForImport(to canonicalPath: String) -> RepositoryRecord {
+        var relocatedActivity = activity
+        if var importedActivity = relocatedActivity {
+            if importedActivity.status == .running {
+                importedActivity.status = .paused
+            }
+            if importedActivity.workflow != nil {
+                for stepID in importedActivity.stepSessions.keys {
+                    guard var session = importedActivity.stepSessions[stepID] else { continue }
+                    if session.providerSessionID != nil {
+                        session.lineage += 1
+                    }
+                    session.providerSessionID = nil
+                    importedActivity.stepSessions[stepID] = session
+                }
+            }
+            relocatedActivity = importedActivity
+        }
+
+        var relocated = RepositoryRecord(
+            id: id,
+            canonicalPath: canonicalPath,
+            implementerThreadID: nil,
+            reviewerThreadID: nil,
+            settings: settings,
+            activityDraft: activityDraft,
+            activity: relocatedActivity,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+        relocated.legacyTasks = legacyTasks
+        relocated.requiresFreshProviderSessions = relocatedActivity?.workflow == nil
+            && relocatedActivity.map {
+                $0.status == .running || $0.status == .paused
+            } == true
+        return relocated
     }
 }
 

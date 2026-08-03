@@ -60,6 +60,13 @@ private struct RepositoryWindowCommands: Commands {
             .help("Open a recently used workspace")
 
             Divider()
+            Button("Import Workspace…") {
+                appDelegate.importWorkspace()
+            }
+            .disabled(state.isWorkspaceTransferInProgress)
+            .help("Open a portable Codeness workspace from another Mac")
+
+            Divider()
             Button("Close") {
                 NSApp.keyWindow?.performClose(nil)
             }
@@ -73,6 +80,16 @@ private struct RepositoryWindowCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: .command)
             .help("Persist the active repository's Codeness state")
+
+            Divider()
+            Button("Export Workspace…") {
+                appDelegate.exportCurrentWorkspace()
+            }
+            .disabled(
+                state.currentCoordinator == nil
+                    || state.isWorkspaceTransferInProgress
+            )
+            .help("Create a portable copy of the active workspace's Codeness history and checkpoints")
         }
 
         CommandGroup(replacing: .printItem) {
