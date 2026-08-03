@@ -406,6 +406,15 @@ struct GenericCoordinatorIntegrationTests {
         updated.coordinator.instructions = "USE THE EDITED HANDOFF POLICY"
         #expect(await coordinator.updateWorkflowPreferences(updated))
         #expect(coordinator.record.activity?.stepSessions["work"]?.lineage == 1)
+        coordinator.selectedRunID = nil
+        coordinator.updateTranscriptViewport(
+            for: failedRun.id,
+            state: TranscriptViewportState(
+                topCharacterOffset: 100,
+                verticalOffset: 3,
+                followsOutput: false
+            )
+        )
 
         await coordinator.restartWorkflowStep(failedRun.id)
         try await waitUntil {
@@ -420,6 +429,8 @@ struct GenericCoordinatorIntegrationTests {
         #expect(activity.runs[1].prompt.contains("FRESH STEP RESTART"))
         #expect(activity.runs[1].prompt.contains("current repository state before editing"))
         #expect(activity.runs[1].prompt.contains("USE THE CURRENT PLANNED WORK"))
+        #expect(coordinator.selectedRunID == activity.runs[1].id)
+        #expect(coordinator.transcriptViewport(for: activity.runs[1].id).followsOutput)
         #expect(activity.stepSessions["work"]?.lineage == 2)
         #expect(!coordinator.canRestartWorkflowStep(failedRun.id))
         #expect(

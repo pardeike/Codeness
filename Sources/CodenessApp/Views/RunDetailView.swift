@@ -109,7 +109,7 @@ struct RunDetailView: View {
                 )
             ),
             initialViewport: coordinator.transcriptViewport(for: run.id),
-            scrollToEndRequest: scrollToEndRequest,
+            scrollToEndRequest: effectiveScrollToEndRequest,
             onViewportChange: { viewport in
                 isAtBottom = viewport.followsOutput
                 coordinator.updateTranscriptViewport(for: run.id, state: viewport)
@@ -117,6 +117,13 @@ struct RunDetailView: View {
         )
         .accessibilityLabel("Run transcript")
         .help("Select or scroll this run transcript; press Command-F to search it")
+    }
+
+    private var effectiveScrollToEndRequest: Int {
+        let activeProgressRequest = coordinator.transcriptFollowRequestRunID == run.id
+            ? coordinator.transcriptFollowRequestRevision
+            : 0
+        return scrollToEndRequest &+ activeProgressRequest
     }
 
     private var header: some View {

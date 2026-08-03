@@ -38,6 +38,33 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func selectingTheLiveRunRestoresTranscriptFollowMode() async throws {
+        let savedRun = run(status: .paused)
+        let harness = try await CoordinatorHarness(
+            record: repositoryRecord(activityStatus: .paused, run: savedRun),
+            viewState: RepositoryViewState(
+                selectedRunID: nil,
+                runSelectionWasSaved: true,
+                transcriptViewports: [
+                    savedRun.id: TranscriptViewportState(
+                        topCharacterOffset: 80,
+                        verticalOffset: 2,
+                        followsOutput: false
+                    )
+                ]
+            )
+        )
+        defer { harness.remove() }
+
+        harness.coordinator.selectLiveRun()
+
+        #expect(harness.coordinator.selectedRunID == savedRun.id)
+        #expect(harness.coordinator.transcriptViewport(for: savedRun.id).followsOutput)
+        #expect(harness.coordinator.transcriptFollowRequestRunID == savedRun.id)
+        #expect(harness.coordinator.transcriptFollowRequestRevision == 1)
+    }
+
+    @Test
     func loadTurnsAnOrphanedRunningPassIntoAPausedRecoveryCheckpoint() async throws {
         let savedRun = run(status: .running)
         let harness = try await CoordinatorHarness(record: repositoryRecord(
@@ -164,24 +191,42 @@ struct RepositoryCoordinatorRecoveryTests {
     @Test
     func routingRecoveryRetriesTheHandoffWithoutReplayingThePass() async throws {
         let router = DelayedBlockedRouter(delay: .milliseconds(10))
+        let savedRun = run(status: .routing, finalOutput: "Completed repository edits")
         let harness = try await CoordinatorHarness(
             record: repositoryRecord(
                 activityStatus: .running,
-                run: run(status: .routing, finalOutput: "Completed repository edits")
+                run: savedRun
             ),
-            router: router
+            router: router,
+            viewState: RepositoryViewState(
+                selectedRunID: nil,
+                runSelectionWasSaved: true,
+                transcriptViewports: [
+                    savedRun.id: TranscriptViewportState(
+                        topCharacterOffset: 120,
+                        verticalOffset: 4,
+                        followsOutput: false
+                    )
+                ]
+            )
         )
         defer { harness.remove() }
 
         #expect(harness.coordinator.record.activity?.status == .paused)
         #expect(harness.coordinator.record.activity?.runs.last?.status == .routing)
         #expect(harness.coordinator.canResume)
+        #expect(harness.coordinator.selectedRunID == nil)
+        #expect(!harness.coordinator.transcriptViewport(for: savedRun.id).followsOutput)
         let routingRunID = try #require(harness.coordinator.record.activity?.runs.last?.id)
         #expect(harness.coordinator.record.activity?.resumeCheckpoint == .routeCompletedRun(routingRunID))
 
         await harness.coordinator.resume()
         await waitUntil { harness.coordinator.record.activity?.runs.last?.relayError != nil }
 
+        #expect(harness.coordinator.selectedRunID == savedRun.id)
+        #expect(harness.coordinator.transcriptViewport(for: savedRun.id).followsOutput)
+        #expect(harness.coordinator.transcriptFollowRequestRunID == savedRun.id)
+        #expect(harness.coordinator.transcriptFollowRequestRevision == 1)
         #expect(await router.callCount == 1)
         #expect(harness.coordinator.record.activity?.runs.count == 1)
         #expect(harness.coordinator.record.activity?.runs.last?.status == .paused)
