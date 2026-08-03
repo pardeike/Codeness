@@ -190,6 +190,8 @@ public final class RepositoryCoordinator {
     public private(set) var viewState = RepositoryViewState()
     public private(set) var isGeneratingWorkOverviewSummary = false
     public private(set) var workOverviewSummaryError: String?
+    public private(set) var transcriptFollowRequestRunID: UUID?
+    public private(set) var transcriptFollowRequestRevision = 0
 
     private let appServer: CodexAppServerClient
     private let router: any HandoffRouting
@@ -608,7 +610,23 @@ public final class RepositoryCoordinator {
     }
 
     public func selectLiveRun() {
-        selectedRunID = liveRunID
+        guard let liveRunID else { return }
+        focusActiveProgress(on: liveRunID)
+    }
+
+    private func focusActiveProgress(on requestedRunID: UUID? = nil) {
+        guard let runID = requestedRunID
+            ?? liveRunID
+            ?? record.activity?.runs.last?.id else { return }
+
+        runIsAtBottom[runID] = true
+        var viewport = viewState.transcriptViewports[runID] ?? TranscriptViewportState()
+        viewport.followsOutput = true
+        viewState.transcriptViewports[runID] = viewport
+        selectedRunID = runID
+        transcriptFollowRequestRunID = runID
+        transcriptFollowRequestRevision &+= 1
+        scheduleViewStateSave()
     }
 
     public func updateScrollPosition(for runID: UUID, isAtBottom: Bool) {
@@ -787,6 +805,7 @@ public final class RepositoryCoordinator {
 
     public func resume() async {
         guard record.activity?.status == .paused else { return }
+        focusActiveProgress()
         if record.activity?.workflow != nil {
             await resumeGeneric()
             return
@@ -857,6 +876,7 @@ public final class RepositoryCoordinator {
     public func interrupt() async {
         if let run = activeRun, let target = run.agentTarget {
             guard let agentProviders else { return }
+            focusActiveProgress(on: run.id)
             do {
                 try await agentProviders.interrupt(providerID: target.providerID, runID: run.id)
                 statusMessage = "Stopping \(run.displayName.lowercased())…"
@@ -868,6 +888,7 @@ public final class RepositoryCoordinator {
             return
         }
         guard let run = activeRun, let threadID = run.threadID, let turnID = run.turnID else { return }
+        focusActiveProgress(on: run.id)
         do {
             try await appServer.interrupt(threadID: threadID, turnID: turnID)
             statusMessage = "Stopping " + run.kind.displayName.lowercased() + "…"
@@ -1011,6 +1032,7 @@ public final class RepositoryCoordinator {
         guard let run = activeRun else { return false }
         let cleanMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanMessage.isEmpty else { return false }
+        focusActiveProgress(on: run.id)
         if let target = run.agentTarget {
             guard let agentProviders else { return false }
             do {
@@ -1037,7 +1059,9 @@ public final class RepositoryCoordinator {
 
     public func resolveApproval(_ decision: ApprovalDecision) async {
         guard let interaction = pendingInteraction else { return }
-        if let route = genericRoute(for: interaction.id) {
+        let route = genericRoute(for: interaction.id)
+        focusActiveProgress(on: route?.runID)
+        if let route {
             await resolveGenericInteraction(
                 route,
                 resolution: .decision(decision.value),
@@ -1058,7 +1082,9 @@ public final class RepositoryCoordinator {
 
     public func resolveQuestions(_ answers: [String: [String]]) async {
         guard let interaction = pendingInteraction else { return }
-        if let route = genericRoute(for: interaction.id) {
+        let route = genericRoute(for: interaction.id)
+        focusActiveProgress(on: route?.runID)
+        if let route {
             await resolveGenericInteraction(
                 route,
                 resolution: .answers(answers),
@@ -1081,7 +1107,9 @@ public final class RepositoryCoordinator {
         guard let interaction = pendingInteraction else { return }
         do {
             let value = try JSONDecoder().decode(JSONValue.self, from: Data(resultText.utf8))
-            if let route = genericRoute(for: interaction.id) {
+            let route = genericRoute(for: interaction.id)
+            focusActiveProgress(on: route?.runID)
+            if let route {
                 await resolveGenericInteraction(
                     route,
                     resolution: .raw(value),
@@ -1098,7 +1126,9 @@ public final class RepositoryCoordinator {
 
     public func cancelInteraction() async {
         guard let interaction = pendingInteraction else { return }
-        if let route = genericRoute(for: interaction.id) {
+        let route = genericRoute(for: interaction.id)
+        focusActiveProgress(on: route?.runID)
+        if let route {
             await resolveGenericInteraction(
                 route,
                 resolution: .cancel,
@@ -1123,6 +1153,7 @@ public final class RepositoryCoordinator {
             errorMessage = "The agent providers are not configured."
             return
         }
+        focusActiveProgress(on: runID)
 
         let previousActivity = context.activity
         let previousPauseAfterCurrent = pauseAfterCurrent
@@ -1201,6 +1232,7 @@ public final class RepositoryCoordinator {
             errorMessage = "The agent providers are not configured."
             return
         }
+        focusActiveProgress(on: runID)
 
         let previousActivity = context.activity
         let previousPauseAfterCurrent = pauseAfterCurrent
@@ -1265,6 +1297,7 @@ public final class RepositoryCoordinator {
     public func retryRelay() async {
         guard let run = activeRun ?? record.activity?.runs.last,
               let finalOutput = run.finalOutput else { return }
+        focusActiveProgress(on: run.id)
         if record.activity?.workflow != nil {
             record.activity?.status = .running
             record.activity?.workflowResumeCheckpoint = nil
@@ -1293,6 +1326,7 @@ public final class RepositoryCoordinator {
             await useWorkflowHandoff(text: text, outcome: outcome, label: label)
             return
         }
+        focusActiveProgress(on: run.id)
         let envelope = HandoffEnvelope(
             handoffText: text,
             sourceDisposition: disposition,
@@ -1321,6 +1355,7 @@ public final class RepositoryCoordinator {
             errorMessage = "The handoff must contain information for the next step."
             return
         }
+        focusActiveProgress(on: run.id)
         let handoff = WorkflowHandoff(
             text: cleanText,
             outcome: outcome,
