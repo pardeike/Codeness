@@ -1,7 +1,16 @@
 import Foundation
 
 enum WorkSummaryPrompt {
-    static let cacheVersion = "compact-markdown-v1"
+    static let cacheVersion = "bounded-compact-markdown-v2"
+
+    // Codex App Server rejects a single text input above 1,048,576 characters.
+    // Leave room for JSON-RPC framing and future prompt instructions.
+    static let maximumPromptCharacters = 900_000
+    static let maximumUserPromptCharacters = 750_000
+
+    private static let maximumCoordinatorInstructionsCharacters = 32_000
+    private static let maximumGoalCharacters = 16_000
+    private static let maximumHandoffTextCharacters = 1_500
 
     static let system = """
     Write the “Work so far” section of a software-workflow dashboard. Use only the supplied goal and handoffs. Reconcile older statements with later handoffs and report the net current state instead of retelling the chronology. Do not invent repository facts.
@@ -28,39 +37,95 @@ enum WorkSummaryPrompt {
         ])
     ])
 
-    static func user(_ context: WorkSummaryContext) -> String {
-        let handoffs = context.handoffs.map { handoff in
-            """
-            ### \(handoff.sequence). \(handoff.kind.displayName) — \(handoff.label)
-            Disposition: \(handoff.disposition.displayName)
-
-            \(handoff.text)
-            """
-        }
-        return """
-        GOAL
-
-        \(context.goal)
-
-        HANDOFFS IN CHRONOLOGICAL ORDER
-
-        \(handoffs.joined(separator: "\n\n"))
-        """
+    static func user(
+        _ context: WorkSummaryContext,
+        maximumCharacters: Int = maximumUserPromptCharacters
+    ) -> String {
+        guard maximumCharacters > 0 else { return "" }
+        let scaffold = "GOAL\n\n"
+        let handoffHeading = "\n\nHANDOFFS IN CHRONOLOGICAL ORDER\n\n"
+        let goalBudget = min(
+            maximumGoalCharacters,
+            max(0, maximumCharacters - scaffold.count - handoffHeading.count)
+        )
+        let goal = abbreviated(context.goal, maximumCharacters: goalBudget)
+        let prefix = scaffold + goal + handoffHeading
+        let handoffBudget = max(0, maximumCharacters - prefix.count)
+        let handoffs = formattedHandoffs(
+            context.handoffs,
+            maximumCharacters: handoffBudget
+        )
+        return prefix + handoffs
     }
 
     static func utilityPrompt(
         _ context: WorkSummaryContext,
         coordinatorInstructions: String
     ) -> String {
-        """
+        let coordinatorInstructions = abbreviated(
+            coordinatorInstructions,
+            maximumCharacters: maximumCoordinatorInstructionsCharacters
+        )
+        let prefix = """
         \(coordinatorInstructions)
 
         \(system)
 
         Return the result as the structured object described by the output schema.
 
-        \(user(context))
         """
+        let userBudget = min(
+            maximumUserPromptCharacters,
+            max(0, maximumPromptCharacters - prefix.count)
+        )
+        return prefix + user(context, maximumCharacters: userBudget)
+    }
+
+    private static func formattedHandoffs(
+        _ handoffs: [WorkSummaryHandoff],
+        maximumCharacters: Int
+    ) -> String {
+        guard !handoffs.isEmpty, maximumCharacters > 0 else { return "" }
+
+        let prefixes = handoffs.map { handoff in
+            """
+            ### \(handoff.sequence). \(handoff.kind.displayName) — \(handoff.label)
+            Disposition: \(handoff.disposition.displayName)
+
+            """
+        }
+        let separatorsLength = max(0, handoffs.count - 1) * 2
+        let metadataLength = prefixes.reduce(separatorsLength) { $0 + $1.count }
+        guard metadataLength <= maximumCharacters else {
+            let metadata = prefixes.joined(separator: "\n\n")
+            return abbreviated(metadata, maximumCharacters: maximumCharacters)
+        }
+
+        let textBudget = min(
+            maximumHandoffTextCharacters,
+            (maximumCharacters - metadataLength) / handoffs.count
+        )
+        return zip(prefixes, handoffs).map { prefix, handoff in
+            prefix + abbreviated(handoff.text, maximumCharacters: textBudget)
+        }
+        .joined(separator: "\n\n")
+    }
+
+    private static func abbreviated(_ text: String, maximumCharacters: Int) -> String {
+        guard maximumCharacters > 0 else { return "" }
+        let characterCount = text.count
+        guard characterCount > maximumCharacters else { return text }
+
+        let marker = "\n[… characters omitted …]\n"
+        guard marker.count < maximumCharacters else {
+            return String(text.prefix(maximumCharacters))
+        }
+        let retainedCharacters = maximumCharacters - marker.count
+        let prefixLength = (retainedCharacters + 1) / 2
+        let suffixLength = retainedCharacters / 2
+        return String(text.prefix(prefixLength))
+            + marker
+            + String(text.suffix(suffixLength))
     }
 
     static func decodeUtilityOutput(_ output: String) throws -> String {
