@@ -57,8 +57,28 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard !Self.isRunningUnitTests else { return }
+        let workspaceURLs = urls.filter {
+            $0.pathExtension.caseInsensitiveCompare("codeness") == .orderedSame
+        }
+        guard let workspaceURL = workspaceURLs.first else {
+            applicationModel.applicationError = "Codeness can import .codeness workspace files."
+            return
+        }
+        windowManager?.openWorkspaceTransfer(at: workspaceURL)
+    }
+
     func openRepository() {
         windowManager?.presentRepositoryOpenPanel()
+    }
+
+    func importWorkspace() {
+        windowManager?.presentWorkspaceImportPanel()
+    }
+
+    func exportCurrentWorkspace() {
+        windowManager?.presentWorkspaceExportPanel()
     }
 
     func openRecentRepository(_ url: URL) {

@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 final class RepositoryWindowCommandState {
     fileprivate(set) var recentURLs: [URL] = []
     fileprivate(set) var currentCoordinator: RepositoryCoordinator?
+    fileprivate(set) var isWorkspaceTransferInProgress = false
     private(set) var steerFocusRequest = 0
     private(set) var steerFocusTargetPath: String?
     private(set) var goalAmendmentRequest = 0
@@ -38,6 +39,11 @@ final class RepositoryWindowManager {
     private let commandState: RepositoryWindowCommandState
     private var windowControllers: [String: RepositoryWindowController] = [:]
     private var repositoryOpenPanel: NSOpenPanel?
+    private var workspaceImportPanel: NSOpenPanel?
+    private var workspaceExportPanel: NSSavePanel?
+    private var workspaceLocationPanel: NSOpenPanel?
+    private var workspaceTransferProgressPanel: NSPanel?
+    private weak var workspaceTransferProgressParent: NSWindow?
     private var pendingOpenRequestCount = 0
     private var openRequestCompletionHandlers: [() -> Void] = []
     private var isApplicationTerminating = false
@@ -87,6 +93,342 @@ final class RepositoryWindowManager {
                 }
             }
         }
+    }
+
+    func presentWorkspaceImportPanel() {
+        guard !commandState.isWorkspaceTransferInProgress else { return }
+        guard workspaceImportPanel == nil else {
+            workspaceImportPanel?.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Import Codeness Workspace"
+        openPanel.prompt = "Import"
+        openPanel.message = "Choose a portable Codeness workspace file."
+        openPanel.allowedContentTypes = [.codenessWorkspace]
+        openPanel.canChooseDirectories = false
+        openPanel.canChooseFiles = true
+        openPanel.allowsMultipleSelection = false
+        openPanel.resolvesAliases = true
+        workspaceImportPanel = openPanel
+
+        openPanel.begin { [weak self, weak openPanel] response in
+            guard let self, let openPanel else { return }
+            workspaceImportPanel = nil
+            guard response == .OK, let selectedURL = openPanel.url else { return }
+            openWorkspaceTransfer(at: selectedURL)
+        }
+    }
+
+    func presentWorkspaceExportPanel() {
+        guard !commandState.isWorkspaceTransferInProgress,
+              let controller = currentRepositoryWindowController else { return }
+        guard workspaceExportPanel == nil else {
+            workspaceExportPanel?.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let savePanel = NSSavePanel()
+        savePanel.title = "Export Codeness Workspace"
+        savePanel.prompt = "Export"
+        savePanel.message = "Save a portable snapshot of Codeness history and checkpoints."
+        savePanel.allowedContentTypes = [.codenessWorkspace]
+        savePanel.canCreateDirectories = true
+        savePanel.isExtensionHidden = false
+        savePanel.nameFieldStringValue = controller.coordinator.repositoryName
+            .appendingFileExtensionIfNeeded("codeness")
+        workspaceExportPanel = savePanel
+
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self, weak savePanel] response in
+            guard let self, let savePanel else { return }
+            workspaceExportPanel = nil
+            guard response == .OK, let destinationURL = savePanel.url else { return }
+            beginWorkspaceExport(from: controller, to: destinationURL)
+        }
+        if let parent = controller.window {
+            savePanel.beginSheetModal(for: parent, completionHandler: completion)
+        } else {
+            savePanel.begin(completionHandler: completion)
+        }
+    }
+
+    func openWorkspaceTransfer(at sourceURL: URL) {
+        guard !commandState.isWorkspaceTransferInProgress else {
+            applicationModel.applicationError = "Another workspace import or export is already in progress."
+            return
+        }
+        beginOpenRequest()
+        commandState.isWorkspaceTransferInProgress = true
+        NSApp.activate()
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                commandState.isWorkspaceTransferInProgress = false
+                finishOpenRequest()
+            }
+            do {
+                try await importWorkspaceInteractively(from: sourceURL)
+            } catch is CancellationError {
+                // Cancelling repository selection or replacement is not an error.
+            } catch {
+                presentError(error)
+            }
+        }
+    }
+
+    private var currentRepositoryWindowController: RepositoryWindowController? {
+        NSApp.keyWindow?.windowController as? RepositoryWindowController
+            ?? repositoryWindows.first(where: { $0.window?.isMainWindow == true })
+            ?? (repositoryWindows.count == 1 ? repositoryWindows.first : nil)
+    }
+
+    private func beginWorkspaceExport(
+        from controller: RepositoryWindowController,
+        to destinationURL: URL
+    ) {
+        guard !commandState.isWorkspaceTransferInProgress else { return }
+        commandState.isWorkspaceTransferInProgress = true
+        presentWorkspaceTransferProgress(
+            for: controller.coordinator,
+            title: "Exporting \(controller.coordinator.repositoryName)",
+            message: "Pausing at a coherent checkpoint before creating the portable copy…",
+            parent: controller.window
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                dismissWorkspaceTransferProgress()
+                controller.coordinator.cancelClosePreparation()
+                commandState.isWorkspaceTransferInProgress = false
+            }
+            do {
+                try await exportWorkspace(from: controller, to: destinationURL)
+            } catch {
+                presentError(error)
+            }
+        }
+    }
+
+    @discardableResult
+    func exportWorkspace(
+        from controller: RepositoryWindowController,
+        to destinationURL: URL
+    ) async throws -> WorkspaceTransferManifest {
+        switch await controller.coordinator.prepareForClose(strategy: .graceful) {
+        case .ready:
+            return try await applicationModel.exportWorkspace(
+                canonicalPath: controller.coordinator.record.canonicalPath,
+                to: destinationURL
+            )
+        case .failed(let message):
+            throw RepositoryWorkspaceTransferError.pauseFailed(message)
+        }
+    }
+
+    private func importWorkspaceInteractively(from sourceURL: URL) async throws {
+        let preview = try await applicationModel.inspectWorkspaceTransfer(at: sourceURL)
+        let selectedRepositoryURL: URL
+        if let originalURL = try await existingOriginalRepositoryURL(for: preview) {
+            selectedRepositoryURL = originalURL
+        } else {
+            guard let locatedURL = await locateRepository(for: preview) else {
+                throw CancellationError()
+            }
+            selectedRepositoryURL = try await applicationModel.canonicalWorkspace(for: locatedURL)
+        }
+
+        let canonicalPath = selectedRepositoryURL.path
+        let existingRecord = try await applicationModel.storedWorkspacePreview(
+            canonicalPath: canonicalPath
+        )
+        if let existingRecord {
+            guard await confirmReplacement(
+                archived: preview.record,
+                existing: existingRecord,
+                repositoryURL: selectedRepositoryURL
+            ) else {
+                throw CancellationError()
+            }
+        }
+
+        let existingController = windowControllers[canonicalPath]
+        if let existingController {
+            presentWorkspaceTransferProgress(
+                for: existingController.coordinator,
+                title: "Importing \(preview.manifest.repositoryName)",
+                message: "Pausing the open workspace before replacing its Codeness state…",
+                parent: existingController.window
+            )
+            let preparation = await existingController.coordinator.prepareForClose(
+                strategy: .graceful
+            )
+            dismissWorkspaceTransferProgress()
+            guard case .ready = preparation else {
+                if case .failed(let message) = preparation {
+                    throw RepositoryWorkspaceTransferError.pauseFailed(message)
+                }
+                throw RepositoryWorkspaceTransferError.pauseFailed(
+                    "The open workspace could not be paused."
+                )
+            }
+            existingController.closeAfterWorkspaceTransferPreparation()
+            await Task.yield()
+        }
+
+        let result: WorkspaceImportResult
+        do {
+            result = try await applicationModel.importWorkspace(
+                from: sourceURL,
+                to: canonicalPath,
+                replacingExisting: existingRecord != nil
+            )
+        } catch {
+            if existingController != nil {
+                _ = try? await openRepository(at: selectedRepositoryURL, display: true)
+            }
+            throw error
+        }
+
+        let opened = try await openRepository(at: selectedRepositoryURL, display: true).controller
+        if let backupURL = result.backupURL {
+            presentImportBackupConfirmation(backupURL, parent: opened.window)
+        }
+    }
+
+    private func existingOriginalRepositoryURL(
+        for preview: WorkspaceTransferPreview
+    ) async throws -> URL? {
+        let originalURL = URL(
+            fileURLWithPath: preview.manifest.originalCanonicalPath,
+            isDirectory: true
+        )
+        guard let values = try? originalURL.resourceValues(forKeys: [.isDirectoryKey]),
+              values.isDirectory == true else {
+            return nil
+        }
+        return try await applicationModel.canonicalWorkspace(for: originalURL)
+    }
+
+    private func locateRepository(for preview: WorkspaceTransferPreview) async -> URL? {
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Locate \(preview.manifest.repositoryName)"
+        openPanel.prompt = "Use Workspace"
+        openPanel.message = "Choose this repository’s folder on this Mac. The repository itself is not included in the transfer file."
+        openPanel.allowedContentTypes = [.folder]
+        openPanel.canChooseDirectories = true
+        openPanel.canChooseFiles = false
+        openPanel.allowsMultipleSelection = false
+        openPanel.canCreateDirectories = false
+        openPanel.resolvesAliases = true
+        workspaceLocationPanel = openPanel
+        return await withCheckedContinuation { continuation in
+            openPanel.begin { [weak self, weak openPanel] response in
+                self?.workspaceLocationPanel = nil
+                continuation.resume(returning: response == .OK ? openPanel?.url : nil)
+            }
+        }
+    }
+
+    private func confirmReplacement(
+        archived: RepositoryRecord,
+        existing: RepositoryRecord,
+        repositoryURL: URL
+    ) async -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Replace Codeness state for \(repositoryURL.lastPathComponent)?"
+        alert.informativeText = """
+        Imported: \(workspaceSummary(archived))
+        On this Mac: \(workspaceSummary(existing))
+
+        Codeness will export the existing state to Import Backups before replacing it. The repository folder is not modified.
+        """
+        alert.addButton(withTitle: "Back Up and Replace").toolTip =
+            "Create a portable backup of the existing Codeness state, then import this workspace"
+        alert.addButton(withTitle: "Cancel").toolTip =
+            "Keep the existing Codeness state unchanged"
+        return await runAlert(alert, parent: windowControllers[repositoryURL.path]?.window)
+            == .alertFirstButtonReturn
+    }
+
+    private func workspaceSummary(_ record: RepositoryRecord) -> String {
+        let goal = record.activity?.goal ?? "No activity"
+        let status = record.activity?.status.rawValue.capitalized ?? "Ready"
+        let date = DateFormatter.localizedString(
+            from: record.updatedAt,
+            dateStyle: .medium,
+            timeStyle: .short
+        )
+        return "\(goal) — \(status), updated \(date)"
+    }
+
+    private func runAlert(_ alert: NSAlert, parent: NSWindow?) async -> NSApplication.ModalResponse {
+        guard let parent else { return alert.runModal() }
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: parent) { response in
+                continuation.resume(returning: response)
+            }
+        }
+    }
+
+    private func presentImportBackupConfirmation(_ backupURL: URL, parent: NSWindow?) {
+        let alert = NSAlert()
+        alert.messageText = "Workspace Imported"
+        alert.informativeText = "The previous Codeness state was backed up to:\n\n\(backupURL.abbreviatedPath)"
+        alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "Reveal Backup")
+        let completion: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .alertSecondButtonReturn else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([backupURL])
+        }
+        if let parent {
+            alert.beginSheetModal(for: parent, completionHandler: completion)
+        } else {
+            completion(alert.runModal())
+        }
+    }
+
+    private func presentWorkspaceTransferProgress(
+        for coordinator: RepositoryCoordinator,
+        title: String,
+        message: String,
+        parent: NSWindow?
+    ) {
+        let hostingController = NSHostingController(
+            rootView: WorkspaceTransferProgressView(
+                coordinator: coordinator,
+                message: message
+            )
+        )
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 170),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = title
+        panel.contentViewController = hostingController
+        panel.isReleasedWhenClosed = false
+        workspaceTransferProgressPanel = panel
+        workspaceTransferProgressParent = parent
+        if let parent {
+            parent.beginSheet(panel)
+        } else {
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func dismissWorkspaceTransferProgress() {
+        guard let panel = workspaceTransferProgressPanel else { return }
+        if let parent = workspaceTransferProgressParent, parent.attachedSheet === panel {
+            parent.endSheet(panel)
+        } else {
+            panel.orderOut(nil)
+        }
+        workspaceTransferProgressPanel = nil
+        workspaceTransferProgressParent = nil
     }
 
     func openRepository(
@@ -169,9 +511,7 @@ final class RepositoryWindowManager {
     }
 
     func saveCurrentRepositoryState() async -> Bool {
-        let controller = NSApp.keyWindow?.windowController as? RepositoryWindowController
-            ?? repositoryWindows.first(where: { $0.window?.isMainWindow == true })
-            ?? (repositoryWindows.count == 1 ? repositoryWindows.first : nil)
+        let controller = currentRepositoryWindowController
         guard let controller else { return false }
         return await controller.coordinator.flushDocumentState()
     }
@@ -434,6 +774,11 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         loadCompletionTask?.cancel()
     }
 
+    func closeAfterWorkspaceTransferPreparation() {
+        bypassCloseGuard = true
+        window?.close()
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard !bypassCloseGuard else { return true }
         guard !isPresentingCloseAlert else { return false }
@@ -693,5 +1038,56 @@ private struct RepositoryPauseProgressView: View {
         }
         .padding(20)
         .frame(width: 440)
+    }
+}
+
+private struct WorkspaceTransferProgressView: View {
+    @Bindable var coordinator: RepositoryCoordinator
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(message)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(coordinator.statusMessage)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            HStack {
+                Spacer()
+                Button("Stop Current Step Now") {
+                    Task { await coordinator.interruptCloseWait() }
+                }
+                .help("Stop the current step immediately so the portable copy can be created")
+                .disabled(
+                    coordinator.pauseState != .requestingCheckpoint
+                        && coordinator.pauseState != .waitingForTurn
+                )
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+}
+
+private enum RepositoryWorkspaceTransferError: LocalizedError {
+    case pauseFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .pauseFailed(let message):
+            "The workspace could not be prepared for transfer: \(message)"
+        }
+    }
+}
+
+private extension String {
+    func appendingFileExtensionIfNeeded(_ fileExtension: String) -> String {
+        let suffix = ".\(fileExtension)"
+        return lowercased().hasSuffix(suffix.lowercased()) ? self : self + suffix
     }
 }

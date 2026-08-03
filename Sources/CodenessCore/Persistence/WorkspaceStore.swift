@@ -57,9 +57,9 @@ public extension RepositoryWorkspaceStoring {
 }
 
 public actor WorkspaceStore: RepositoryWorkspaceStoring {
-    private let rootURL: URL
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
+    let rootURL: URL
+    let encoder: JSONEncoder
+    let decoder: JSONDecoder
 
     public init(rootURL: URL? = nil) {
         self.rootURL = rootURL ?? Self.defaultRootURL()
@@ -238,7 +238,7 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
         return String(decoding: bytes, as: UTF8.self)
     }
 
-    private func workspaceURL(canonicalPath: String) -> URL {
+    func workspaceURL(canonicalPath: String) -> URL {
         repositoryDirectory(canonicalPath: canonicalPath).appendingPathComponent("workspace.json")
     }
 

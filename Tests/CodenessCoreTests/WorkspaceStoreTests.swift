@@ -360,6 +360,244 @@ struct WorkspaceStoreTests {
         #expect(loaded.settings == originalSettings)
     }
 
+    @Test
+    func workspaceTransferRelocatesPortableHistoryAndStartsWithFreshSessions() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodenessTransferTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkspaceStore(rootURL: root)
+        let sourcePath = "/Volumes/First Mac/Code/CodenessFixture"
+        let destinationPath = "/Users/test/Code/CodenessFixture"
+        let archiveURL = root.appendingPathComponent("Fixture.codeness")
+        let target = AgentTarget(providerID: .codex, model: "gpt-5.6-sol")
+        let workflow = WorkflowTemplate(
+            id: "transfer-workflow",
+            name: "Transfer workflow",
+            summary: "Exercises portable session state",
+            steps: [
+                WorkflowStep(
+                    id: "implement",
+                    name: "Implement",
+                    section: .loop,
+                    instructions: "Implement the goal.",
+                    target: target
+                )
+            ],
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: target,
+                instructions: "Coordinate the work."
+            )
+        )
+        let run = RunRecord(
+            sequence: 1,
+            role: .implementer,
+            kind: .implementation,
+            status: .interrupted,
+            threadID: nil,
+            model: target.model,
+            effort: "high",
+            prompt: "Implement",
+            workflowStep: WorkflowStepSnapshot(step: workflow.steps[0], loopIteration: 1),
+            agentTarget: target,
+            sessionLineage: 3
+        )
+        let activity = ActivityRecord(
+            goal: "Continue this work on another Mac",
+            prompts: .builtInDefaults,
+            status: .running,
+            runs: [run],
+            workflow: workflow,
+            workflowCursor: WorkflowCursor(section: .loop, stepIndex: 0),
+            workflowResumeCheckpoint: .recoverRun(run.id),
+            stepSessions: [
+                "implement": WorkflowSessionState(
+                    stepID: "implement",
+                    lineage: 3,
+                    target: target,
+                    providerSessionID: "provider-session-on-first-mac"
+                )
+            ]
+        )
+        let record = RepositoryRecord(
+            canonicalPath: sourcePath,
+            implementerThreadID: "legacy-implementer-thread",
+            reviewerThreadID: "legacy-reviewer-thread",
+            activity: activity
+        )
+        let viewState = RepositoryViewState(
+            selectedRunID: run.id,
+            windowFrame: StoredWindowFrame(x: 40, y: 50, width: 1_100, height: 720),
+            sidebarWidth: 340,
+            pauseAfterCurrent: true,
+            resumeAfterSystemTermination: true
+        )
+
+        try await store.save(record)
+        try await store.saveViewState(viewState, canonicalPath: sourcePath)
+        try await store.appendTranscript(
+            "portable transcript\n",
+            repositoryPath: sourcePath,
+            activityID: activity.id,
+            runID: run.id
+        )
+        try await store.archiveActivity(record)
+        let sourceDirectory = await store.repositoryDirectory(canonicalPath: sourcePath)
+        try Data("must not leave this Mac".utf8).write(
+            to: sourceDirectory.appendingPathComponent("unrelated-private-state.json")
+        )
+
+        let manifest = try await store.exportWorkspace(
+            canonicalPath: sourcePath,
+            sourceAppVersion: "1.2.3",
+            sourceAppBuild: "456",
+            to: archiveURL
+        )
+        let preview = try await store.inspectWorkspaceTransfer(at: archiveURL)
+        let imported = try await store.importWorkspace(
+            from: archiveURL,
+            to: destinationPath,
+            sourceAppVersion: "1.2.4",
+            sourceAppBuild: "457",
+            replacingExisting: false
+        )
+        let loaded = try await store.load(canonicalPath: destinationPath)
+        let importedViewState = try await store.loadViewState(canonicalPath: destinationPath)
+        let transcript = try await store.recoveredTranscript(
+            repositoryPath: destinationPath,
+            activityID: activity.id,
+            runID: run.id
+        )
+        let destinationDirectory = await store.repositoryDirectory(canonicalPath: destinationPath)
+
+        #expect(manifest.repositoryID == record.id)
+        #expect(manifest.repositoryName == "CodenessFixture")
+        #expect(manifest.originalCanonicalPath == sourcePath)
+        #expect(preview.record == record)
+        #expect(imported.backupURL == nil)
+        #expect(imported.record == loaded)
+        #expect(loaded.id == record.id)
+        #expect(loaded.canonicalPath == destinationPath)
+        #expect(loaded.implementerThreadID == nil)
+        #expect(loaded.reviewerThreadID == nil)
+        #expect(loaded.activity?.status == .paused)
+        #expect(loaded.activity?.stepSessions["implement"]?.providerSessionID == nil)
+        #expect(loaded.activity?.stepSessions["implement"]?.lineage == 4)
+        #expect(importedViewState.windowFrame == viewState.windowFrame)
+        #expect(importedViewState.resumeAfterSystemTermination == nil)
+        #expect(transcript == "portable transcript\n")
+        #expect(FileManager.default.fileExists(
+            atPath: destinationDirectory
+                .appendingPathComponent("activity-archives/\(activity.id.uuidString).json")
+                .path
+        ))
+        #expect(!FileManager.default.fileExists(
+            atPath: destinationDirectory
+                .appendingPathComponent("unrelated-private-state.json")
+                .path
+        ))
+    }
+
+    @Test
+    func workspaceImportBacksUpAndAtomicallyReplacesExistingState() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodenessReplacementTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkspaceStore(rootURL: root)
+        let sourcePath = "/tmp/portable-source"
+        let destinationPath = "/tmp/existing-destination"
+        let archiveURL = root.appendingPathComponent("Replacement.codeness")
+        let source = RepositoryRecord(
+            canonicalPath: sourcePath,
+            activity: ActivityRecord(
+                goal: "Imported goal",
+                prompts: .builtInDefaults,
+                status: .paused
+            )
+        )
+        let existing = RepositoryRecord(
+            canonicalPath: destinationPath,
+            activity: ActivityRecord(
+                goal: "Existing goal",
+                prompts: .builtInDefaults,
+                status: .paused
+            )
+        )
+        try await store.save(source)
+        try await store.exportWorkspace(
+            canonicalPath: sourcePath,
+            sourceAppVersion: "1",
+            sourceAppBuild: "1",
+            to: archiveURL
+        )
+        try await store.save(existing)
+
+        await #expect(throws: WorkspaceTransferError.destinationExists(destinationPath)) {
+            try await store.importWorkspace(
+                from: archiveURL,
+                to: destinationPath,
+                sourceAppVersion: "2",
+                sourceAppBuild: "2",
+                replacingExisting: false
+            )
+        }
+
+        let imported = try await store.importWorkspace(
+            from: archiveURL,
+            to: destinationPath,
+            sourceAppVersion: "2",
+            sourceAppBuild: "2",
+            replacingExisting: true
+        )
+        let backupURL = try #require(imported.backupURL)
+        let backup = try await store.inspectWorkspaceTransfer(at: backupURL)
+        let loaded = try await store.load(canonicalPath: destinationPath)
+
+        #expect(FileManager.default.fileExists(atPath: backupURL.path))
+        #expect(backup.record == existing)
+        #expect(backup.manifest.originalCanonicalPath == destinationPath)
+        #expect(loaded.id == source.id)
+        #expect(loaded.canonicalPath == destinationPath)
+        #expect(loaded.activity?.goal == "Imported goal")
+    }
+
+    @Test
+    func workspaceTransferRejectsCorruptArchives() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodenessCorruptTransferTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let archiveURL = root.appendingPathComponent("Corrupt.codeness")
+        try Data("not an AppleArchive".utf8).write(to: archiveURL)
+        let store = WorkspaceStore(rootURL: root.appendingPathComponent("State"))
+
+        await #expect(throws: (any Error).self) {
+            try await store.inspectWorkspaceTransfer(at: archiveURL)
+        }
+    }
+
+    @Test
+    func relocatedLegacyActivityIsPausedAndRecreatesItsProviderSessions() {
+        let source = RepositoryRecord(
+            canonicalPath: "/tmp/source",
+            implementerThreadID: "implementer-thread",
+            reviewerThreadID: "reviewer-thread",
+            activity: ActivityRecord(
+                goal: "Legacy activity",
+                prompts: .builtInDefaults,
+                status: .running,
+                pendingAction: .review
+            )
+        )
+
+        let relocated = source.relocatedForImport(to: "/tmp/destination")
+
+        #expect(relocated.canonicalPath == "/tmp/destination")
+        #expect(relocated.activity?.status == .paused)
+        #expect(relocated.implementerThreadID == nil)
+        #expect(relocated.reviewerThreadID == nil)
+        #expect(relocated.requiresFreshProviderSessions)
+    }
+
     private func usage(
         total: Int64,
         input: Int64,

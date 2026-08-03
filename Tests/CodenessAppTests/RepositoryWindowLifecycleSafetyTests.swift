@@ -43,6 +43,26 @@ struct RepositoryWindowLifecycleSafetyTests {
         #expect(await manager.saveCurrentRepositoryState())
         try original.assertUnchanged(at: fixture.repositoryURL, after: "File > Save")
 
+        // Export through the same manager path used by File > Export Workspace.
+        // The coordinator pauses and flushes first; the UI then cancels close
+        // preparation so the document remains open in its now-paused state.
+        let transferURL = fixture.rootURL.appendingPathComponent("Repository.codeness")
+        let transferManifest = try await manager.exportWorkspace(
+            from: opened,
+            to: transferURL
+        )
+        opened.coordinator.cancelClosePreparation()
+        let transferValues = try transferURL.resourceValues(forKeys: [
+            .isDirectoryKey,
+            .isRegularFileKey
+        ])
+        let transferPreview = try await store.inspectWorkspaceTransfer(at: transferURL)
+        #expect(transferValues.isRegularFile == true)
+        #expect(transferValues.isDirectory != true)
+        #expect(transferManifest.repositoryID == opened.coordinator.record.id)
+        #expect(transferPreview.record == opened.coordinator.record)
+        try original.assertUnchanged(at: fixture.repositoryURL, after: "File > Export Workspace")
+
         opened.window?.performClose(nil)
         try await waitUntil { manager.isEmpty }
         try original.assertUnchanged(at: fixture.repositoryURL, after: "normal close")

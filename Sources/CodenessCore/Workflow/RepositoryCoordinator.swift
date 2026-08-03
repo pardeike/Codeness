@@ -831,7 +831,9 @@ public final class RepositoryCoordinator {
         }
         if let action = record.activity?.pendingAction {
             do {
-                try await ensureSessions(allowRecreate: false)
+                try await ensureSessions(
+                    allowRecreate: record.requiresFreshProviderSessions
+                )
                 record.activity?.status = .running
                 record.activity?.pendingAction = nil
                 await perform(action: action, handoff: record.activity?.runs.last(where: { $0.handoff != nil })?.handoff)
@@ -1775,7 +1777,9 @@ public final class RepositoryCoordinator {
         record.activity?.resumeCheckpoint = .perform(action)
         if action != .complete {
             do {
-                try await ensureSessions(allowRecreate: false)
+                try await ensureSessions(
+                    allowRecreate: record.requiresFreshProviderSessions
+                )
             } catch {
                 record.activity?.status = .paused
                 record.activity?.pendingAction = action
@@ -3053,6 +3057,7 @@ public final class RepositoryCoordinator {
             allowRecreate: allowRecreate
         )
         record.reviewerThreadID = reviewerThreadID
+        record.requiresFreshProviderSessions = false
         try await persist()
         sessionsPrepared = true
     }
@@ -3092,7 +3097,9 @@ public final class RepositoryCoordinator {
     private func recoverInterruptedPass(_ interruptedRun: RunRecord) async {
         record.activity?.resumeCheckpoint = .recoverRun(interruptedRun.id)
         do {
-            try await ensureSessions(allowRecreate: false)
+            try await ensureSessions(
+                allowRecreate: record.requiresFreshProviderSessions
+            )
             guard record.activity != nil, !isClosing else {
                 record.activity?.status = .paused
                 return

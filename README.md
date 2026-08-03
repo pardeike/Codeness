@@ -118,6 +118,12 @@ Workflow state, transcripts, recovery logs, and window state are stored under:
 
 App-wide preferences use the standard macOS preferences system. **File → Save** flushes Codeness metadata only; it never treats the repository as a document to replace or safe-save.
 
+### Moving a workspace to another Mac
+
+Choose **File → Export Workspace…** to create a single Finder-native `.codeness` file. If work is running, Codeness first pauses it at a coherent checkpoint. The file contains the workspace's goal, workflow, run history, transcripts, recovery checkpoints, and window state. It does not contain the selected repository, provider authentication, CLI installations, or app-wide preferences.
+
+On the other Mac, double-click the file or choose **File → Import Workspace…**. Codeness automatically uses the original repository path when that folder exists; otherwise it asks you to locate the repository. Imported work opens paused, and provider sessions start fresh because provider session identifiers are local to the exporting Mac. If Codeness state already exists for the selected repository, it asks before replacement and first saves the existing state as another `.codeness` file under `~/Library/Application Support/Codeness/Import Backups`.
+
 ## Recovery and lifecycle
 
 Codeness continuously saves enough state to recover long-running activities:
