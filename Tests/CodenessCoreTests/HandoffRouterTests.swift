@@ -81,6 +81,43 @@ struct HandoffRouterTests {
     }
 
     @Test
+    func boundsLargeWorkSummaryPromptsWhileRepresentingEveryHandoff() {
+        let handoffs = (1...328).map { sequence in
+            let kind: RunKind = sequence.isMultiple(of: 2) ? .implementation : .review
+            return WorkSummaryHandoff(
+                runID: UUID(),
+                sequence: sequence,
+                kind: kind,
+                label: "Run \(sequence)",
+                disposition: kind == .implementation
+                    ? .implementationCheckpoint
+                    : .reviewComplete,
+                text: "begin-\(sequence) "
+                    + String(repeating: "detailed handoff context ", count: 240)
+                    + " end-\(sequence)"
+            )
+        }
+        let context = WorkSummaryContext(
+            goal: "Finish a very large workflow",
+            handoffs: handoffs
+        )
+
+        let prompt = WorkSummaryPrompt.utilityPrompt(
+            context,
+            coordinatorInstructions: "Reconcile the full run."
+        )
+
+        #expect(prompt.count <= WorkSummaryPrompt.maximumPromptCharacters)
+        #expect(prompt.count < 1_048_576)
+        #expect(handoffs.allSatisfy { prompt.contains("— \($0.label)\n") })
+        #expect(prompt.contains("### 1. Review — Run 1"))
+        #expect(prompt.contains("### 328. Implement — Run 328"))
+        #expect(prompt.contains("begin-1"))
+        #expect(prompt.contains("end-328"))
+        #expect(prompt.contains("characters omitted"))
+    }
+
+    @Test
     func workSummarySignatureChangesWithItsGoalOrHandoffs() {
         let handoff = WorkSummaryHandoff(
             runID: UUID(),
