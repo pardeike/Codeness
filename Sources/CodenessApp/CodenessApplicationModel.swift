@@ -109,6 +109,7 @@ final class CodenessApplicationModel {
     @ObservationIgnored private let router: any HandoffRouting
     @ObservationIgnored private let store: WorkspaceStore
     @ObservationIgnored private let resolver: WorkspaceResolver
+    @ObservationIgnored private let handoffConfigurationValidator: any HandoffConfigurationValidating
     @ObservationIgnored private let codexProvider: CodexAgentProvider
     @ObservationIgnored private var claudeProvider: (any AgentProviding)?
     @ObservationIgnored private let agentProviders: AgentProviderRegistry
@@ -140,6 +141,7 @@ final class CodenessApplicationModel {
         router: any HandoffRouting = HandoffRouter(),
         store: WorkspaceStore = WorkspaceStore(),
         resolver: WorkspaceResolver = WorkspaceResolver(),
+        handoffConfigurationValidator: any HandoffConfigurationValidating = HandoffConfigurationValidator(),
         testingCodexProvider: CodexAgentProvider? = nil,
         initialClaudeProvider: (any AgentProviding)? = nil,
         testingAppServerShutdown: (@Sendable () async -> Bool)? = nil,
@@ -174,6 +176,7 @@ final class CodenessApplicationModel {
         self.router = router
         self.store = store
         self.resolver = resolver
+        self.handoffConfigurationValidator = handoffConfigurationValidator
         providerCatalog = loadedProviderCatalog
         claudeModels = loadedProviderCatalog.provider(.claude)?.knownModels ?? []
         builtInWorkflowCatalog = loadedWorkflowCatalog
@@ -416,6 +419,7 @@ final class CodenessApplicationModel {
             appServer: appServer,
             router: router,
             store: store,
+            handoffConfigurationValidator: handoffConfigurationValidator,
             initialSettings: initialSettings,
             agentProviders: agentProviders,
             workflowRouter: workflowRouter

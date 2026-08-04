@@ -18,7 +18,11 @@ struct RepositoryWindowLifecycleSafetyTests {
         defer { Task { await appServer.shutdown() } }
 
         let store = WorkspaceStore(rootURL: fixture.applicationSupportURL)
-        let application = CodenessApplicationModel(appServer: appServer, store: store)
+        let application = CodenessApplicationModel(
+            appServer: appServer,
+            store: store,
+            handoffConfigurationValidator: AcceptingLifecycleHandoffConfigurationValidator()
+        )
         let commands = RepositoryWindowCommandState()
         let manager = RepositoryWindowManager(applicationModel: application, commandState: commands)
         await manager.loadRecentRepositories()
@@ -193,6 +197,16 @@ private struct TestFailure: LocalizedError {
     }
 
     var errorDescription: String? { message }
+}
+
+private struct AcceptingLifecycleHandoffConfigurationValidator: HandoffConfigurationValidating {
+    func validateLocal(_ settings: RelaySettings) async throws {
+        _ = settings
+    }
+
+    func testRemote(_ settings: RelaySettings) async throws {
+        _ = settings
+    }
 }
 
 private struct RepositorySnapshot: Equatable {
