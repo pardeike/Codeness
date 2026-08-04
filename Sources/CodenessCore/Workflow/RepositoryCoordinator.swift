@@ -218,6 +218,11 @@ public final class RepositoryCoordinator {
         let task: Task<Void, Error>
     }
 
+    private struct WorkSummarySnapshot {
+        let context: WorkSummaryContext
+        let sourceSignature: String
+    }
+
     static let maximumPresentedTranscriptUTF8Bytes = 4 * 1_024 * 1_024
     static let truncatedTranscriptMarker = "[Earlier transcript output remains available in the on-disk activity log.]\n"
     private static let transcriptFlushDelay: Duration = .milliseconds(25)
@@ -358,6 +363,8 @@ public final class RepositoryCoordinator {
     private(set) var transcriptPresentationMutationCount = 0
     private var workOverviewSummaryTask: Task<Void, Never>?
     private var workOverviewSummaryTaskSignature: String?
+    @ObservationIgnored private var workSummarySnapshotCache: WorkSummarySnapshot?
+    @ObservationIgnored private(set) var workSummarySnapshotBuildCount = 0
     private var closeWaiter: CheckedContinuation<DocumentClosePreparationResult, Never>?
     private var isClosing = false
     private var lifecycleGeneration = UUID()
@@ -574,7 +581,7 @@ public final class RepositoryCoordinator {
     }
 
     public var workOverviewSummarySourceSignature: String? {
-        workSummaryContext?.sourceSignature
+        workSummarySnapshot?.sourceSignature
     }
 
     public var workOverviewSummaryText: String? {
@@ -623,6 +630,7 @@ public final class RepositoryCoordinator {
                 ?? RepositoryViewState()
             guard isCurrentLoad(generation) else { return }
 
+            cancelWorkOverviewSummaryRequest()
             record = loadedRecord
             viewState = loadedViewState
             pauseAfterCurrent = viewState.pauseAfterCurrent
@@ -729,6 +737,7 @@ public final class RepositoryCoordinator {
             try await handoffConfigurationValidator.validateLocal(record.settings.relay)
             try await ensureSessions(allowRecreate: true)
             guard !isClosing else { return }
+            cancelWorkOverviewSummaryRequest()
             record.activityDraft = nil
             record.activity = ActivityRecord(
                 goal: cleanGoal,
@@ -787,6 +796,7 @@ public final class RepositoryCoordinator {
 
         isStartingActivity = true
         defer { isStartingActivity = false }
+        cancelWorkOverviewSummaryRequest()
         record.activityDraft = nil
         record.activity = ActivityRecord(
             goal: cleanGoal,
@@ -963,11 +973,12 @@ public final class RepositoryCoordinator {
     }
 
     public func requestWorkOverviewSummary(force: Bool = false) {
-        guard !isClosing, let context = workSummaryContext else {
+        guard !isClosing, let snapshot = workSummarySnapshot else {
             workOverviewSummaryError = nil
             return
         }
-        let signature = context.sourceSignature
+        let context = snapshot.context
+        let signature = snapshot.sourceSignature
         if !force, viewState.workOverviewSummary?.sourceSignature == signature {
             workOverviewSummaryError = nil
             return
@@ -1008,7 +1019,7 @@ public final class RepositoryCoordinator {
                 }
                 try Task.checkCancellation()
                 if let self,
-                   self.workSummaryContext?.sourceSignature == signature,
+                   self.workSummarySnapshot?.sourceSignature == signature,
                    self.workOverviewSummaryTaskSignature == signature {
                     self.viewState.workOverviewSummary = WorkOverviewSummaryCache(
                         sourceSignature: signature,
@@ -1023,7 +1034,7 @@ public final class RepositoryCoordinator {
                 // A newer set of handoffs superseded this request.
             } catch {
                 if let self,
-                   self.workSummaryContext?.sourceSignature == signature,
+                   self.workSummarySnapshot?.sourceSignature == signature,
                    self.workOverviewSummaryTaskSignature == signature {
                     self.workOverviewSummaryError = error.localizedDescription
                 }
@@ -5187,9 +5198,16 @@ public final class RepositoryCoordinator {
     private func updateRun(_ id: UUID, update: (inout RunRecord) -> Void) {
         guard var activity = record.activity,
               let runIndex = activity.runs.firstIndex(where: { $0.id == id }) else { return }
+        let previousHandoff = activity.runs[runIndex].handoff
+        let previousWorkflowHandoff = activity.runs[runIndex].workflowHandoff
         update(&activity.runs[runIndex])
+        let workSummarySourceChanged = previousHandoff != activity.runs[runIndex].handoff
+            || previousWorkflowHandoff != activity.runs[runIndex].workflowHandoff
         record.activity = activity
         record.updatedAt = .now
+        if workSummarySourceChanged {
+            cancelWorkOverviewSummaryRequest()
+        }
     }
 
     private func pauseActivity(message: String) {
@@ -5659,7 +5677,21 @@ public final class RepositoryCoordinator {
         record.activity = activity
     }
 
-    private var workSummaryContext: WorkSummaryContext? {
+    private var workSummarySnapshot: WorkSummarySnapshot? {
+        if let workSummarySnapshotCache {
+            return workSummarySnapshotCache
+        }
+        guard let context = makeWorkSummaryContext() else { return nil }
+        let snapshot = WorkSummarySnapshot(
+            context: context,
+            sourceSignature: context.sourceSignature
+        )
+        workSummarySnapshotCache = snapshot
+        workSummarySnapshotBuildCount += 1
+        return snapshot
+    }
+
+    private func makeWorkSummaryContext() -> WorkSummaryContext? {
         guard let activity = record.activity else { return nil }
         let handoffs = activity.runs.compactMap { run -> WorkSummaryHandoff? in
             if let handoff = run.workflowHandoff {
@@ -5698,6 +5730,7 @@ public final class RepositoryCoordinator {
         workOverviewSummaryTask = nil
         workOverviewSummaryTaskSignature = nil
         isGeneratingWorkOverviewSummary = false
+        workSummarySnapshotCache = nil
     }
 
     private func cancelRoutingTasks() async {

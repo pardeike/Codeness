@@ -141,6 +141,19 @@ struct RepositoryCoordinatorRecoveryTests {
 
         harness.coordinator.requestWorkOverviewSummary()
         #expect(await router.summaryCallCount == 1)
+
+        let snapshotBuildCount = harness.coordinator.workSummarySnapshotBuildCount
+        for _ in 0..<100 {
+            #expect(harness.coordinator.workOverviewSummarySourceSignature == signature)
+        }
+        #expect(harness.coordinator.workSummarySnapshotBuildCount == snapshotBuildCount)
+
+        #expect(await harness.coordinator.amendGoal("Recovery with an added constraint"))
+        let revisedSignature = try #require(
+            harness.coordinator.workOverviewSummarySourceSignature
+        )
+        #expect(revisedSignature != signature)
+        #expect(harness.coordinator.workSummarySnapshotBuildCount == snapshotBuildCount + 1)
     }
 
     @Test

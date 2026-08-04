@@ -155,21 +155,30 @@ public struct WorkSummaryContext: Sendable, Equatable {
     }
 
     public var sourceSignature: String {
-        let fields = [WorkSummaryPrompt.cacheVersion, goal] + handoffs.flatMap { handoff in
-            [
-                handoff.runID.uuidString,
-                String(handoff.sequence),
-                handoff.kind.rawValue,
-                handoff.label,
-                handoff.disposition.rawValue,
-                handoff.text
-            ]
+        var hasher = SHA256()
+        var isFirstField = true
+        func append(_ field: String) {
+            let data = Data(field.utf8)
+            if !isFirstField {
+                hasher.update(data: Data("|".utf8))
+            }
+            hasher.update(data: Data("\(data.count):".utf8))
+            hasher.update(data: data)
+            isFirstField = false
         }
-        let source = fields
-            .map { "\(Data($0.utf8).count):\($0)" }
-            .joined(separator: "|")
+
+        append(WorkSummaryPrompt.cacheVersion)
+        append(goal)
+        for handoff in handoffs {
+            append(handoff.runID.uuidString)
+            append(String(handoff.sequence))
+            append(handoff.kind.rawValue)
+            append(handoff.label)
+            append(handoff.disposition.rawValue)
+            append(handoff.text)
+        }
         let hexadecimal = Array("0123456789abcdef".utf8)
-        let bytes = SHA256.hash(data: Data(source.utf8)).flatMap { byte in
+        let bytes = hasher.finalize().flatMap { byte in
             [
                 hexadecimal[Int(byte >> 4)],
                 hexadecimal[Int(byte & 0x0F)]

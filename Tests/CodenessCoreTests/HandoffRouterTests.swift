@@ -120,7 +120,7 @@ struct HandoffRouterTests {
     @Test
     func workSummarySignatureChangesWithItsGoalOrHandoffs() {
         let handoff = WorkSummaryHandoff(
-            runID: UUID(),
+            runID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             sequence: 1,
             kind: .implementation,
             label: "Parser foundation",
@@ -133,6 +133,10 @@ struct HandoffRouterTests {
 
         #expect(first.sourceSignature == same.sourceSignature)
         #expect(first.sourceSignature != revised.sourceSignature)
+        #expect(
+            first.sourceSignature
+                == "3cee7b5097313ce5343a6797f4d95fefa9b5fe96604b980c6c860a3e6dccc7af"
+        )
     }
 
     @Test
