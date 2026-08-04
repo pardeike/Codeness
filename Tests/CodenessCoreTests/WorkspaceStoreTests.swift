@@ -23,6 +23,13 @@ struct WorkspaceStoreTests {
         let record = RepositoryRecord(canonicalPath: "/tmp/repository", activity: activity)
 
         try await store.save(record)
+        let repositoryDirectory = await store.repositoryDirectory(
+            canonicalPath: record.canonicalPath
+        )
+        let payloadURL = repositoryDirectory
+            .appendingPathComponent("activity/\(activity.id.uuidString)")
+            .appendingPathComponent("\(run.id.uuidString).payload.json")
+        #expect(FileManager.default.fileExists(atPath: payloadURL.path))
         try await store.appendTranscript("first\n", repositoryPath: record.canonicalPath, activityID: activity.id, runID: run.id)
         try await store.appendTranscript("second\n", repositoryPath: record.canonicalPath, activityID: activity.id, runID: run.id)
 
@@ -32,7 +39,14 @@ struct WorkspaceStoreTests {
             activityID: activity.id,
             runID: run.id
         )
-        #expect(loaded == record)
+        let payload = try await store.recoveredRunPayload(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: run.id
+        )
+        #expect(loaded.activity?.runs.first?.prompt == "Implement")
+        #expect(loaded.activity?.runs.first?.externalPayload == true)
+        #expect(payload == RunPayload(prompt: "Implement", finalOutput: nil))
         #expect(transcript == "first\nsecond\n")
     }
 
@@ -720,12 +734,14 @@ struct WorkspaceStoreTests {
     }
 
     @Test
-    func workspaceMetadataExternalizesHydratedTranscriptsWithoutLosingText() async throws {
+    func workspaceMetadataExternalizesLargeRunTextWithoutLosingIt() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = WorkspaceStore(rootURL: root)
         let transcript = "unique transcript payload\n" + String(repeating: "detail\n", count: 500)
+        let prompt = "unique prompt payload\n" + String(repeating: "instruction\n", count: 500)
+        let finalOutput = "unique final payload\n" + String(repeating: "result\n", count: 500)
         let run = RunRecord(
             sequence: 1,
             role: .implementer,
@@ -734,8 +750,9 @@ struct WorkspaceStoreTests {
             threadID: "thread",
             model: "gpt-5.6-sol",
             effort: "high",
-            prompt: "Implement",
-            transcript: transcript
+            prompt: prompt,
+            transcript: transcript,
+            finalOutput: finalOutput
         )
         let activity = ActivityRecord(
             goal: "Externalize transcript",
@@ -761,10 +778,24 @@ struct WorkspaceStoreTests {
             activityID: activity.id,
             runID: run.id
         )
+        let recoveredPayload = try await store.recoveredRunPayload(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: run.id
+        )
 
         #expect(!workspaceText.contains("unique transcript payload"))
+        #expect(!workspaceText.contains("unique prompt payload"))
+        #expect(!workspaceText.contains("unique final payload"))
         #expect(loaded.activity?.runs.first?.transcript == "")
+        #expect(loaded.activity?.runs.first?.prompt == prompt)
+        #expect(loaded.activity?.runs.first?.finalOutput == finalOutput)
+        #expect(loaded.activity?.runs.first?.externalPayload == true)
         #expect(recovered == transcript)
+        #expect(recoveredPayload == RunPayload(
+            prompt: prompt,
+            finalOutput: finalOutput
+        ))
     }
 
     @Test
@@ -1900,14 +1931,23 @@ struct WorkspaceStoreTests {
             activityID: activity.id,
             runID: run.id
         )
+        let runPayload = try await store.recoveredRunPayload(
+            repositoryPath: destinationPath,
+            activityID: activity.id,
+            runID: run.id
+        )
         let destinationDirectory = await store.repositoryDirectory(canonicalPath: destinationPath)
 
         #expect(manifest.repositoryID == record.id)
         #expect(manifest.repositoryName == "CodenessFixture")
         #expect(manifest.originalCanonicalPath == sourcePath)
-        #expect(preview.record == record)
+        #expect(preview.record.id == record.id)
+        #expect(preview.record.activity?.runs.first?.externalPayload == true)
+        #expect(preview.record.activity?.runs.first?.prompt == "")
         #expect(imported.backupURL == nil)
-        #expect(imported.record == loaded)
+        #expect(imported.record.id == loaded.id)
+        #expect(imported.record.activity?.runs.first?.prompt == "")
+        #expect(loaded.activity?.runs.first?.prompt == "Implement")
         #expect(loaded.id == record.id)
         #expect(loaded.canonicalPath == destinationPath)
         #expect(loaded.implementerThreadID == nil)
@@ -1918,6 +1958,7 @@ struct WorkspaceStoreTests {
         #expect(importedViewState.windowFrame == viewState.windowFrame)
         #expect(importedViewState.resumeAfterSystemTermination == nil)
         #expect(transcript == "portable transcript\n")
+        #expect(runPayload == RunPayload(prompt: "Implement", finalOutput: nil))
         #expect(FileManager.default.fileExists(
             atPath: destinationDirectory
                 .appendingPathComponent("activity-archives/\(activity.id.uuidString).json")

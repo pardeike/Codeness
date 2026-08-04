@@ -648,7 +648,7 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
     public var turnID: String?
     public let model: String
     public let effort: String
-    public let prompt: String
+    public var prompt: String
     public var transcript: String
     public var finalOutput: String?
     public var handoff: HandoffEnvelope?
@@ -661,6 +661,9 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
     public var agentTarget: AgentTarget?
     public var sessionLineage: Int?
     public var workflowHandoff: WorkflowHandoff?
+    /// True when the full prompt and final output are stored in the per-run
+    /// payload file instead of inline in workspace.json.
+    public var externalPayload: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -684,7 +687,8 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         workflowStep: WorkflowStepSnapshot? = nil,
         agentTarget: AgentTarget? = nil,
         sessionLineage: Int? = nil,
-        workflowHandoff: WorkflowHandoff? = nil
+        workflowHandoff: WorkflowHandoff? = nil,
+        externalPayload: Bool? = nil
     ) {
         self.id = id
         self.sequence = sequence
@@ -708,6 +712,7 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         self.agentTarget = agentTarget
         self.sessionLineage = sessionLineage
         self.workflowHandoff = workflowHandoff
+        self.externalPayload = externalPayload
     }
 
     public var displayName: String {
@@ -720,6 +725,20 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
     public var providerDisplayValue: String {
         guard let agentTarget else { return model }
         return "\(agentTarget.providerID.rawValue):\(agentTarget.model)"
+    }
+}
+
+public struct RunPayload: Codable, Sendable, Equatable {
+    public var prompt: String
+    public var finalOutput: String?
+
+    public init(prompt: String, finalOutput: String?) {
+        self.prompt = prompt
+        self.finalOutput = finalOutput
+    }
+
+    public init(run: RunRecord) {
+        self.init(prompt: run.prompt, finalOutput: run.finalOutput)
     }
 }
 

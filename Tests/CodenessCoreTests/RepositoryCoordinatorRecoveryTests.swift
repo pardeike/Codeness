@@ -1219,7 +1219,13 @@ struct RepositoryCoordinatorRecoveryTests {
             RepositoryRecord.self,
             from: Data(contentsOf: archiveURL)
         )
-        #expect(persistedArchive == archivedRecord)
+        var expectedArchive = archivedRecord
+        if let runIndices = expectedArchive.activity?.runs.indices {
+            for runIndex in runIndices {
+                expectedArchive.activity?.runs[runIndex].externalPayload = nil
+            }
+        }
+        #expect(persistedArchive == expectedArchive)
 
         coordinator.updateActivityDraft(goal: "Edited before restarting", prompts: prompts)
         #expect(await coordinator.flushDocumentState())

@@ -621,14 +621,6 @@ public final class RepositoryCoordinator {
 
             record = loadedRecord
             viewState = loadedViewState
-            guard await recoverAppendOnlyTokenUsage(loadGeneration: generation),
-                  isCurrentLoad(generation) else { return }
-            if record.activity?.workflow != nil {
-                recoverInterruptedGenericState()
-            } else {
-                recoverInterruptedState()
-                migrateResumeCheckpointIfNeeded()
-            }
             pauseAfterCurrent = viewState.pauseAfterCurrent
             runIsAtBottom = viewState.transcriptViewports.mapValues(\.followsOutput)
             if viewState.runSelectionWasSaved {
@@ -643,6 +635,16 @@ public final class RepositoryCoordinator {
                 selectedRunID = record.activity?.runs.last?.id
                 viewState.selectedRunID = selectedRunID
                 viewState.runSelectionWasSaved = true
+            }
+            guard await recoverAppendOnlyTokenUsage(loadGeneration: generation),
+                  isCurrentLoad(generation) else { return }
+            try await recoverOperationalRunPayloads(loadGeneration: generation)
+            guard isCurrentLoad(generation) else { return }
+            if record.activity?.workflow != nil {
+                recoverInterruptedGenericState()
+            } else {
+                recoverInterruptedState()
+                migrateResumeCheckpointIfNeeded()
             }
             await recoverAppendOnlyTranscript(
                 runID: selectedRunID,
@@ -4307,6 +4309,13 @@ public final class RepositoryCoordinator {
                 }
             }
             guard !Task.isCancelled, self.selectedRunID == requestedRunID else { return }
+            do {
+                try await self.recoverRunPayload(runID: requestedRunID)
+                self.evictExternalizedRunPayloads()
+            } catch {
+                self.errorMessage = "Could not load this run's saved prompt and result: \(error.localizedDescription)"
+            }
+            guard !Task.isCancelled, self.selectedRunID == requestedRunID else { return }
             await self.recoverAppendOnlyTranscript(runID: requestedRunID)
             guard !Task.isCancelled, self.selectedRunID == requestedRunID else { return }
             if canEvictPreviousTranscripts {
@@ -4333,6 +4342,84 @@ public final class RepositoryCoordinator {
         if changed {
             record.activity = activity
         }
+    }
+
+    private func recoverOperationalRunPayloads(
+        loadGeneration: UUID
+    ) async throws {
+        guard let activity = record.activity else { return }
+        var runIDs = Set([activity.runs.last?.id, selectedRunID].compactMap { $0 })
+        if let checkpoint = activity.resumeCheckpoint {
+            switch checkpoint {
+            case .recoverRun(let runID), .routeCompletedRun(let runID):
+                runIDs.insert(runID)
+            case .perform:
+                break
+            }
+        }
+        if let checkpoint = activity.workflowResumeCheckpoint {
+            switch checkpoint {
+            case .recoverRun(let runID), .routeCompletedRun(let runID):
+                runIDs.insert(runID)
+            case .perform:
+                break
+            }
+        }
+        for runID in runIDs {
+            try await recoverRunPayload(runID: runID, loadGeneration: loadGeneration)
+        }
+    }
+
+    private func recoverRunPayload(
+        runID: UUID?,
+        loadGeneration: UUID? = nil
+    ) async throws {
+        guard let runID,
+              loadGeneration.map(isCurrentLoad) ?? true,
+              let activity = record.activity,
+              let run = activity.runs.first(where: { $0.id == runID }),
+              run.externalPayload == true,
+              run.prompt.isEmpty else { return }
+        guard let payload = try await store.recoveredRunPayload(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: runID
+        ) else {
+            throw RepositoryCoordinatorError.missingExternalRunPayload(runID)
+        }
+        guard loadGeneration.map(isCurrentLoad) ?? true else { return }
+        updateRun(runID) {
+            $0.prompt = payload.prompt
+            $0.finalOutput = payload.finalOutput
+        }
+    }
+
+    private func evictExternalizedRunPayloads() {
+        guard store.externalizesRunPayloads, var activity = record.activity else { return }
+        var retainedRunIDs = Set([selectedRunID, activeRun?.id].compactMap { $0 })
+        if let checkpoint = activity.resumeCheckpoint {
+            switch checkpoint {
+            case .recoverRun(let runID), .routeCompletedRun(let runID):
+                retainedRunIDs.insert(runID)
+            case .perform:
+                break
+            }
+        }
+        if let checkpoint = activity.workflowResumeCheckpoint {
+            switch checkpoint {
+            case .recoverRun(let runID), .routeCompletedRun(let runID):
+                retainedRunIDs.insert(runID)
+            case .perform:
+                break
+            }
+        }
+        for runIndex in activity.runs.indices {
+            activity.runs[runIndex].externalPayload = true
+            guard !retainedRunIDs.contains(activity.runs[runIndex].id) else { continue }
+            activity.runs[runIndex].prompt = ""
+            activity.runs[runIndex].finalOutput = nil
+        }
+        record.activity = activity
     }
 
     private func setRunTranscript(_ transcript: String, runID: UUID) {
@@ -5530,6 +5617,7 @@ public final class RepositoryCoordinator {
         try await flushPendingTranscripts()
         record.updatedAt = .now
         try await store.save(workspaceMetadataSnapshot(record))
+        evictExternalizedRunPayloads()
     }
 
     private func workspaceMetadataSnapshot(_ source: RepositoryRecord) -> RepositoryRecord {
@@ -5771,6 +5859,7 @@ private enum RepositoryCoordinatorError: LocalizedError {
     case providerSessionsStillAttached(String)
     case missingSession(AgentRole)
     case missingRun(UUID)
+    case missingExternalRunPayload(UUID)
     case missingTranscriptRun(UUID)
     case transcriptBackpressureLimit(UUID)
     case missingRunOutput(UUID)
@@ -5789,6 +5878,8 @@ private enum RepositoryCoordinatorError: LocalizedError {
             "The saved \(role.displayName.lowercased()) Codex session is missing. Its context was not replaced."
         case .missingRun(let id):
             "The saved resume checkpoint refers to missing run \(id.uuidString)."
+        case .missingExternalRunPayload(let id):
+            "The saved prompt and result for run \(id.uuidString) are missing."
         case .missingTranscriptRun(let id):
             "Transcript output for run \(id.uuidString) no longer belongs to the current activity."
         case .transcriptBackpressureLimit(let id):

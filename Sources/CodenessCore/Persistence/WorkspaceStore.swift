@@ -13,6 +13,7 @@ public struct RecoveredTranscriptTail: Sendable, Equatable {
 }
 
 public protocol RepositoryWorkspaceStoring: Sendable {
+    var externalizesRunPayloads: Bool { get }
     func load(canonicalPath: String, defaultSettings: RepositorySettings) async throws -> RepositoryRecord
     func save(_ record: RepositoryRecord) async throws
     func archiveActivity(_ record: RepositoryRecord) async throws
@@ -42,9 +43,24 @@ public protocol RepositoryWorkspaceStoring: Sendable {
         activityID: UUID,
         runID: UUID
     ) async throws -> RunTokenUsage?
+    func recoveredRunPayload(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunPayload?
 }
 
 public extension RepositoryWorkspaceStoring {
+    var externalizesRunPayloads: Bool { false }
+
+    func recoveredRunPayload(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunPayload? {
+        nil
+    }
+
     func recoveredTranscriptTail(
         repositoryPath: String,
         activityID: UUID,
@@ -120,6 +136,7 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
     private var blockedAppendURLs: Set<URL> = []
     private var preparedAppendTargets: [URL: AppendFileIdentity] = [:]
     private var preparedAppendTargetOrder: [URL] = []
+    public nonisolated var externalizesRunPayloads: Bool { true }
 
     public init(rootURL: URL? = nil) {
         self.rootURL = rootURL ?? Self.defaultRootURL()
@@ -153,7 +170,7 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
         if externalized != decoded {
             try durableAtomicWrite(encoder.encode(externalized), to: url)
         }
-        return externalized
+        return try recordWithHydratedLatestRunPayload(externalized)
     }
 
     public func save(_ record: RepositoryRecord) throws {
@@ -173,9 +190,9 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
         let directory = repositoryDirectory(canonicalPath: record.canonicalPath)
             .appendingPathComponent("activity-archives", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let externalized = try externalizedRecord(record)
+        let hydrated = try recordWithHydratedRunPayloads(record)
         try durableStreamingArchiveWrite(
-            externalized,
+            hydrated,
             to: directory.appendingPathComponent("\(activity.id.uuidString).json")
         )
     }
@@ -253,6 +270,33 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
         )
         guard FileManager.default.fileExists(atPath: url.path) else { return "" }
         return String(decoding: try Data(contentsOf: url), as: UTF8.self)
+    }
+
+    public func recoveredRunPayload(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunPayload? {
+        try storedRunPayload(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    private func storedRunPayload(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) throws -> RunPayload? {
+        let url = logURL(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID,
+            suffix: "payload.json"
+        )
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try decoder.decode(RunPayload.self, from: Data(contentsOf: url))
     }
 
     public func recoveredTranscriptTail(
@@ -674,8 +718,9 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
         return recoveredSize == startingOffset
     }
 
-    /// Moves legacy or currently hydrated transcript text into the per-run log and
-    /// returns the small metadata snapshot written to `workspace.json`.
+    /// Moves legacy or currently hydrated transcript text and large run payloads
+    /// into per-run files and returns the small metadata snapshot written to
+    /// `workspace.json`.
     private func externalizedRecord(_ record: RepositoryRecord) throws -> RepositoryRecord {
         guard let activity = record.activity else { return record }
         var externalized = record
@@ -689,9 +734,69 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
                     runID: run.id
                 )
             }
+            if run.externalPayload != true || !run.prompt.isEmpty || run.finalOutput != nil {
+                try durableAtomicWrite(
+                    encoder.encode(RunPayload(run: run)),
+                    to: logURL(
+                        repositoryPath: record.canonicalPath,
+                        activityID: activity.id,
+                        runID: run.id,
+                        suffix: "payload.json"
+                    )
+                )
+            }
             externalized.activity?.runs[runIndex].transcript = ""
+            externalized.activity?.runs[runIndex].prompt = ""
+            externalized.activity?.runs[runIndex].finalOutput = nil
+            externalized.activity?.runs[runIndex].externalPayload = true
         }
         return externalized
+    }
+
+    private func recordWithHydratedRunPayloads(
+        _ record: RepositoryRecord
+    ) throws -> RepositoryRecord {
+        guard let activity = record.activity else { return record }
+        var hydrated = record
+        for runIndex in activity.runs.indices {
+            let run = activity.runs[runIndex]
+            if run.externalPayload == true, run.prompt.isEmpty {
+                guard let payload = try storedRunPayload(
+                    repositoryPath: record.canonicalPath,
+                    activityID: activity.id,
+                    runID: run.id
+                ) else {
+                    throw WorkspaceStoreError.missingRunPayload(run.id)
+                }
+                hydrated.activity?.runs[runIndex].prompt = payload.prompt
+                hydrated.activity?.runs[runIndex].finalOutput = payload.finalOutput
+            }
+            hydrated.activity?.runs[runIndex].externalPayload = nil
+        }
+        return hydrated
+    }
+
+    /// Recovery and adapter stores commonly need the latest run immediately.
+    /// Hydrating just that run keeps those operations correct without bringing
+    /// the full history back into memory.
+    private func recordWithHydratedLatestRunPayload(
+        _ record: RepositoryRecord
+    ) throws -> RepositoryRecord {
+        guard let activity = record.activity,
+              let runIndex = activity.runs.indices.last else { return record }
+        let run = activity.runs[runIndex]
+        guard run.externalPayload == true, run.prompt.isEmpty else { return record }
+        guard let payload = try storedRunPayload(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: run.id
+        ) else {
+            throw WorkspaceStoreError.missingRunPayload(run.id)
+        }
+        var hydrated = record
+        hydrated.activity?.runs[runIndex].prompt = payload.prompt
+        hydrated.activity?.runs[runIndex].finalOutput = payload.finalOutput
+        return hydrated
     }
 
     /// Activity archives remain self-contained, but assembling every transcript in
@@ -1081,6 +1186,7 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
 
 private enum WorkspaceStoreError: LocalizedError {
     case missingActivityToArchive
+    case missingRunPayload(UUID)
     case appendOutcomeUncertain(URL)
     case appendTargetCreationFailed(URL)
     case archiveTranscriptPlaceholderInvalid(URL)
@@ -1092,6 +1198,8 @@ private enum WorkspaceStoreError: LocalizedError {
         switch self {
         case .missingActivityToArchive:
             "There is no activity to archive."
+        case .missingRunPayload(let runID):
+            "The external payload for run \(runID.uuidString) is missing."
         case .appendOutcomeUncertain(let url):
             "The append outcome for \(url.path) could not be verified safely."
         case .appendTargetCreationFailed(let url):

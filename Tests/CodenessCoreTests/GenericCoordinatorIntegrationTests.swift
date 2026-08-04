@@ -81,6 +81,13 @@ struct GenericCoordinatorIntegrationTests {
         var expectedPersistedActivity = activity
         for runIndex in expectedPersistedActivity.runs.indices {
             expectedPersistedActivity.runs[runIndex].transcript = ""
+            expectedPersistedActivity.runs[runIndex].prompt = ""
+            expectedPersistedActivity.runs[runIndex].finalOutput = nil
+            expectedPersistedActivity.runs[runIndex].externalPayload = true
+        }
+        if let lastIndex = expectedPersistedActivity.runs.indices.last {
+            expectedPersistedActivity.runs[lastIndex].prompt = activity.runs[lastIndex].prompt
+            expectedPersistedActivity.runs[lastIndex].finalOutput = activity.runs[lastIndex].finalOutput
         }
         #expect(persisted.activity == expectedPersistedActivity)
         #expect(Set(await codex.releasedSessionIDs()) == [
@@ -306,6 +313,64 @@ struct GenericCoordinatorIntegrationTests {
                 == historicalSessionID
         )
         #expect(coordinator.record.activity?.runs.first?.threadID == historicalSessionID)
+    }
+
+    @Test
+    func loadsOnlySelectedRunPayloadAndHydratesAnotherOnSelection() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalPath = "/tmp/generic-run-payloads-\(UUID().uuidString)"
+        let runs = (1...3).map { sequence in
+            RunRecord(
+                sequence: sequence,
+                role: .implementer,
+                kind: .implementation,
+                status: .completed,
+                threadID: "session-\(sequence)",
+                model: "gpt-test",
+                effort: "high",
+                prompt: "prompt-\(sequence)",
+                finalOutput: "result-\(sequence)",
+                completedAt: .now
+            )
+        }
+        let activity = ActivityRecord(
+            goal: "Keep historical payloads off the active heap",
+            prompts: .builtInDefaults,
+            status: .completed,
+            runs: runs,
+            completedAt: .now
+        )
+        let store = WorkspaceStore(rootURL: root)
+        try await store.save(RepositoryRecord(
+            canonicalPath: canonicalPath,
+            activity: activity
+        ))
+        try await store.saveViewState(
+            RepositoryViewState(selectedRunID: runs[0].id),
+            canonicalPath: canonicalPath
+        )
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store
+        )
+
+        await coordinator.load()
+
+        #expect(coordinator.record.activity?.runs[0].prompt == "prompt-1")
+        #expect(coordinator.record.activity?.runs[1].prompt == "")
+        #expect(coordinator.record.activity?.runs[2].prompt == "")
+
+        coordinator.selectedRunID = runs[1].id
+        try await waitUntil {
+            coordinator.selectedRun?.prompt == "prompt-2"
+        }
+        #expect(coordinator.selectedRun?.finalOutput == "result-2")
+        #expect(coordinator.record.activity?.runs[0].prompt == "")
+        #expect(coordinator.record.activity?.runs[2].prompt == "")
     }
 
     @Test
