@@ -51,9 +51,25 @@ To run Codeness:
   - `codex` 0.145.0 or newer, with App Server support
   - Claude Code 2.1.220 or newer
 
-To build Codeness from source, you also need Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer.
+To build Codeness from source, you also need Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer. The canonical Release install additionally requires a Developer ID Application certificate for team `W65292CD8T`.
 
 Codeness uses the existing authentication of each CLI. New configurable workflows do not require separate OpenAI API credentials.
+
+### Permission preflight
+
+Choose **Codeness → Check Permissions…** to review the macOS capabilities a workflow may use. Opening the window, returning to Codeness, and selecting **Refresh** perform passive checks only. A confirmed capability shows a disabled **Granted** or **Verified** button. A macOS permission prompt can appear only after you explicitly select **Request Access** for Accessibility or Screen Recording. A previously denied screen-recording request opens the matching Privacy & Security pane because macOS will not prompt for it again.
+
+The preflight is deliberately conservative:
+
+- Full Disk Access is shown as **Access Verified** only when Codeness can open a protected probe file without reading it. Every other result is **Not Verified**, because macOS does not expose a precise status API.
+- Files & Folders is granted on demand for individual protected locations.
+- Accessibility and Screen Recording use precise public status and request APIs.
+- System Audio Recording is a separate privacy service. macOS does not expose a public status or generic request API for it, so Codeness links to its own Privacy & Security pane without treating a screen grant as proof of audio access.
+- Automation is managed separately for each target app. Developer Tools and App Management must be verified in System Settings.
+
+Only grant capabilities needed by your workflows. Codeness does not preflight or request microphone, camera, contacts, calendars, notifications, input monitoring, or local-network access.
+
+If System Settings asks to reopen Codeness after a privacy change, do that before starting a long unsupervised workflow.
 
 ### Build and install
 
@@ -64,7 +80,7 @@ cd Codeness
 open /Applications/Codeness.app
 ```
 
-The build script generates the Xcode project, creates and verifies a signed Release build, and installs it at `/Applications/Codeness.app`. The generated `.xcodeproj` is intentionally ignored; project settings live in `project.yml`.
+The build script generates the Xcode project, creates and verifies a Developer ID-signed Release build with its Apple Events entitlement, and installs it at `/Applications/Codeness.app`. Debug builds continue to use development signing. The generated `.xcodeproj` is intentionally ignored; project settings live in `project.yml`.
 
 ### Run your first workflow
 

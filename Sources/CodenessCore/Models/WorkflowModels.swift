@@ -296,6 +296,17 @@ public struct WorkflowTemplate: Codable, Equatable, Identifiable, Sendable {
         if coordinator.instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "The coordinator instructions are empty."
         }
+        let codexStepSessionCount = steps.lazy.filter {
+            $0.target.providerID == .codex
+        }.count
+        let codexCoordinatorHeadroom = coordinator.target.providerID == .codex ? 1 : 0
+        let requiredCodexThreadCount = codexStepSessionCount + codexCoordinatorHeadroom
+        if requiredCodexThreadCount > CodexAgentProvider.maximumLoadedThreadBudget {
+            let coordinatorDetail = codexCoordinatorHeadroom == 1
+                ? " plus one temporary Codex coordinator session"
+                : ""
+            return "\(name) requires \(codexStepSessionCount) persistent Codex step sessions\(coordinatorDetail), exceeding Codex's \(CodexAgentProvider.maximumLoadedThreadBudget)-thread loaded-session budget. Reduce the number of Codex steps or use another provider for the workflow coordinator."
+        }
         return nil
     }
 }

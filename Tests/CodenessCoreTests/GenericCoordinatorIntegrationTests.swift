@@ -28,6 +28,10 @@ struct GenericCoordinatorIntegrationTests {
         try await waitUntil {
             coordinator.record.activity?.status == .completed
         }
+        try await waitUntilReleasedSessions(from: codex, count: 2)
+        try await waitUntil {
+            coordinator.record.activity?.providerSessionsDetachedAt != nil
+        }
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.map { $0.workflowStep?.name } == [
@@ -77,7 +81,237 @@ struct GenericCoordinatorIntegrationTests {
         let persisted = try await WorkspaceStore(rootURL: root).load(
             canonicalPath: coordinator.record.canonicalPath
         )
-        #expect(persisted.activity == activity)
+        var expectedPersistedActivity = activity
+        for runIndex in expectedPersistedActivity.runs.indices {
+            expectedPersistedActivity.runs[runIndex].transcript = ""
+        }
+        #expect(persisted.activity == expectedPersistedActivity)
+        #expect(Set(await codex.releasedSessionIDs()) == [
+            "codex-session-1", "codex-session-2"
+        ])
+        #expect(Set(await claude.releasedSessionIDs()) == [
+            "claude-session-1", "claude-session-2"
+        ])
+
+        await coordinator.startOver()
+        #expect(coordinator.record.activity == nil)
+        #expect(Set(await codex.releasedSessionIDs()) == [
+            "codex-session-1", "codex-session-2"
+        ])
+        #expect(Set(await claude.releasedSessionIDs()) == [
+            "claude-session-1", "claude-session-2"
+        ])
+    }
+
+    @Test
+    func completionDetachDebtRetriesAfterALaterSaveWithoutDoubleReleasing() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let base = WorkspaceStore(rootURL: root)
+        let store = FailingCompletedGenericStore(base: base)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-completion-detach-debt-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Retry a failed completion checkpoint",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+                && coordinator.errorMessage?.contains("final state could not be saved") == true
+        }
+
+        #expect((await codex.releasedSessionIDs()).isEmpty)
+        #expect(await coordinator.flushDocumentState())
+        #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+
+        #expect(await coordinator.prepareForClose(strategy: .immediate) == .ready)
+        #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+        await coordinator.startOver()
+        #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+    }
+
+    @Test
+    func concurrentCompletionSavesShareOneInFlightSessionRelease() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let releaseGate = SessionReleaseGate()
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            sessionReleaseGate: releaseGate
+        )
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-in-flight-release-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Deduplicate concurrent cleanup",
+            workflow: singleStepWorkflow()
+        )
+        await releaseGate.waitUntilReached()
+        let concurrentSave = Task { await coordinator.flushDocumentState() }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+        await releaseGate.release()
+        #expect(await concurrentSave.value)
+        try await waitUntil {
+            coordinator.record.activity?.providerSessionsDetachedAt != nil
+        }
+        #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+    }
+
+    @Test
+    func completedSessionDetachAcknowledgementPreventsReleaseAfterReopen() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalPath = "/tmp/generic-durable-detach-\(UUID().uuidString)"
+        let store = WorkspaceStore(rootURL: root)
+        let firstProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let firstCoordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: AgentProviderRegistry(providers: [firstProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await firstCoordinator.load()
+        await firstCoordinator.startActivity(
+            goal: "Persist successful cleanup",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            firstCoordinator.record.activity?.providerSessionsDetachedAt != nil
+        }
+        #expect(await firstProvider.releasedSessionIDs() == ["codex-session-1"])
+
+        let secondProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let reopened = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [secondProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+        await reopened.load()
+
+        #expect(reopened.record.activity?.providerSessionsDetachedAt != nil)
+        #expect((await secondProvider.releasedSessionIDs()).isEmpty)
+    }
+
+    @Test
+    func failedDetachAcknowledgementRetriesReleaseAfterReopen() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalPath = "/tmp/generic-retry-unacknowledged-detach-\(UUID().uuidString)"
+        let baseStore = WorkspaceStore(rootURL: root)
+        let firstProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let firstCoordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: FailingDetachAcknowledgementStore(base: baseStore),
+            agentProviders: AgentProviderRegistry(providers: [firstProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await firstCoordinator.load()
+        await firstCoordinator.startActivity(
+            goal: "Retry cleanup after an acknowledgement failure",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            firstCoordinator.errorMessage?.contains("acknowledgement could not be saved") == true
+        }
+        #expect(await firstProvider.releasedSessionIDs() == ["codex-session-1"])
+        #expect(firstCoordinator.record.activity?.providerSessionsDetachedAt == nil)
+        let unacknowledged = try await baseStore.load(canonicalPath: canonicalPath)
+        #expect(unacknowledged.activity?.providerSessionsDetachedAt == nil)
+
+        let secondProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let reopened = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: baseStore,
+            agentProviders: AgentProviderRegistry(providers: [secondProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+        await reopened.load()
+
+        #expect(await secondProvider.releasedSessionIDs() == ["codex-session-1"])
+        #expect(reopened.record.activity?.providerSessionsDetachedAt != nil)
+    }
+
+    @Test
+    func failedProviderReleaseRemainsDurableAndRetriesAfterReopen() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalPath = "/tmp/generic-retry-failed-release-\(UUID().uuidString)"
+        let store = WorkspaceStore(rootURL: root)
+        let firstProvider = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            sessionReleaseResults: [false]
+        )
+        let firstCoordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: AgentProviderRegistry(providers: [firstProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+
+        await firstCoordinator.load()
+        await firstCoordinator.startActivity(
+            goal: "Retry a provider release that was not confirmed",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntilReleasedSessions(from: firstProvider, count: 1)
+        try await waitUntil {
+            firstCoordinator.record.activity?.status == .completed
+        }
+        #expect(firstCoordinator.record.activity?.providerSessionsDetachedAt == nil)
+        let persistedDebt = try await store.load(canonicalPath: canonicalPath)
+        #expect(persistedDebt.activity?.providerSessionsDetachedAt == nil)
+
+        let secondProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let reopened = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: AgentProviderRegistry(providers: [secondProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        )
+        await reopened.load()
+
+        #expect(await secondProvider.releasedSessionIDs() == ["codex-session-1"])
+        #expect(reopened.record.activity?.providerSessionsDetachedAt != nil)
     }
 
     @Test
@@ -131,6 +365,8 @@ struct GenericCoordinatorIntegrationTests {
         #expect(session.providerSessionID == nil)
         #expect(session.target == updated.steps[codeIndex].target)
         #expect(coordinator.record.activity?.stepSessions["review"]?.lineage == 1)
+        let releasedCodexSessions = await codex.releasedSessionIDs()
+        #expect(releasedCodexSessions == ["codex-session-1"])
     }
 
     @Test
@@ -420,6 +656,7 @@ struct GenericCoordinatorIntegrationTests {
         try await waitUntil {
             coordinator.record.activity?.status == .completed
         }
+        try await waitUntilReleasedSessions(from: codex, count: 2)
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.count == 2)
@@ -441,6 +678,9 @@ struct GenericCoordinatorIntegrationTests {
         let sessions = await codex.sessionRequests()
         #expect(sessions.count == 2)
         #expect(sessions.map(\.existingSessionID) == [nil, nil])
+        #expect(Set(await codex.releasedSessionIDs()) == [
+            "codex-session-1", "codex-session-2"
+        ])
     }
 
     @Test
@@ -530,6 +770,7 @@ struct GenericCoordinatorIntegrationTests {
                 && coordinator.record.activity?.runs.count == 2
                 && coordinator.record.activity?.runs.last?.status == .completed
         }
+        try await waitUntilReleasedSessions(from: codex, count: 2)
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.count == 2)
@@ -545,6 +786,9 @@ struct GenericCoordinatorIntegrationTests {
             sessions.map(\.existingSessionID)
                 == [nil, "codex-session-1", nil]
         )
+        let released = await codex.releasedSessionIDs()
+        #expect(released.filter { $0 == "codex-session-1" }.count == 1)
+        #expect(released.filter { $0 == "codex-session-2" }.count == 1)
     }
 
     @Test
@@ -584,6 +828,7 @@ struct GenericCoordinatorIntegrationTests {
                 && coordinator.record.activity?.runs.count == 3
                 && coordinator.record.activity?.runs.last?.status == .completed
         }
+        try await waitUntilReleasedSessions(from: codex, count: 2)
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.count == 3)
@@ -601,6 +846,9 @@ struct GenericCoordinatorIntegrationTests {
             sessions.map(\.existingSessionID)
                 == [nil, "codex-session-1", nil]
         )
+        let released = await codex.releasedSessionIDs()
+        #expect(released.filter { $0 == "codex-session-1" }.count == 1)
+        #expect(released.filter { $0 == "codex-session-2" }.count == 1)
     }
 
     @Test
@@ -652,6 +900,7 @@ struct GenericCoordinatorIntegrationTests {
 
         let sessions = await codex.sessionRequests()
         #expect(sessions.map(\.existingSessionID) == [nil, "codex-session-1"])
+        #expect((await codex.releasedSessionIDs()).isEmpty)
     }
 
     @Test
@@ -702,6 +951,313 @@ struct GenericCoordinatorIntegrationTests {
 
         let sessions = await codex.sessionRequests()
         #expect(sessions.map(\.existingSessionID) == [nil, "codex-session-1"])
+        #expect((await codex.releasedSessionIDs()).isEmpty)
+    }
+
+    @Test
+    func closeWaitsForInitialSessionPreparationAndReleasesThePostCloseSession() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let preparationGate = SessionPreparationGate(blockedCall: 1)
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            sessionPreparationGate: preparationGate
+        )
+        let store = WorkspaceStore(rootURL: root)
+        let canonicalPath = "/tmp/generic-close-initial-prepare-\(UUID().uuidString)"
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: BlockingOnceWorkflowRouter()
+        )
+
+        await coordinator.load()
+        let startTask = Task {
+            await coordinator.startActivity(
+                goal: "Close during initial preparation",
+                workflow: singleStepWorkflow()
+            )
+        }
+        await preparationGate.waitUntilReached()
+        let closeTask = Task {
+            await coordinator.prepareForClose(strategy: .immediate)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(coordinator.pauseState == .saving)
+        #expect((await codex.releasedSessionIDs()).isEmpty)
+        await preparationGate.release()
+        #expect(await closeTask.value == .ready)
+        await startTask.value
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.status == .paused)
+        #expect(activity.stepSessions["work"]?.providerSessionID == nil)
+        #expect(activity.runs.last?.threadID == nil)
+        #expect(await codex.startAttemptCount() == 0)
+        #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+        let persisted = try await store.load(canonicalPath: canonicalPath)
+        #expect(persisted.activity?.stepSessions["work"]?.providerSessionID == nil)
+        #expect(persisted.activity?.runs.last?.threadID == nil)
+    }
+
+    @Test
+    func closeWaitsForFreshFallbackPreparationAndReleasesOnlyItsNewSessionOnce() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let preparationGate = SessionPreparationGate(blockedCall: 3)
+        let codex = ScriptedAgentProvider(
+            id: .codex,
+            delay: .zero,
+            rejectsExistingSessions: true,
+            sessionPreparationGate: preparationGate
+        )
+        let store = WorkspaceStore(rootURL: root)
+        let canonicalPath = "/tmp/generic-close-fallback-prepare-\(UUID().uuidString)"
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: BlockingOnceWorkflowRouter()
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Close during fresh fallback preparation",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.runs.last?.workflowHandoff?.outcome == .blocked
+        }
+        let blockedRun = try #require(coordinator.record.activity?.runs.last)
+        let retryTask = Task {
+            await coordinator.retryWorkflowStep(blockedRun.id)
+        }
+        await preparationGate.waitUntilReached()
+        let closeTask = Task {
+            await coordinator.prepareForClose(strategy: .immediate)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(coordinator.pauseState == .saving)
+        await preparationGate.release()
+        #expect(await closeTask.value == .ready)
+        await retryTask.value
+
+        let activity = try #require(coordinator.record.activity)
+        let retryRun = try #require(activity.runs.dropFirst().first)
+        #expect(activity.status == .paused)
+        #expect(activity.workflowResumeCheckpoint == .recoverRun(retryRun.id))
+        #expect(activity.stepSessions["work"]?.providerSessionID == "codex-session-1")
+        #expect(retryRun.threadID == "codex-session-1")
+        #expect(await codex.startAttemptCount() == 1)
+        let released = await codex.releasedSessionIDs()
+        #expect(released.filter { $0 == "codex-session-1" }.count == 1)
+        #expect(released.filter { $0 == "codex-session-2" }.count == 1)
+        let persisted = try await store.load(canonicalPath: canonicalPath)
+        #expect(persisted.activity?.stepSessions["work"]?.providerSessionID == "codex-session-1")
+        #expect(persisted.activity?.runs.last?.threadID == "codex-session-1")
+    }
+
+    @Test
+    func closeWaitsForAnAcceptedBlockedStartAndInterruptsBeforeReleasingItsSession() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = BlockingAcceptedStartProvider()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-close-accepted-start-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [provider]),
+            workflowRouter: BlockingOnceWorkflowRouter()
+        )
+
+        await coordinator.load()
+        let startTask = Task {
+            await coordinator.startActivity(
+                goal: "Close after an agent accepts the turn",
+                workflow: singleStepWorkflow()
+            )
+        }
+        await provider.waitUntilStartWasAccepted()
+        let closeTask = Task {
+            await coordinator.prepareForClose(strategy: .immediate)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(coordinator.pauseState == .saving)
+        #expect(await provider.interruptCallCount() == 0)
+        #expect((await provider.releasedSessionIDs()).isEmpty)
+
+        await provider.releaseStartResponse()
+        #expect(await closeTask.value == .ready)
+        await startTask.value
+
+        let run = try #require(coordinator.record.activity?.runs.last)
+        #expect(coordinator.record.activity?.status == .paused)
+        #expect(run.status == .interrupted)
+        #expect(await provider.interruptCallCount() == 1)
+        #expect(await provider.releasedSessionIDs() == ["codex-session-1"])
+    }
+
+    @Test
+    func backpressureTerminalPreservesFailureAndCompletesWaitingGenericClose() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = BlockingFailOnceTranscriptStore(base: WorkspaceStore(rootURL: root))
+        defer { Task { await store.failFirstBlockedAppend() } }
+        let provider = ControllableTerminalProvider()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-backpressure-close-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: store,
+            agentProviders: AgentProviderRegistry(providers: [provider]),
+            workflowRouter: BlockingOnceWorkflowRouter()
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Preserve generic transcript durability failure while closing",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.runs.last?.status == .running
+        }
+        let run = try #require(coordinator.record.activity?.runs.last)
+
+        let closeTask = Task {
+            await coordinator.prepareForClose(strategy: .immediate)
+        }
+        await provider.waitUntilInterrupted()
+        #expect(coordinator.pauseState == .interrupting)
+        #expect(await provider.interruptCallCount() == 1)
+
+        await provider.emit(.transcript(String(
+            repeating: "g",
+            count: RepositoryCoordinator.maximumPendingTranscriptUTF8Bytes
+        )))
+        await store.waitUntilFirstAppendIsBlocked()
+        await provider.emit(.transcript("not durable"))
+        for _ in 0..<10 { await Task.yield() }
+        await store.failFirstBlockedAppend()
+        try await waitUntil {
+            coordinator.transcriptBackpressureTerminationCount == 1
+        }
+        let failure = try #require(
+            coordinator.record.activity?.runs.last?.relayError
+        )
+        #expect(failure.contains("transcript output could not be persisted"))
+
+        await provider.emit(.interrupted("provider stopped"), finish: true)
+
+        #expect(await closeTask.value == .ready)
+        #expect(coordinator.transcriptBackpressureTerminationCount == 0)
+        #expect(coordinator.pendingTranscriptUTF8ByteCount(for: run.id) == 0)
+        #expect(coordinator.record.activity?.runs.last?.status == .failed)
+        #expect(coordinator.record.activity?.runs.last?.relayError == failure)
+    }
+
+    @Test
+    func safetyInterruptFailureBlocksReplacementAndCloseUntilTerminalAndDetachment() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = ControllableTerminalProvider(
+            interruptFailures: 10,
+            sessionReleaseResults: [false, false, true]
+        )
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-safety-close-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [provider]),
+            workflowRouter: BlockingOnceWorkflowRouter()
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Keep the document attached until safety termination is confirmed",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.runs.last?.status == .running
+        }
+        let activityID = try #require(coordinator.record.activity?.id)
+        let interaction = AgentInteraction(
+            id: "duplicate-safety-request",
+            kind: .questions,
+            title: "Question",
+            detail: "Duplicate request",
+            rawParameters: .object([:])
+        )
+        await provider.emit(.interaction(interaction))
+        await provider.emit(.interaction(interaction))
+        try await waitUntil {
+            coordinator.interactionSafetyTerminationCount == 1
+                && coordinator.errorMessage?.contains(
+                    "Injected provider interrupt failure"
+                ) == true
+        }
+
+        #expect(coordinator.record.activity?.runs.last?.status == .failed)
+        #expect(coordinator.errorMessage?.contains("Injected provider interrupt failure") == true)
+        #expect(!coordinator.canResume)
+        #expect(!coordinator.canStartOver)
+        await coordinator.resume()
+        await coordinator.startOver()
+        #expect(coordinator.record.activity?.id == activityID)
+
+        let failedInterruptClose = await coordinator.prepareForClose(strategy: .immediate)
+        guard case .failed(let interruptFailure) = failedInterruptClose else {
+            Issue.record("Expected close to fail while provider termination is unconfirmed")
+            return
+        }
+        #expect(interruptFailure.contains("Injected provider interrupt failure"))
+        #expect((await provider.releasedSessionIDs()).isEmpty)
+
+        await provider.emit(.interrupted("Provider stopped"), finish: true)
+        try await waitUntil {
+            coordinator.interactionSafetyTerminationCount == 0
+        }
+        #expect(coordinator.record.activity?.runs.last?.status == .failed)
+
+        #expect(coordinator.canStartOver)
+        await coordinator.startOver()
+        #expect(coordinator.record.activity?.id == activityID)
+        #expect(coordinator.errorMessage?.contains("Provider-session detachment was not confirmed") == true)
+        #expect(await provider.releasedSessionIDs() == ["controlled-session"])
+
+        let failedDetachClose = await coordinator.prepareForClose(strategy: .immediate)
+        guard case .failed(let detachFailure) = failedDetachClose else {
+            Issue.record("Expected close to surface the failed provider detachment")
+            return
+        }
+        #expect(detachFailure.contains("could not confirm provider-session detachment"))
+        #expect(await provider.releasedSessionIDs() == [
+            "controlled-session",
+            "controlled-session"
+        ])
+
+        #expect(await coordinator.prepareForClose(strategy: .immediate) == .ready)
+        #expect(await provider.releasedSessionIDs() == [
+            "controlled-session",
+            "controlled-session",
+            "controlled-session"
+        ])
     }
 
     @Test
@@ -741,9 +1297,13 @@ struct GenericCoordinatorIntegrationTests {
         }
         await failureGate.waitUntilReached()
 
-        let closeResult = await coordinator.prepareForClose(strategy: .immediate)
-        #expect(closeResult == .ready)
+        let closeTask = Task {
+            await coordinator.prepareForClose(strategy: .immediate)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(coordinator.pauseState == .saving)
         await failureGate.release()
+        #expect(await closeTask.value == .ready)
         await retryTask.value
 
         let activity = try #require(coordinator.record.activity)
@@ -757,6 +1317,74 @@ struct GenericCoordinatorIntegrationTests {
 
         let sessions = await codex.sessionRequests()
         #expect(sessions.map(\.existingSessionID) == [nil, "codex-session-1"])
+        #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+    }
+
+    @Test
+    func closingAPausedDocumentDetachesButPreservesItsSessionForReopen() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let canonicalPath = "/tmp/generic-close-reopen-\(UUID().uuidString)"
+        let firstProvider = ScriptedAgentProvider(
+            id: .codex,
+            delay: .milliseconds(50)
+        )
+        let firstCoordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [firstProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 99)
+        )
+
+        await firstCoordinator.load()
+        await firstCoordinator.startActivity(
+            goal: "Resume the same phase after reopening",
+            workflow: singleStepWorkflow()
+        )
+        firstCoordinator.setPauseAfterCurrent(true)
+        try await waitUntil {
+            firstCoordinator.record.activity?.status == .paused
+                && firstCoordinator.record.activity?.workflowCursor?.loopIteration == 2
+        }
+        let savedSessionID = try #require(
+            firstCoordinator.record.activity?.stepSessions["work"]?.providerSessionID
+        )
+
+        #expect(await firstCoordinator.prepareForClose(strategy: .immediate) == .ready)
+        #expect(await firstProvider.releasedSessionIDs() == [savedSessionID])
+        #expect(
+            firstCoordinator.record.activity?.stepSessions["work"]?.providerSessionID
+                == savedSessionID
+        )
+        let persisted = try await WorkspaceStore(rootURL: root).load(
+            canonicalPath: canonicalPath
+        )
+        #expect(persisted.activity?.stepSessions["work"]?.providerSessionID == savedSessionID)
+
+        let reopenedProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
+        let reopenedCoordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [reopenedProvider]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 2)
+        )
+        await reopenedCoordinator.load()
+        await reopenedCoordinator.resume()
+        try await waitUntil {
+            reopenedCoordinator.record.activity?.status == .completed
+        }
+
+        let reopenRequests = await reopenedProvider.sessionRequests()
+        #expect(reopenRequests.first?.existingSessionID == savedSessionID)
+        #expect(
+            reopenedCoordinator.record.activity?.stepSessions["work"]?.providerSessionID
+                == savedSessionID
+        )
     }
 
     private func waitUntil(
@@ -769,6 +1397,20 @@ struct GenericCoordinatorIntegrationTests {
             try await Task.sleep(for: .milliseconds(5))
         }
         try #require(condition())
+    }
+
+    private func waitUntilReleasedSessions(
+        from provider: ScriptedAgentProvider,
+        count: Int,
+        timeout: Duration = .seconds(3)
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while await provider.releasedSessionIDs().count < count,
+              clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await provider.releasedSessionIDs().count >= count)
     }
 
     private func fullWorkflow() -> WorkflowTemplate {
@@ -880,6 +1522,113 @@ private actor BlockingOnceWorkflowRouter: WorkflowHandoffRouting {
     }
 }
 
+private actor ControllableTerminalProvider: AgentProviding {
+    nonisolated let id: AgentProviderID = .codex
+
+    private var continuation: AsyncStream<AgentEvent>.Continuation?
+    private var interrupts = 0
+    private var remainingInterruptFailures: Int
+    private var sessionReleaseResults: [Bool]
+    private var interruptWaiters: [CheckedContinuation<Void, Never>] = []
+    private var released: [String] = []
+
+    init(
+        interruptFailures: Int = 0,
+        sessionReleaseResults: [Bool] = []
+    ) {
+        remainingInterruptFailures = interruptFailures
+        self.sessionReleaseResults = sessionReleaseResults
+    }
+
+    func prepareSession(_ request: AgentSessionRequest) -> AgentSession {
+        AgentSession(providerID: id, id: "controlled-session", target: request.target)
+    }
+
+    func startRun(_ request: AgentRunRequest) -> AgentRunHandle {
+        let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
+        continuation = pair.continuation
+        let executionID = "controlled-execution"
+        pair.continuation.yield(.started(executionID: executionID))
+        return AgentRunHandle(
+            runID: request.runID,
+            providerID: id,
+            sessionID: request.session.id,
+            executionID: executionID,
+            events: pair.stream
+        )
+    }
+
+    func steer(runID: UUID, message: String) {
+        _ = runID
+        _ = message
+    }
+
+    func interrupt(runID: UUID) throws {
+        _ = runID
+        interrupts += 1
+        let waiters = interruptWaiters
+        interruptWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if remainingInterruptFailures > 0 {
+            remainingInterruptFailures -= 1
+            throw ControllableTerminalProviderError.injectedInterruptFailure
+        }
+    }
+
+    func resolveInteraction(
+        runID: UUID,
+        interactionID: String,
+        resolution: AgentInteractionResolution
+    ) {
+        _ = runID
+        _ = interactionID
+        _ = resolution
+    }
+
+    func runUtility(_ request: AgentUtilityRequest) -> AgentUtilityResult {
+        _ = request
+        return AgentUtilityResult(output: "{}")
+    }
+
+    func releaseSession(id: String) -> Bool {
+        released.append(id)
+        return sessionReleaseResults.isEmpty ? true : sessionReleaseResults.removeFirst()
+    }
+
+    func shutdown() {}
+
+    func emit(_ event: AgentEvent, finish: Bool = false) {
+        continuation?.yield(event)
+        if finish {
+            continuation?.finish()
+            continuation = nil
+        }
+    }
+
+    func interruptCallCount() -> Int {
+        interrupts
+    }
+
+    func releasedSessionIDs() -> [String] {
+        released
+    }
+
+    func waitUntilInterrupted() async {
+        guard interrupts == 0 else { return }
+        await withCheckedContinuation { continuation in
+            interruptWaiters.append(continuation)
+        }
+    }
+}
+
+private enum ControllableTerminalProviderError: LocalizedError {
+    case injectedInterruptFailure
+
+    var errorDescription: String? {
+        "Injected provider interrupt failure"
+    }
+}
+
 private actor ScriptedAgentProvider: AgentProviding {
     nonisolated let id: AgentProviderID
 
@@ -890,11 +1639,15 @@ private actor ScriptedAgentProvider: AgentProviding {
     private let resumedRunsFailBeforeStart: Bool
     private let resumedRunsFailTransientlyBeforeStart: Bool
     private let resumedStartFailureGate: ResumedStartFailureGate?
+    private let sessionPreparationGate: SessionPreparationGate?
+    private let sessionReleaseGate: SessionReleaseGate?
+    private var sessionReleaseResults: [Bool]
     private var prepared: [AgentSessionRequest] = []
     private var started: [AgentRunRequest] = []
     private var resumedSessionIDs: Set<String> = []
     private var sessionCounter = 0
     private var startAttempts = 0
+    private var released: [String] = []
 
     init(
         id: AgentProviderID,
@@ -904,7 +1657,10 @@ private actor ScriptedAgentProvider: AgentProviding {
         transientlyRejectsExistingSessions: Bool = false,
         resumedRunsFailBeforeStart: Bool = false,
         resumedRunsFailTransientlyBeforeStart: Bool = false,
-        resumedStartFailureGate: ResumedStartFailureGate? = nil
+        resumedStartFailureGate: ResumedStartFailureGate? = nil,
+        sessionPreparationGate: SessionPreparationGate? = nil,
+        sessionReleaseGate: SessionReleaseGate? = nil,
+        sessionReleaseResults: [Bool] = []
     ) {
         self.id = id
         self.delay = delay
@@ -914,10 +1670,16 @@ private actor ScriptedAgentProvider: AgentProviding {
         self.resumedRunsFailBeforeStart = resumedRunsFailBeforeStart
         self.resumedRunsFailTransientlyBeforeStart = resumedRunsFailTransientlyBeforeStart
         self.resumedStartFailureGate = resumedStartFailureGate
+        self.sessionPreparationGate = sessionPreparationGate
+        self.sessionReleaseGate = sessionReleaseGate
+        self.sessionReleaseResults = sessionReleaseResults
     }
 
-    func prepareSession(_ request: AgentSessionRequest) throws -> AgentSession {
+    func prepareSession(_ request: AgentSessionRequest) async throws -> AgentSession {
         prepared.append(request)
+        if let sessionPreparationGate {
+            await sessionPreparationGate.blockIfNeeded(call: prepared.count)
+        }
         let sessionID: String
         if let existing = request.existingSessionID {
             if transientlyRejectsExistingSessions {
@@ -1053,6 +1815,12 @@ private actor ScriptedAgentProvider: AgentProviding {
         )
     }
 
+    func releaseSession(id: String) async -> Bool {
+        released.append(id)
+        await sessionReleaseGate?.blockIfNeeded(call: released.count)
+        return sessionReleaseResults.isEmpty ? true : sessionReleaseResults.removeFirst()
+    }
+
     func shutdown() {}
 
     func sessionRequests() -> [AgentSessionRequest] {
@@ -1069,6 +1837,10 @@ private actor ScriptedAgentProvider: AgentProviding {
 
     func startAttemptCount() -> Int {
         startAttempts
+    }
+
+    func releasedSessionIDs() -> [String] {
+        released
     }
 }
 
@@ -1097,6 +1869,166 @@ private actor ResumedStartFailureGate {
     func release() {
         releaseWaiter?.resume()
         releaseWaiter = nil
+    }
+}
+
+private actor SessionPreparationGate {
+    private let blockedCall: Int
+    private var reached = false
+    private var reachedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(blockedCall: Int) {
+        self.blockedCall = blockedCall
+    }
+
+    func blockIfNeeded(call: Int) async {
+        guard call == blockedCall else { return }
+        reached = true
+        let waiters = reachedWaiters
+        reachedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseWaiter = continuation
+        }
+    }
+
+    func waitUntilReached() async {
+        guard !reached else { return }
+        await withCheckedContinuation { continuation in
+            reachedWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+private actor SessionReleaseGate {
+    private var reached = false
+    private var reachedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    func blockIfNeeded(call: Int) async {
+        guard call == 1 else { return }
+        reached = true
+        let waiters = reachedWaiters
+        reachedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseWaiter = continuation
+        }
+    }
+
+    func waitUntilReached() async {
+        guard !reached else { return }
+        await withCheckedContinuation { continuation in
+            reachedWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+private actor BlockingAcceptedStartProvider: AgentProviding {
+    nonisolated let id = AgentProviderID.codex
+
+    private var startWasAccepted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var startReleaseContinuation: CheckedContinuation<Void, Never>?
+    private var runContinuations: [UUID: AsyncStream<AgentEvent>.Continuation] = [:]
+    private var interruptCalls = 0
+    private var releasedSessions: [String] = []
+
+    func prepareSession(_ request: AgentSessionRequest) -> AgentSession {
+        AgentSession(
+            providerID: id,
+            id: request.existingSessionID ?? "codex-session-1",
+            target: request.target
+        )
+    }
+
+    func startRun(_ request: AgentRunRequest) async -> AgentRunHandle {
+        let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
+        runContinuations[request.runID] = pair.continuation
+        startWasAccepted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            startReleaseContinuation = continuation
+        }
+        return AgentRunHandle(
+            runID: request.runID,
+            providerID: id,
+            sessionID: request.session.id,
+            executionID: "accepted-execution-1",
+            events: pair.stream
+        )
+    }
+
+    func steer(runID: UUID, message: String) {
+        _ = runID
+        _ = message
+    }
+
+    func interrupt(runID: UUID) {
+        interruptCalls += 1
+        if let continuation = runContinuations.removeValue(forKey: runID) {
+            continuation.yield(.interrupted(nil))
+            continuation.finish()
+        }
+    }
+
+    func resolveInteraction(
+        runID: UUID,
+        interactionID: String,
+        resolution: AgentInteractionResolution
+    ) {
+        _ = runID
+        _ = interactionID
+        _ = resolution
+    }
+
+    func runUtility(_ request: AgentUtilityRequest) throws -> AgentUtilityResult {
+        throw AgentProviderError.unavailable(id, "Utilities are not used by this fixture.")
+    }
+
+    func releaseSession(id: String) -> Bool {
+        releasedSessions.append(id)
+        return true
+    }
+
+    func shutdown() {
+        for continuation in runContinuations.values {
+            continuation.finish()
+        }
+        runContinuations.removeAll()
+    }
+
+    func waitUntilStartWasAccepted() async {
+        guard !startWasAccepted else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseStartResponse() {
+        startReleaseContinuation?.resume()
+        startReleaseContinuation = nil
+    }
+
+    func interruptCallCount() -> Int {
+        interruptCalls
+    }
+
+    func releasedSessionIDs() -> [String] {
+        releasedSessions
     }
 }
 
@@ -1168,6 +2100,188 @@ private actor NoopLegacyRouter: HandoffRouting {
             handoffText: "Unused",
             sourceDisposition: .unclear,
             runLabel: "Unused"
+        )
+    }
+}
+
+private actor FailingCompletedGenericStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private var hasFailed = false
+
+    init(base: WorkspaceStore) {
+        self.base = base
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        if !hasFailed, record.activity?.status == .completed {
+            hasFailed = true
+            throw GenericStoreFailure()
+        }
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendRawLine(
+            line,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+}
+
+private actor FailingDetachAcknowledgementStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private var hasFailed = false
+
+    init(base: WorkspaceStore) {
+        self.base = base
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        if !hasFailed, record.activity?.providerSessionsDetachedAt != nil {
+            hasFailed = true
+            throw GenericStoreFailure()
+        }
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendRawLine(
+            line,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
         )
     }
 }

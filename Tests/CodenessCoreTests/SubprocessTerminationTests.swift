@@ -65,7 +65,7 @@ struct SubprocessTerminationTests {
     }
 
     @Test
-    func executableVerificationAndDiscoveryTranslateSignalTermination() throws {
+    func executableVerificationAndDiscoveryTranslateSignalTermination() async throws {
         let fixture = try TerminatingExecutableFixture()
         defer { fixture.remove() }
         let descriptor = AgentProviderDescriptor(
@@ -75,29 +75,31 @@ struct SubprocessTerminationTests {
         )
 
         var codexMessage: String?
-        do {
-            _ = try CodexExecutableLocator.verify(fixture.executableURL)
-        } catch {
-            codexMessage = error.localizedDescription
-        }
-
         var agentMessage: String?
-        do {
-            _ = try AgentExecutableLocator.verify(
-                fixture.executableURL,
-                descriptor: descriptor
-            )
-        } catch {
-            agentMessage = error.localizedDescription
-        }
-
         var discoveryMessage: String?
-        do {
-            _ = try ClaudeExecutableInspector.models(
-                executableURL: fixture.executableURL
-            )
-        } catch {
-            discoveryMessage = error.localizedDescription
+        await OwnedSubprocessSupervisorTestLease.withLease {
+            do {
+                _ = try await CodexExecutableLocator.verify(fixture.executableURL)
+            } catch {
+                codexMessage = error.localizedDescription
+            }
+
+            do {
+                _ = try await AgentExecutableLocator.verify(
+                    fixture.executableURL,
+                    descriptor: descriptor
+                )
+            } catch {
+                agentMessage = error.localizedDescription
+            }
+
+            do {
+                _ = try await ClaudeExecutableInspector.models(
+                    executableURL: fixture.executableURL
+                )
+            } catch {
+                discoveryMessage = error.localizedDescription
+            }
         }
 
         #expect(

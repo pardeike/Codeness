@@ -173,7 +173,7 @@ struct RunTranscriptPresentationTests {
     }
 
     @Test
-    func divergentAppendLogKeepsMetadataAndAddsOnlyItsNewRemainder() {
+    func divergentAppendLogKeepsMetadataWithoutSynthesizingARemainder() {
         let common = "Reasoning\nFirst update.\n"
         let metadata = common + "Metadata-only update.\n"
         let appendLog = common + "Append-only later update.\n"
@@ -182,7 +182,29 @@ struct RunTranscriptPresentationTests {
             RunTranscriptPresentation.reconciledTranscript(
                 metadata: metadata,
                 appendLog: appendLog
-            ) == metadata + "Append-only later update.\n"
+            ) == metadata
+        )
+    }
+
+    @Test
+    func middleGapAndTruncatedAppendLogsKeepMetadataCanonical() {
+        let prefix = "Reasoning\nFirst update.\n"
+        let sharedTail = "Shared final output.\n"
+        let metadataWithMiddleGap = prefix + "Metadata-only diagnostic.\n" + sharedTail
+        let appendLogMissingMiddle = prefix + sharedTail
+        let truncatedAppendLog = prefix + "truncated fragment"
+
+        #expect(
+            RunTranscriptPresentation.reconciledTranscript(
+                metadata: metadataWithMiddleGap,
+                appendLog: appendLogMissingMiddle
+            ) == metadataWithMiddleGap
+        )
+        #expect(
+            RunTranscriptPresentation.reconciledTranscript(
+                metadata: metadataWithMiddleGap,
+                appendLog: truncatedAppendLog
+            ) == metadataWithMiddleGap
         )
     }
 

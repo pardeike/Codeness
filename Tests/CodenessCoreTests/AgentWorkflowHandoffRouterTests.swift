@@ -4,6 +4,17 @@ import Testing
 
 struct AgentWorkflowHandoffRouterTests {
     @Test
+    func registryReportsFailureAfterAttemptingEveryProviderShutdown() async {
+        let codex = UtilityOnlyAgentProvider(id: .codex)
+        let claude = UtilityOnlyAgentProvider(id: .claude, shutdownResult: false)
+        let registry = AgentProviderRegistry(providers: [codex, claude])
+
+        #expect(!(await registry.shutdown()))
+        #expect(await codex.shutdownCount() == 1)
+        #expect(await claude.shutdownCount() == 1)
+    }
+
+    @Test
     func usesConfiguredProviderTargetAndAcceptsCompletionOnlyAtLoopDecision() async throws {
         let provider = UtilityOnlyAgentProvider(id: .claude)
         let registry = AgentProviderRegistry(providers: [provider])
@@ -103,10 +114,13 @@ struct AgentWorkflowHandoffRouterTests {
 
 private actor UtilityOnlyAgentProvider: AgentProviding {
     nonisolated let id: AgentProviderID
+    private let shutdownResult: Bool
     private var utilityRequests: [AgentUtilityRequest] = []
+    private var shutdowns = 0
 
-    init(id: AgentProviderID) {
+    init(id: AgentProviderID, shutdownResult: Bool = true) {
         self.id = id
+        self.shutdownResult = shutdownResult
     }
 
     func prepareSession(_ request: AgentSessionRequest) throws -> AgentSession {
@@ -157,7 +171,16 @@ private actor UtilityOnlyAgentProvider: AgentProviding {
 
     func shutdown() {}
 
+    func shutdownAndVerify() -> Bool {
+        shutdowns += 1
+        return shutdownResult
+    }
+
     func requests() -> [AgentUtilityRequest] {
         utilityRequests
+    }
+
+    func shutdownCount() -> Int {
+        shutdowns
     }
 }

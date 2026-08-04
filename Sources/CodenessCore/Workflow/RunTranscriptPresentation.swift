@@ -53,8 +53,7 @@ public enum RunTranscriptPresentation {
     }
 
     public static func reconciledTranscript(metadata: String, appendLog: String) -> String {
-        guard !appendLog.isEmpty, appendLog != metadata else { return metadata }
-        guard !metadata.isEmpty else { return appendLog }
+        guard appendLog != metadata else { return metadata }
         if appendLog.hasPrefix(metadata) {
             return appendLog
         }
@@ -62,16 +61,10 @@ public enum RunTranscriptPresentation {
             return metadata
         }
 
-        let sharedPrefixCount = zip(metadata, appendLog).prefix { $0.0 == $0.1 }.count
-        // An append-only transcript for this run should share its beginning with the
-        // metadata copy. If it does not, prefer the successfully decoded metadata
-        // instead of joining unrelated or corrupt recovery data to it.
-        guard sharedPrefixCount > 0 else { return metadata }
-        let appendOnlyRemainder = String(appendLog.dropFirst(sharedPrefixCount))
-        guard !appendOnlyRemainder.isEmpty, !metadata.hasSuffix(appendOnlyRemainder) else {
-            return metadata
-        }
-        return metadata + appendOnlyRemainder
+        // Prefix relationships are the only safe automatic recovery case. A gap,
+        // truncation, or malformed fragment cannot be merged without inventing an
+        // ordering, so the successfully decoded metadata remains canonical.
+        return metadata
     }
 
     public static func text(

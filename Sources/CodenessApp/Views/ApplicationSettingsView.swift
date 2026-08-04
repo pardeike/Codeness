@@ -54,6 +54,7 @@ struct ApplicationSettingsView: View {
                                             )
                                         }
                                     }
+                                    .disabled(application.isProviderRestartPending(.codex))
                                 }
                             }
                         }
@@ -81,6 +82,7 @@ struct ApplicationSettingsView: View {
                                             )
                                         }
                                     }
+                                    .disabled(application.isProviderRestartPending(.claude))
                                 }
                             }
                         }
@@ -326,7 +328,10 @@ struct ApplicationSettingsView: View {
     }
 
     private var serverIsStarting: Bool {
-        application.serverState == .starting || application.claudeState == .starting
+        application.serverState == .starting
+            || application.claudeState == .starting
+            || application.isProviderRestartPending(.codex)
+            || application.isProviderRestartPending(.claude)
     }
 
     private var codexCanRetry: Bool {

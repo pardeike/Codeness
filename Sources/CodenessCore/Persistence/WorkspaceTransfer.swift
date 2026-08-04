@@ -188,6 +188,7 @@ extension WorkspaceStore {
             backupURL = nil
         }
 
+        prepareForWorkspaceDirectoryReplacement(destinationDirectory)
         do {
             try Self.installWorkspaceDirectory(
                 importedWorkspaceDirectory: extracted.workspaceDirectory,
@@ -197,6 +198,7 @@ extension WorkspaceStore {
         } catch {
             throw WorkspaceTransferError.archiveOperationFailed(error.localizedDescription)
         }
+        workspaceDirectoryReplacementDidComplete(destinationDirectory)
 
         return WorkspaceImportResult(
             manifest: extracted.manifest,

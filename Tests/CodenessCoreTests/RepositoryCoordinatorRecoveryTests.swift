@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import CodenessCore
 
+@Suite(.serialized)
 @MainActor
 struct RepositoryCoordinatorRecoveryTests {
     @Test
@@ -301,7 +302,7 @@ struct RepositoryCoordinatorRecoveryTests {
         let record = repositoryRecord(activityStatus: .completed, run: savedRun)
         let root = temporaryRoot()
         let store = WorkspaceStore(rootURL: root)
-        try await store.save(record)
+        try await writeLegacyWorkspace(record, to: store)
         let activity = try #require(record.activity)
         try await store.appendTranscript(
             "persisted\nlatest delta\n",
@@ -329,7 +330,7 @@ struct RepositoryCoordinatorRecoveryTests {
         let record = repositoryRecord(activityStatus: .completed, run: savedRun)
         let root = temporaryRoot()
         let store = WorkspaceStore(rootURL: root)
-        try await store.save(record)
+        try await writeLegacyWorkspace(record, to: store)
         let activity = try #require(record.activity)
         try await store.appendTranscript(
             "persisted\n",
@@ -348,6 +349,548 @@ struct RepositoryCoordinatorRecoveryTests {
         await coordinator.load()
 
         #expect(coordinator.record.activity?.runs.last?.transcript == "persisted\nnewer metadata\n")
+    }
+
+    @Test
+    func loadsOnlyTheSelectedTranscriptAndEvictsItWhenSelectionChanges() async throws {
+        var firstRun = run(status: .completed)
+        firstRun.transcript = "first run transcript\n"
+        let secondRun = RunRecord(
+            sequence: 2,
+            role: .reviewer,
+            kind: .review,
+            status: .completed,
+            threadID: "reviewer-thread",
+            turnID: "turn-2",
+            model: "model",
+            effort: "high",
+            prompt: "Review",
+            transcript: "second run transcript\n"
+        )
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-lazy-transcript-\(UUID().uuidString)",
+            implementerThreadID: "implementer-thread",
+            reviewerThreadID: "reviewer-thread",
+            activity: ActivityRecord(
+                goal: "Lazy transcript recovery",
+                prompts: .builtInDefaults,
+                status: .completed,
+                runs: [firstRun, secondRun]
+            )
+        )
+        let root = temporaryRoot()
+        let store = WorkspaceStore(rootURL: root)
+        try await store.save(record)
+        try await store.saveViewState(
+            RepositoryViewState(selectedRunID: firstRun.id),
+            canonicalPath: record.canonicalPath
+        )
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        await coordinator.load()
+
+        #expect(coordinator.record.activity?.runs[0].transcript == "first run transcript\n")
+        #expect(coordinator.record.activity?.runs[1].transcript == "")
+
+        coordinator.selectedRunID = secondRun.id
+        await waitUntil {
+            coordinator.record.activity?.runs[0].transcript == ""
+                && coordinator.record.activity?.runs[1].transcript == "second run transcript\n"
+        }
+
+        #expect(coordinator.record.activity?.runs[0].transcript == "")
+        #expect(coordinator.record.activity?.runs[1].transcript == "second run transcript\n")
+    }
+
+    @Test
+    func pendingTranscriptFlushPreservesTextThatArrivesWhileTheRetryIsBlocked() async throws {
+        var savedRun = run(status: .running)
+        savedRun.transcript = "existing\n"
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = BlockingTranscriptRetryStore(base: baseStore)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+
+        await coordinator.handle(transcriptDelta(
+            "first\n",
+            itemID: "item-1",
+            run: savedRun
+        ))
+        for _ in 0..<100 {
+            if await store.appendCallCount() >= 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(await store.appendCallCount() == 1)
+        coordinator.selectedRunID = nil
+        for _ in 0..<100 {
+            if await store.appendCallCount() >= 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(await store.appendCallCount() == 2)
+
+        await coordinator.handle(transcriptDelta(
+            "second\n",
+            itemID: "item-2",
+            run: savedRun
+        ))
+        await store.releaseBlockedRetry()
+
+        for _ in 0..<100 {
+            if await store.appendCallCount() >= 3 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let activity = try #require(record.activity)
+        let recovered = try await baseStore.recoveredTranscript(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: savedRun.id
+        )
+
+        #expect(await store.appendCallCount() == 3)
+        #expect(recovered == "existing\nfirst\nsecond\n")
+        #expect(coordinator.record.activity?.runs.last?.transcript == "")
+    }
+
+    @Test
+    func closeCannotOvertakeABlockedFirstTranscriptAppend() async throws {
+        var savedRun = run(status: .running)
+        savedRun.transcript = "existing\n"
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = BlockingFirstTranscriptStore(base: baseStore, firstAppendFails: true)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+
+        let eventTask = Task {
+            await coordinator.handle(transcriptDelta(
+                "must survive close\n",
+                itemID: "blocked-item",
+                run: savedRun
+            ))
+        }
+        await store.waitUntilFirstAppendIsBlocked()
+        let closeTask = Task {
+            await coordinator.prepareForClose(strategy: .immediate)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(coordinator.pauseState == .saving)
+        await store.releaseFirstAppend()
+        await eventTask.value
+        #expect(await closeTask.value != .ready)
+
+        #expect(await coordinator.flushDocumentState())
+        let activity = try #require(record.activity)
+        let recovered = try await baseStore.recoveredTranscript(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: savedRun.id
+        )
+        #expect(recovered == "existing\nmust survive close\n")
+        #expect(await store.appendCallCount() == 2)
+    }
+
+    @Test
+    func hydrationAwaitsTheInFlightAppendAndPresentsTheChunkExactlyOnce() async throws {
+        var savedRun = run(status: .running)
+        savedRun.transcript = "existing\n"
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = AppendCompletionGateStore(base: baseStore)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+        coordinator.selectedRunID = nil
+        await waitUntil {
+            coordinator.record.activity?.runs.last?.transcript == ""
+        }
+        await store.blockNextAppendAfterWriting()
+
+        let eventTask = Task {
+            await coordinator.handle(transcriptDelta(
+                "live delta\n",
+                itemID: "hydration-item",
+                run: savedRun
+            ))
+        }
+        await store.waitUntilAppendIsWrittenAndBlocked()
+        coordinator.selectedRunID = savedRun.id
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(coordinator.record.activity?.runs.last?.transcript == "")
+
+        await store.releaseBlockedAppend()
+        await eventTask.value
+        await waitUntil {
+            coordinator.record.activity?.runs.last?.transcript == "existing\nlive delta\n"
+        }
+        #expect(coordinator.record.activity?.runs.last?.transcript == "existing\nlive delta\n")
+    }
+
+    @Test
+    func deltaArrivingDuringTailHydrationIsPresentedExactlyOnce() async throws {
+        var savedRun = run(status: .running)
+        savedRun.transcript = "existing\n"
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = BlockingTranscriptTailStore(base: baseStore)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+        await store.blockNextTailRead()
+
+        let hydration = Task {
+            await coordinator.recoverAppendOnlyTranscript(runID: savedRun.id)
+        }
+        await store.waitUntilTailReadIsBlocked()
+        await coordinator.handle(transcriptDelta(
+            "during hydration\n",
+            itemID: "tail-hydration-item",
+            run: savedRun
+        ))
+        await store.releaseBlockedTailRead()
+        await hydration.value
+
+        #expect(
+            coordinator.record.activity?.runs.last?.transcript
+                == "existing\nduring hydration\n"
+        )
+        #expect(await coordinator.flushDocumentState())
+        let activity = try #require(record.activity)
+        #expect(
+            try await baseStore.recoveredTranscript(
+                repositoryPath: record.canonicalPath,
+                activityID: activity.id,
+                runID: savedRun.id
+            ) == "existing\nduring hydration\n"
+        )
+    }
+
+    @Test
+    func repeatedIdenticalPendingChunkIsPresentedOnceAndRemainsExactAfterRetry() async throws {
+        var savedRun = run(status: .running)
+        savedRun.transcript = "repeat\n"
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = TranscriptAppendProbeStore(base: baseStore, failureCount: 2)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+
+        await coordinator.handle(transcriptDelta(
+            "repeat\n",
+            itemID: "repeated-item",
+            run: savedRun
+        ))
+        for _ in 0..<100 {
+            if await store.appendCallCount() >= 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        coordinator.selectedRunID = nil
+        await waitUntil {
+            coordinator.record.activity?.runs.last?.transcript == ""
+        }
+        coordinator.selectedRunID = savedRun.id
+        await waitUntil {
+            coordinator.record.activity?.runs.last?.transcript == "repeat\nrepeat\n"
+        }
+        #expect(await store.appendCallCount() == 2)
+
+        #expect(await coordinator.flushDocumentState())
+        await waitUntil {
+            coordinator.record.activity?.runs.last?.transcript == "repeat\nrepeat\n"
+        }
+        let activity = try #require(record.activity)
+        let recovered = try await baseStore.recoveredTranscript(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: savedRun.id
+        )
+        #expect(recovered == "repeat\nrepeat\n")
+        #expect(await store.appendCallCount() == 3)
+    }
+
+    @Test
+    func manySmallTranscriptDeltasAreBatchedForDiskAndPresentation() async throws {
+        var savedRun = run(status: .running)
+        savedRun.transcript = "prefix:"
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = TranscriptAppendProbeStore(base: baseStore)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+        let baselineMutations = coordinator.transcriptPresentationMutationCount
+        let deltaCount = 2_000
+
+        for index in 0..<deltaCount {
+            await coordinator.handle(transcriptDelta(
+                "x",
+                itemID: "burst-\(index)",
+                run: savedRun
+            ))
+        }
+        #expect(await coordinator.flushDocumentState())
+        await waitUntil(timeout: .seconds(3)) {
+            (coordinator.record.activity?.runs.last?.transcript ?? "").utf8.count
+                == "prefix:".utf8.count + deltaCount
+        }
+
+        #expect(
+            coordinator.record.activity?.runs.last?.transcript
+                == "prefix:" + String(repeating: "x", count: deltaCount)
+        )
+        #expect(coordinator.transcriptPresentationMutationCount - baselineMutations < deltaCount / 10)
+        #expect(await store.appendCallCount() < deltaCount / 10)
+    }
+
+    @Test
+    func failedTranscriptFlushIgnoresEveryLaterDeltaWithoutGrowingRetainedState() async throws {
+        let pendingLimit = RepositoryCoordinator.maximumPendingTranscriptUTF8Bytes
+        let bufferedText = String(repeating: "b", count: pendingLimit)
+        let firstRejectedText = "first rejected delta\n"
+        let laterRejectedText = "later rejected delta\n"
+        let laterDeltaCount = 500
+        let savedRun = run(status: .running)
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = TranscriptAppendProbeStore(base: baseStore, failureCount: .max)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+
+        await coordinator.handle(transcriptDelta(
+            bufferedText,
+            itemID: "fills-pending-limit",
+            run: savedRun
+        ))
+        for _ in 0..<100 {
+            if await store.appendCallCount() >= 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await store.appendCallCount() == 1)
+
+        await coordinator.handle(transcriptDelta(
+            firstRejectedText,
+            itemID: "triggers-fail-closed",
+            run: savedRun
+        ))
+        for index in 0..<laterDeltaCount {
+            await coordinator.handle(transcriptDelta(
+                laterRejectedText,
+                itemID: "rejected-after-failure-\(index)",
+                run: savedRun
+            ))
+        }
+
+        // The first rejected chunk records the diagnostic count and marks the
+        // run failed. Exact active-run admission then ignores every later event
+        // for that turn instead of continuing to parse or account hostile input.
+        let expectedDroppedByteCount = firstRejectedText.utf8.count
+        #expect(coordinator.transcriptIsBackpressured(for: savedRun.id))
+        #expect(coordinator.pendingTranscriptUTF8ByteCount(for: savedRun.id) == pendingLimit)
+        #expect(coordinator.droppedTranscriptUTF8ByteCount(for: savedRun.id) == expectedDroppedByteCount)
+        #expect(await store.appendCallCount() == 2)
+        #expect(coordinator.record.activity?.status == .paused)
+        #expect(coordinator.record.activity?.runs.last?.status == .failed)
+        #expect(coordinator.record.activity?.resumeCheckpoint == .recoverRun(savedRun.id))
+        #expect(coordinator.errorMessage?.contains("\(expectedDroppedByteCount) UTF-8 bytes") == true)
+    }
+
+    @Test
+    func singleOversizedTranscriptDeltaRetainsOnlyTheCappedPrefixWhenItsFlushFails() async throws {
+        let pendingLimit = RepositoryCoordinator.maximumPendingTranscriptUTF8Bytes
+        let rejectedSuffixByteCount = 4_097
+        let oversizedText = String(repeating: "z", count: pendingLimit + rejectedSuffixByteCount)
+        let savedRun = run(status: .running)
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = TranscriptAppendProbeStore(base: baseStore, failureCount: .max)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+
+        await coordinator.handle(transcriptDelta(
+            oversizedText,
+            itemID: "single-oversized-delta",
+            run: savedRun
+        ))
+
+        #expect(coordinator.transcriptIsBackpressured(for: savedRun.id))
+        #expect(coordinator.pendingTranscriptUTF8ByteCount(for: savedRun.id) == pendingLimit)
+        #expect(coordinator.droppedTranscriptUTF8ByteCount(for: savedRun.id) == rejectedSuffixByteCount)
+        #expect(await store.appendCallCount() == 1)
+        #expect(coordinator.record.activity?.status == .paused)
+        #expect(coordinator.record.activity?.runs.last?.status == .failed)
+        #expect(coordinator.errorMessage?.contains("\(rejectedSuffixByteCount) UTF-8 bytes") == true)
+    }
+
+    @Test
+    func tinyTranscriptDeltasCannotExceedThePendingChunkCapWhenPersistenceFails() async throws {
+        let chunkLimit = RepositoryCoordinator.maximumPendingTranscriptChunkCount
+        let savedRun = run(status: .running)
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = TranscriptAppendProbeStore(base: baseStore, failureCount: .max)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        await coordinator.load()
+
+        for _ in 0...chunkLimit {
+            await coordinator.handle(transcriptDelta(
+                "x",
+                itemID: "one-streaming-item",
+                run: savedRun
+            ))
+        }
+
+        #expect(coordinator.transcriptIsBackpressured(for: savedRun.id))
+        #expect(coordinator.pendingTranscriptChunkCount(for: savedRun.id) == chunkLimit)
+        #expect(coordinator.pendingTranscriptUTF8ByteCount(for: savedRun.id) == chunkLimit)
+        #expect(coordinator.droppedTranscriptUTF8ByteCount(for: savedRun.id) == 1)
+        #expect(coordinator.record.activity?.status == .paused)
+        #expect(coordinator.record.activity?.runs.last?.status == .failed)
+    }
+
+    @Test
+    func transcriptTailReadNeverBeginsInsideAMultibyteScalar() async throws {
+        let transcript = "head" + String(repeating: "🙂", count: 10) + "tail"
+        var savedRun = run(status: .completed)
+        savedRun.transcript = transcript
+        let record = repositoryRecord(activityStatus: .completed, run: savedRun)
+        let root = temporaryRoot()
+        let store = WorkspaceStore(rootURL: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await store.save(record)
+        let activity = try #require(record.activity)
+
+        let recovered = try await store.recoveredTranscriptTail(
+            repositoryPath: record.canonicalPath,
+            activityID: activity.id,
+            runID: savedRun.id,
+            maximumUTF8Bytes: 7
+        )
+
+        #expect(recovered.wasTruncated)
+        #expect(recovered.text == "tail")
+        #expect(recovered.text.utf8.count <= 7)
+    }
+
+    @Test
+    func largeSelectedTranscriptUsesABoundedTailButStartOverArchivesEveryByte() async throws {
+        let maximumBytes = RepositoryCoordinator.maximumPresentedTranscriptUTF8Bytes
+        let fullTranscript = String(repeating: "a", count: maximumBytes + 256 * 1_024)
+            + "authoritative-tail\n"
+        var savedRun = run(status: .interrupted)
+        savedRun.transcript = fullTranscript
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let baseStore = WorkspaceStore(rootURL: root)
+        try await baseStore.save(record)
+        let store = TranscriptAppendProbeStore(base: baseStore)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        await coordinator.load()
+
+        let presented = try #require(coordinator.record.activity?.runs.last?.transcript)
+        #expect(presented.hasPrefix(RepositoryCoordinator.truncatedTranscriptMarker))
+        #expect(presented.hasSuffix("authoritative-tail\n"))
+        #expect(presented.utf8.count <= maximumBytes)
+        #expect(await store.recoveredTranscriptTailCallCount() == 1)
+        #expect(await store.recoveredTranscriptCallCount() == 0)
+
+        await coordinator.startOver()
+
+        let activity = try #require(record.activity)
+        let repositoryDirectory = await baseStore.repositoryDirectory(
+            canonicalPath: record.canonicalPath
+        )
+        let archiveURL = repositoryDirectory
+            .appendingPathComponent("activity-archives", isDirectory: true)
+            .appendingPathComponent("\(activity.id.uuidString).json")
+        let archived = try JSONDecoder().decode(
+            RepositoryRecord.self,
+            from: Data(contentsOf: archiveURL)
+        )
+        #expect(archived.activity?.runs.last?.transcript == fullTranscript)
     }
 
     @Test
@@ -604,8 +1147,6 @@ struct RepositoryCoordinatorRecoveryTests {
         )
         let record = RepositoryRecord(
             canonicalPath: "/tmp/codeness-start-over-\(UUID().uuidString)",
-            implementerThreadID: "old-implementer-thread",
-            reviewerThreadID: "old-reviewer-thread",
             settings: settings,
             activity: ActivityRecord(
                 goal: "Rebuild the parser from Docs/Parser.md",
@@ -713,6 +1254,7 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(try Data(contentsOf: workspaceURL) == corruptData)
         #expect(await coordinator.prepareForClose(strategy: .immediate) == .ready)
         #expect(try Data(contentsOf: workspaceURL) == corruptData)
+        coordinator.cancelClosePreparation()
         coordinator.clearError()
         await coordinator.load()
         #expect(coordinator.errorMessage?.isEmpty == false)
@@ -750,6 +1292,33 @@ struct RepositoryCoordinatorRecoveryTests {
 
         #expect(harness.coordinator.pendingInteraction == nil)
         #expect(harness.coordinator.record.activity?.runs.last?.status == .running)
+    }
+
+    @Test
+    func unexpectedThreadCloseInterruptsLegacyRunAndPersistsRecoveryCheckpoint() async throws {
+        let savedRun = run(status: .running)
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+        await harness.coordinator.handle(.notification(
+            method: "thread/closed",
+            params: .object(["threadId": .string("implementer-thread")]),
+            rawLine: "closed"
+        ))
+
+        #expect(harness.coordinator.record.activity?.status == .paused)
+        #expect(harness.coordinator.record.activity?.runs.last?.status == .interrupted)
+        #expect(
+            harness.coordinator.record.activity?.resumeCheckpoint
+                == .recoverRun(savedRun.id)
+        )
+        #expect(
+            harness.coordinator.record.activity?.runs.last?.relayError
+                == "Codex closed the active thread unexpectedly."
+        )
+        #expect(harness.coordinator.pendingInteraction == nil)
     }
 
     @Test
@@ -821,6 +1390,46 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func completedLegacyDeltaItemsDoNotAccumulateInCoordinatorState() async throws {
+        let savedRun = run(status: .running)
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+
+        for index in 0..<1_000 {
+            let itemID = "legacy-completed-item-\(index)"
+            await harness.coordinator.handle(.notification(
+                method: "item/agentMessage/delta",
+                params: .object([
+                    "threadId": .string("implementer-thread"),
+                    "turnId": .string("turn-1"),
+                    "itemId": .string(itemID),
+                    "delta": .string("x")
+                ]),
+                rawLine: "delta"
+            ))
+            await harness.coordinator.handle(.notification(
+                method: "item/completed",
+                params: .object([
+                    "threadId": .string("implementer-thread"),
+                    "turnId": .string("turn-1"),
+                    "item": .object([
+                        "id": .string(itemID),
+                        "type": .string("agentMessage"),
+                        "phase": .string("final_answer"),
+                        "text": .string("x")
+                    ])
+                ]),
+                rawLine: "completed"
+            ))
+        }
+
+        #expect(harness.coordinator.trackedDeltaItemCount(for: savedRun.id) == 0)
+    }
+
+    @Test
     func queuesConcurrentServerInteractionsUntilEachOneResolves() async throws {
         let savedRun = run(status: .running)
         let harness = try await CoordinatorHarness(record: repositoryRecord(
@@ -864,6 +1473,130 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(harness.coordinator.pendingInteraction == nil)
         #expect(harness.coordinator.pendingInteractionCount == 0)
         #expect(harness.coordinator.record.activity?.runs.last?.status == .running)
+    }
+
+    @Test
+    func safetyStoppedLegacyRunCannotBePromotedByALateCompletedTerminal() async throws {
+        let savedRun = run(status: .running, finalOutput: "Unsafe late result")
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+        let request: AppServerEvent = .request(
+            id: .integer(404),
+            method: "item/tool/requestUserInput",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turnId": .string("turn-1"),
+                "questions": .array([])
+            ]),
+            rawLine: "duplicate"
+        )
+        await harness.coordinator.handle(request)
+        await harness.coordinator.handle(request)
+        #expect(harness.coordinator.record.activity?.runs.last?.status == .failed)
+
+        await harness.coordinator.handle(completedEvent(for: savedRun))
+
+        #expect(harness.coordinator.record.activity?.status == .paused)
+        #expect(harness.coordinator.record.activity?.runs.last?.status == .failed)
+        #expect(
+            harness.coordinator.record.activity?.resumeCheckpoint
+                == .recoverRun(savedRun.id)
+        )
+    }
+
+    @Test
+    func recoveryWaitsForSafetyStopTerminalBeforeAdmittingReplacementWork() async throws {
+        let savedRun = run(status: .running, finalOutput: "Unsafe late result")
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+        let request: AppServerEvent = .request(
+            id: .integer(405),
+            method: "item/tool/requestUserInput",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turnId": .string("turn-1"),
+                "questions": .array([])
+            ]),
+            rawLine: "duplicate"
+        )
+        await harness.coordinator.handle(request)
+        await harness.coordinator.handle(request)
+        #expect(harness.coordinator.interactionSafetyTerminationCount == 1)
+
+        // Recovery must not retire the stop merely because the failed run has a
+        // durable checkpoint. The old provider turn may still be changing the
+        // repository until a terminal event confirms otherwise.
+        await harness.coordinator.resume()
+        #expect(harness.coordinator.interactionSafetyTerminationCount == 1)
+        #expect(harness.coordinator.record.activity?.runs.count == 1)
+
+        await harness.coordinator.handle(completedEvent(for: savedRun))
+        #expect(harness.coordinator.record.activity?.runs.last?.status == .failed)
+        #expect(harness.coordinator.interactionSafetyTerminationCount == 0)
+    }
+
+    @Test
+    func staleStartAndTerminalCannotBindAStartPendingReplacementOnTheSameThread() async throws {
+        var oldRun = run(status: .failed, finalOutput: "Old result")
+        oldRun.turnID = "old-turn"
+        var replacementRun = run(status: .queued)
+        replacementRun.turnID = nil
+        var record = repositoryRecord(activityStatus: .paused, run: oldRun)
+        record.activity?.runs.append(replacementRun)
+        let harness = try await CoordinatorHarness(record: record)
+        defer { harness.remove() }
+
+        await harness.coordinator.handle(.notification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turn": .object([
+                    "id": .string("old-turn"),
+                    "status": .string("inProgress"),
+                    "items": .array([])
+                ])
+            ]),
+            rawLine: "stale started while replacement start is pending"
+        ))
+        await harness.coordinator.handle(.notification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turn": .object([
+                    "id": .string("old-turn"),
+                    "status": .string("completed"),
+                    "items": .array([])
+                ])
+            ]),
+            rawLine: "stale completed"
+        ))
+
+        var runs = try #require(harness.coordinator.record.activity?.runs)
+        #expect(runs[0].status == .failed)
+        #expect(runs[1].status == .queued)
+        #expect(runs[1].turnID == nil)
+
+        await harness.coordinator.handle(.notification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turn": .object([
+                    "id": .string("replacement-turn"),
+                    "status": .string("inProgress"),
+                    "items": .array([])
+                ])
+            ]),
+            rawLine: "replacement started"
+        ))
+        runs = try #require(harness.coordinator.record.activity?.runs)
+        #expect(runs[1].status == .running)
+        #expect(runs[1].turnID == "replacement-turn")
     }
 
     @Test
@@ -1043,6 +1776,23 @@ struct RepositoryCoordinatorRecoveryTests {
         )
     }
 
+    private func transcriptDelta(
+        _ text: String,
+        itemID: String,
+        run: RunRecord
+    ) -> AppServerEvent {
+        .notification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(run.threadID ?? "implementer-thread"),
+                "turnId": .string(run.turnID ?? "turn-1"),
+                "itemId": .string(itemID),
+                "delta": .string(text)
+            ]),
+            rawLine: text
+        )
+    }
+
     private func tokenUsageParameters(
         total: RunTokenUsage,
         last: RunTokenUsage
@@ -1072,6 +1822,23 @@ struct RepositoryCoordinatorRecoveryTests {
     private func temporaryRoot() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("codeness-recovery-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func writeLegacyWorkspace(
+        _ record: RepositoryRecord,
+        to store: WorkspaceStore
+    ) async throws {
+        let directory = await store.repositoryDirectory(canonicalPath: record.canonicalPath)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(record).write(
+            to: directory.appendingPathComponent("workspace.json"),
+            options: .atomic
+        )
     }
 
     private func waitUntil(
@@ -1114,6 +1881,602 @@ private struct CoordinatorHarness {
 
     func remove() {
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+private actor TranscriptAppendProbeStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private let failureCount: Int
+    private var appendCalls = 0
+    private var recoveredTranscriptCalls = 0
+    private var recoveredTranscriptTailCalls = 0
+
+    init(base: WorkspaceStore, failureCount: Int = 0) {
+        self.base = base
+        self.failureCount = failureCount
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        // Raw protocol logging is orthogonal to the transcript batching asserted
+        // by these tests; keep the burst deterministic and I/O-light.
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        appendCalls += 1
+        if appendCalls <= failureCount {
+            throw BlockingTranscriptStoreError.firstAppendFailure
+        }
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        recoveredTranscriptCalls += 1
+        return try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscriptTail(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID,
+        maximumUTF8Bytes: Int
+    ) async throws -> RecoveredTranscriptTail {
+        recoveredTranscriptTailCalls += 1
+        return try await base.recoveredTranscriptTail(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID,
+            maximumUTF8Bytes: maximumUTF8Bytes
+        )
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendCallCount() -> Int {
+        appendCalls
+    }
+
+    func recoveredTranscriptCallCount() -> Int {
+        recoveredTranscriptCalls
+    }
+
+    func recoveredTranscriptTailCallCount() -> Int {
+        recoveredTranscriptTailCalls
+    }
+}
+
+private actor BlockingTranscriptRetryStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private var appendCalls = 0
+    private var retryContinuation: CheckedContinuation<Void, Never>?
+
+    init(base: WorkspaceStore) {
+        self.base = base
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendRawLine(
+            line,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        appendCalls += 1
+        if appendCalls == 1 {
+            throw BlockingTranscriptStoreError.firstAppendFailure
+        }
+        if appendCalls == 2 {
+            await withCheckedContinuation { continuation in
+                retryContinuation = continuation
+            }
+        }
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func releaseBlockedRetry() {
+        retryContinuation?.resume()
+        retryContinuation = nil
+    }
+
+    func appendCallCount() -> Int {
+        appendCalls
+    }
+}
+
+private enum BlockingTranscriptStoreError: Error {
+    case firstAppendFailure
+}
+
+private actor BlockingFirstTranscriptStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private let firstAppendFails: Bool
+    private var appendCalls = 0
+    private var firstAppendIsBlocked = false
+    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(base: WorkspaceStore, firstAppendFails: Bool) {
+        self.base = base
+        self.firstAppendFails = firstAppendFails
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendRawLine(
+            line,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        appendCalls += 1
+        if appendCalls == 1 {
+            firstAppendIsBlocked = true
+            let waiters = blockedWaiters
+            blockedWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+            await withCheckedContinuation { continuation in
+                releaseContinuation = continuation
+            }
+            if firstAppendFails {
+                throw BlockingTranscriptStoreError.firstAppendFailure
+            }
+        }
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func waitUntilFirstAppendIsBlocked() async {
+        guard !firstAppendIsBlocked else { return }
+        await withCheckedContinuation { continuation in
+            blockedWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstAppend() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    func appendCallCount() -> Int {
+        appendCalls
+    }
+}
+
+private actor AppendCompletionGateStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private var shouldBlockNextAppend = false
+    private var appendIsBlocked = false
+    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(base: WorkspaceStore) {
+        self.base = base
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendRawLine(
+            line,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+        guard shouldBlockNextAppend else { return }
+        shouldBlockNextAppend = false
+        appendIsBlocked = true
+        let waiters = blockedWaiters
+        blockedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func blockNextAppendAfterWriting() {
+        shouldBlockNextAppend = true
+    }
+
+    func waitUntilAppendIsWrittenAndBlocked() async {
+        guard !appendIsBlocked else { return }
+        await withCheckedContinuation { continuation in
+            blockedWaiters.append(continuation)
+        }
+    }
+
+    func releaseBlockedAppend() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor BlockingTranscriptTailStore: RepositoryWorkspaceStoring {
+    private let base: WorkspaceStore
+    private var shouldBlockNextTailRead = false
+    private var tailReadIsBlocked = false
+    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(base: WorkspaceStore) {
+        self.base = base
+    }
+
+    func load(
+        canonicalPath: String,
+        defaultSettings: RepositorySettings
+    ) async throws -> RepositoryRecord {
+        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
+    }
+
+    func save(_ record: RepositoryRecord) async throws {
+        try await base.save(record)
+    }
+
+    func archiveActivity(_ record: RepositoryRecord) async throws {
+        try await base.archiveActivity(record)
+    }
+
+    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
+        try await base.loadViewState(canonicalPath: canonicalPath)
+    }
+
+    func saveViewState(
+        _ state: RepositoryViewState,
+        canonicalPath: String
+    ) async throws {
+        try await base.saveViewState(state, canonicalPath: canonicalPath)
+    }
+
+    func appendRawLine(
+        _ line: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendRawLine(
+            line,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func appendTranscript(
+        _ text: String,
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws {
+        try await base.appendTranscript(
+            text,
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscript(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> String {
+        try await base.recoveredTranscript(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func recoveredTranscriptTail(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID,
+        maximumUTF8Bytes: Int
+    ) async throws -> RecoveredTranscriptTail {
+        let recovered = try await base.recoveredTranscriptTail(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID,
+            maximumUTF8Bytes: maximumUTF8Bytes
+        )
+        guard shouldBlockNextTailRead else { return recovered }
+        shouldBlockNextTailRead = false
+        tailReadIsBlocked = true
+        let waiters = blockedWaiters
+        blockedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+        return recovered
+    }
+
+    func recoveredTokenUsage(
+        repositoryPath: String,
+        activityID: UUID,
+        runID: UUID
+    ) async throws -> RunTokenUsage? {
+        try await base.recoveredTokenUsage(
+            repositoryPath: repositoryPath,
+            activityID: activityID,
+            runID: runID
+        )
+    }
+
+    func blockNextTailRead() {
+        shouldBlockNextTailRead = true
+        tailReadIsBlocked = false
+    }
+
+    func waitUntilTailReadIsBlocked() async {
+        guard !tailReadIsBlocked else { return }
+        await withCheckedContinuation { continuation in
+            blockedWaiters.append(continuation)
+        }
+    }
+
+    func releaseBlockedTailRead() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }
 

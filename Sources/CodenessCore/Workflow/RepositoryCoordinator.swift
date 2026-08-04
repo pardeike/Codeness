@@ -169,6 +169,68 @@ public final class RepositoryCoordinator {
         let prompt: String
     }
 
+    private struct ProviderSessionReference: Hashable {
+        let providerID: AgentProviderID
+        let sessionID: String
+    }
+
+    private struct TranscriptChunk: Sendable {
+        let sequence: UInt64
+        let text: String
+        let utf8Count: Int
+    }
+
+    private final class PendingTranscriptBuffer {
+        var chunks: [TranscriptChunk] = []
+        var utf8Count = 0
+
+        func append(_ chunk: TranscriptChunk) {
+            chunks.append(chunk)
+            utf8Count += chunk.utf8Count
+        }
+
+        func text(through sequence: UInt64? = nil) -> String {
+            let selected = sequence.map { upperBound in
+                chunks.prefix { $0.sequence <= upperBound }
+            } ?? chunks[...]
+            return selected.map(\.text).joined()
+        }
+
+        func consume(through sequence: UInt64) {
+            guard let firstRemaining = chunks.firstIndex(where: {
+                $0.sequence > sequence
+            }) else {
+                chunks.removeAll(keepingCapacity: true)
+                utf8Count = 0
+                return
+            }
+            let consumedBytes = chunks[..<firstRemaining].reduce(0) {
+                $0 + $1.utf8Count
+            }
+            chunks.removeFirst(firstRemaining)
+            utf8Count -= consumedBytes
+        }
+    }
+
+    private struct TranscriptFlush {
+        let id: UUID
+        let lastSequence: UInt64
+        let task: Task<Void, Error>
+    }
+
+    static let maximumPresentedTranscriptUTF8Bytes = 4 * 1_024 * 1_024
+    static let truncatedTranscriptMarker = "[Earlier transcript output remains available in the on-disk activity log.]\n"
+    private static let transcriptFlushDelay: Duration = .milliseconds(25)
+    private static let transcriptFlushByteThreshold = 256 * 1_024
+    private static let transcriptFlushChunkThreshold = 1_024
+    static let maximumPendingTranscriptUTF8Bytes = 8 * 1_024 * 1_024
+    static let maximumPendingTranscriptChunkCount = 4_096
+    static let maximumPendingInteractionCount = 64
+    static let maximumPendingInteractionRetainedBytes = 4 * 1_024 * 1_024
+    static let maximumTrackedDeltaItemCount = 2_048
+    static let maximumTrackedDeltaItemRetainedBytes = 2 * 1_024 * 1_024
+    private static let maximumRetiredTurnIDCount = 4_096
+
     public private(set) var record: RepositoryRecord
     public var selectedRunID: UUID? {
         didSet {
@@ -176,6 +238,7 @@ public final class RepositoryCoordinator {
             viewState.selectedRunID = selectedRunID
             viewState.runSelectionWasSaved = true
             scheduleViewStateSave()
+            scheduleSelectedTranscriptLoad(previousRunID: oldValue)
         }
     }
     public var pendingInteraction: PendingServerInteraction? { pendingInteractions.first }
@@ -193,6 +256,71 @@ public final class RepositoryCoordinator {
     public private(set) var transcriptFollowRequestRunID: UUID?
     public private(set) var transcriptFollowRequestRevision = 0
 
+    func pendingTranscriptUTF8ByteCount(for runID: UUID) -> Int {
+        pendingTranscriptBuffers[runID]?.utf8Count ?? 0
+    }
+
+    func pendingTranscriptChunkCount(for runID: UUID) -> Int {
+        pendingTranscriptBuffers[runID]?.chunks.count ?? 0
+    }
+
+    func droppedTranscriptUTF8ByteCount(for runID: UUID) -> Int {
+        droppedTranscriptUTF8Bytes[runID] ?? 0
+    }
+
+    func transcriptIsBackpressured(for runID: UUID) -> Bool {
+        transcriptBackpressureRunIDs.contains(runID)
+    }
+
+    func trackedDeltaItemCount(for runID: UUID) -> Int {
+        itemsWithDeltas[runID]?.count ?? 0
+    }
+
+    var interactionSafetyTerminationCount: Int {
+        interactionSafetyTerminatingRunIDs.count
+    }
+
+    var transcriptBackpressureTerminationCount: Int {
+        transcriptBackpressureRunIDs.count
+    }
+
+    var protocolContainmentIsActive: Bool {
+        protocolContainment != nil
+    }
+
+    var legacyInterruptionDebtCount: Int {
+        legacyInterruptionDebts.count
+    }
+
+    var legacyInterruptionWatchdogCount: Int {
+        legacyInterruptionWatchdogs.count
+    }
+
+    private struct ProtocolContainment {
+        let id: UUID
+        var detail: String
+    }
+
+    private struct LegacyInterruptionKey: Hashable {
+        let appServerGeneration: UInt64
+        let threadID: String
+        let turnID: String
+    }
+
+    private struct LegacyInterruptionDebt {
+        enum State {
+            case requestInFlight
+            case requestFailed
+            case awaitingTerminal
+        }
+
+        let runID: UUID
+        let identity: UUID
+        var attempts: Int
+        var lastError: String
+        var state: State
+    }
+
     private let appServer: CodexAppServerClient
     private let router: any HandoffRouting
     private let handoffConfigurationValidator: any HandoffConfigurationValidating
@@ -201,19 +329,70 @@ public final class RepositoryCoordinator {
     private let workflowRouter: (any WorkflowHandoffRouting)?
     private var sessionsPrepared = false
     private var itemsWithDeltas: [UUID: Set<String>] = [:]
+    private var deltaItemRetainedByteCounts: [UUID: Int] = [:]
     private var tokenUsageBaselines: [UUID: RunTokenUsage] = [:]
     private var runIsAtBottom: [UUID: Bool] = [:]
     private var completingRunIDs: Set<UUID> = []
     private var routingTasks: [UUID: Task<Void, Never>] = [:]
     private var viewStateSaveTask: Task<Void, Never>?
+    private var transcriptLoadTask: Task<Void, Never>?
+    private var hydratedTranscriptRunIDs: Set<UUID> = []
+    private var nextTranscriptSequence: UInt64 = 0
+    private var pendingTranscriptBuffers: [UUID: PendingTranscriptBuffer] = [:]
+    private var visibleTranscriptChunks: [UUID: [TranscriptChunk]] = [:]
+    private var visibleTranscriptUTF8ByteCounts: [UUID: Int] = [:]
+    private var visibleTranscriptTasks: [UUID: Task<Void, Never>] = [:]
+    private var transcriptHydrationIDs: [UUID: UUID] = [:]
+    private var transcriptHydrationChunks: [UUID: [TranscriptChunk]] = [:]
+    private var transcriptHydrationWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var scheduledTranscriptFlushTasks: [UUID: Task<Void, Never>] = [:]
+    private var transcriptFlushes: [UUID: TranscriptFlush] = [:]
+    private var transcriptFlushFailureRunIDs: Set<UUID> = []
+    private var transcriptBackpressureRunIDs: Set<UUID> = []
+    private var droppedTranscriptUTF8Bytes: [UUID: Int] = [:]
+    private var transcriptBackpressureFailureDetails: [UUID: String] = [:]
+    private(set) var transcriptPresentationMutationCount = 0
     private var workOverviewSummaryTask: Task<Void, Never>?
     private var workOverviewSummaryTaskSignature: String?
     private var closeWaiter: CheckedContinuation<DocumentClosePreparationResult, Never>?
     private var isClosing = false
+    private var lifecycleGeneration = UUID()
+    private var loadInProgressGeneration: UUID?
+    private var loadQuiescenceWaiters: [CheckedContinuation<Void, Never>] = []
     private var pendingInteractions: [PendingServerInteraction] = []
+    private var pendingInteractionRetainedByteCount = 0
+    private var interactionResolutionInFlight = false
+    private var claimedInteractionID: JSONValue?
+    private var claimedInteractionRetainedByteCount = 0
+    private var interactionResolutionClaimID: UUID?
+    private var interactionSafetyTerminatingRunIDs: Set<UUID> = []
+    private var protocolContainment: ProtocolContainment?
+    private var legacyAppServerGeneration: UInt64 = 0
+    private var legacyInterruptionDebts: [
+        LegacyInterruptionKey: LegacyInterruptionDebt
+    ] = [:]
+    private var legacyInterruptionWatchdogs: [
+        LegacyInterruptionKey: Task<Void, Never>
+    ] = [:]
+    private var legacyInterruptionRetryTasks: [
+        LegacyInterruptionKey: Task<Void, Never>
+    ] = [:]
+    private let legacyInterruptionMaximumAttemptCount: Int
+    private let legacyInterruptionRetryDelay: Duration
+    private let legacyInterruptionTerminalTimeout: Duration
+    private var retiredTurnIDs: Set<String> = []
+    private var retiredTurnIDOrder: [String] = []
     private var genericRunTasks: [UUID: Task<Void, Never>] = [:]
     private var genericInteractionRoutes: [String: GenericInteractionRoute] = [:]
     private var genericSessionFallbacks: [UUID: GenericSessionFallback] = [:]
+    private var providerLaunchLeases: [UUID: UUID] = [:]
+    private var providerLaunchWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releasedProviderSessions: Set<ProviderSessionReference> = []
+    private var providerSessionReleaseWaiters: [
+        ProviderSessionReference: [CheckedContinuation<Bool, Never>]
+    ] = [:]
+    private var completionSessionDetachmentDebt: Set<ProviderSessionReference> = []
+    private var isSavingCompletionSessionDetachmentAcknowledgement = false
 
     public init(
         canonicalPath: String,
@@ -223,7 +402,10 @@ public final class RepositoryCoordinator {
         handoffConfigurationValidator: any HandoffConfigurationValidating = HandoffConfigurationValidator(),
         initialSettings: RepositorySettings = .init(),
         agentProviders: AgentProviderRegistry? = nil,
-        workflowRouter: (any WorkflowHandoffRouting)? = nil
+        workflowRouter: (any WorkflowHandoffRouting)? = nil,
+        legacyInterruptionMaximumAttemptCount: Int = 3,
+        legacyInterruptionRetryDelay: Duration = .milliseconds(250),
+        legacyInterruptionTerminalTimeout: Duration = .seconds(2)
     ) {
         record = RepositoryRecord(canonicalPath: canonicalPath, settings: initialSettings)
         self.appServer = appServer
@@ -232,6 +414,18 @@ public final class RepositoryCoordinator {
         self.store = store
         self.agentProviders = agentProviders
         self.workflowRouter = workflowRouter
+        self.legacyInterruptionMaximumAttemptCount = max(
+            1,
+            legacyInterruptionMaximumAttemptCount
+        )
+        self.legacyInterruptionRetryDelay = max(
+            .milliseconds(10),
+            legacyInterruptionRetryDelay
+        )
+        self.legacyInterruptionTerminalTimeout = max(
+            .milliseconds(10),
+            legacyInterruptionTerminalTimeout
+        )
     }
 
     public var repositoryName: String {
@@ -276,7 +470,8 @@ public final class RepositoryCoordinator {
               !pauseState.isInProgress,
               pendingInteractions.isEmpty,
               routingTasks.isEmpty,
-              completingRunIDs.isEmpty else { return false }
+              completingRunIDs.isEmpty,
+              !hasUnconfirmedSafetyStop else { return false }
         guard let run = activeRun else { return true }
         switch run.status {
         case .running, .awaitingApproval:
@@ -320,7 +515,9 @@ public final class RepositoryCoordinator {
     }
 
     public var canResume: Bool {
-        guard let activity = activeActivity, activity.status == .paused else { return false }
+        guard !hasUnconfirmedSafetyStop,
+              let activity = activeActivity,
+              activity.status == .paused else { return false }
         if activity.workflow != nil {
             if activity.workflowResumeCheckpoint != nil { return true }
             guard let run = activity.runs.last else { return activity.workflowCursor != nil }
@@ -337,7 +534,13 @@ public final class RepositoryCoordinator {
     }
 
     public func canRestartWorkflowStep(_ runID: UUID) -> Bool {
-        restartableWorkflowContext(for: runID) != nil
+        !hasUnconfirmedSafetyStop && restartableWorkflowContext(for: runID) != nil
+    }
+
+    private var hasUnconfirmedSafetyStop: Bool {
+        protocolContainment != nil
+            || !interactionSafetyTerminatingRunIDs.isEmpty
+            || !transcriptBackpressureRunIDs.isEmpty
     }
 
     public var canAmendGoal: Bool {
@@ -390,17 +593,36 @@ public final class RepositoryCoordinator {
     }
 
     public func load() async {
-        guard !isLoaded else { return }
+        guard !isLoaded, !isClosing else { return }
+        if loadInProgressGeneration != nil {
+            // Multiple lifecycle surfaces can request the initial load (for
+            // example, the window controller and a caller awaiting readiness).
+            // An awaited load must not return while that shared operation is
+            // still in flight, or the caller can observe a false `isLoaded`
+            // state and silently discard its next action.
+            await waitForLoadQuiescence()
+            return
+        }
+        let generation = lifecycleGeneration
+        loadInProgressGeneration = generation
+        defer { finishLoad(generation: generation) }
         errorMessage = nil
         do {
-            record = try await store.load(
+            let loadedRecord = try await store.load(
                 canonicalPath: record.canonicalPath,
                 defaultSettings: record.settings
             )
-            viewState = (try? await store.loadViewState(canonicalPath: record.canonicalPath))
+            guard isCurrentLoad(generation) else { return }
+            let loadedViewState = (try? await store.loadViewState(
+                canonicalPath: loadedRecord.canonicalPath
+            ))
                 ?? RepositoryViewState()
-            await recoverAppendOnlyTranscripts()
-            await recoverAppendOnlyTokenUsage()
+            guard isCurrentLoad(generation) else { return }
+
+            record = loadedRecord
+            viewState = loadedViewState
+            guard await recoverAppendOnlyTokenUsage(loadGeneration: generation),
+                  isCurrentLoad(generation) else { return }
             if record.activity?.workflow != nil {
                 recoverInterruptedGenericState()
             } else {
@@ -422,7 +644,17 @@ public final class RepositoryCoordinator {
                 viewState.selectedRunID = selectedRunID
                 viewState.runSelectionWasSaved = true
             }
+            await recoverAppendOnlyTranscript(
+                runID: selectedRunID,
+                loadGeneration: generation
+            )
+            guard isCurrentLoad(generation) else { return }
+            evictTranscripts(except: selectedRunID)
             isLoaded = true
+            if record.activity?.status == .completed,
+               record.activity?.providerSessionsDetachedAt == nil {
+                completionSessionDetachmentDebt.formUnion(providerSessions(in: record))
+            }
             switch record.activity?.status {
             case nil: statusMessage = "Configure this activity"
             case .completed: statusMessage = "Activity complete"
@@ -432,15 +664,48 @@ public final class RepositoryCoordinator {
             case .running: statusMessage = "Activity running"
             }
             do {
+                guard isCurrentLoad(generation) else { return }
                 try await persistDocumentState()
+                guard isCurrentLoad(generation) else { return }
             } catch {
+                guard isCurrentLoad(generation) else { return }
                 // Loading succeeded; keep the real record active even if recovery/view
                 // state cannot be written back yet.
                 errorMessage = "Repository history loaded, but its recovered state could not be saved: \(error.localizedDescription)"
             }
         } catch {
+            guard isCurrentLoad(generation) else { return }
             errorMessage = error.localizedDescription
             statusMessage = "Could not load repository history"
+        }
+    }
+
+    private func isCurrentLoad(_ generation: UUID) -> Bool {
+        lifecycleGeneration == generation
+            && loadInProgressGeneration == generation
+            && !Task.isCancelled
+    }
+
+    private func finishLoad(generation: UUID) {
+        guard loadInProgressGeneration == generation else { return }
+        loadInProgressGeneration = nil
+        let waiters = loadQuiescenceWaiters
+        loadQuiescenceWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
+    }
+
+    private func invalidateLoadGeneration() {
+        lifecycleGeneration = UUID()
+    }
+
+    private func waitForLoadQuiescence() async {
+        guard loadInProgressGeneration != nil else { return }
+        await withCheckedContinuation { continuation in
+            if loadInProgressGeneration == nil {
+                continuation.resume()
+            } else {
+                loadQuiescenceWaiters.append(continuation)
+            }
         }
     }
 
@@ -491,6 +756,7 @@ public final class RepositoryCoordinator {
             }
             await perform(action: .implement, handoff: nil)
         } catch {
+            guard !isClosing else { return }
             errorMessage = error.localizedDescription
             statusMessage = "Could not start activity"
         }
@@ -549,6 +815,14 @@ public final class RepositoryCoordinator {
     }
 
     public func handle(_ event: AppServerEvent) async {
+        if protocolContainment != nil {
+            if case .exited = event {
+                await appServerRestarted()
+            }
+            // Once turn identity is ambiguous, no request or notification from
+            // that generation is trustworthy enough to mutate document state.
+            return
+        }
         if case .notification(let method, let params, _) = event,
            method == "serverRequest/resolved",
            let requestID = params["requestId"],
@@ -561,7 +835,7 @@ public final class RepositoryCoordinator {
         switch event {
         case .request(let id, let method, let params, let rawLine):
             await appendRawLine(rawLine, event: event)
-            presentInteraction(id: id, method: method, params: params)
+            await presentInteraction(id: id, method: method, params: params)
             try? await persist()
         case .notification(let method, let params, let rawLine):
             await appendRawLine(rawLine, event: event)
@@ -572,6 +846,10 @@ public final class RepositoryCoordinator {
     }
 
     public func acceptsCodexEvent(_ event: AppServerEvent) -> Bool {
+        if protocolContainment != nil {
+            if case .exited = event { return true }
+            return false
+        }
         guard record.activity?.workflow == nil else { return false }
         if case .notification(let method, let params, _) = event,
            method == "serverRequest/resolved",
@@ -804,7 +1082,8 @@ public final class RepositoryCoordinator {
     }
 
     public func resume() async {
-        guard record.activity?.status == .paused else { return }
+        guard record.activity?.status == .paused,
+              !hasUnconfirmedSafetyStop else { return }
         focusActiveProgress()
         if record.activity?.workflow != nil {
             await resumeGeneric()
@@ -857,6 +1136,7 @@ public final class RepositoryCoordinator {
                 record.activity?.pendingAction = nil
                 await perform(action: action, handoff: record.activity?.runs.last(where: { $0.handoff != nil })?.handoff)
             } catch {
+                guard !isClosing else { return }
                 errorMessage = error.localizedDescription
             }
             return
@@ -890,7 +1170,11 @@ public final class RepositoryCoordinator {
         guard let run = activeRun, let threadID = run.threadID, let turnID = run.turnID else { return }
         focusActiveProgress(on: run.id)
         do {
-            try await appServer.interrupt(threadID: threadID, turnID: turnID)
+            try await interruptLegacyTurn(
+                runID: run.id,
+                threadID: threadID,
+                turnID: turnID
+            )
             statusMessage = "Stopping " + run.kind.displayName.lowercased() + "…"
         } catch {
             if canInterrupt {
@@ -918,7 +1202,24 @@ public final class RepositoryCoordinator {
 
         isClosing = true
         pauseState = .saving
+        // A cancelled SwiftUI `.task` is not a completion barrier for an actor
+        // store operation. Let the mounted document's initial load finish and wait
+        // for it before close/export is allowed to inspect or replace the workspace.
+        await waitForLoadQuiescence()
+        // A failed or defensively invalidated load is not an active document.
+        guard isLoaded else {
+            return await finishCloseWithoutActiveTurn()
+        }
         await cancelRoutingTasks()
+        await waitForProviderLaunches()
+        if let containment = protocolContainment {
+            return failClose(
+                "\(containment.detail) The document remains open until App Server termination is confirmed."
+            )
+        }
+        if hasUnconfirmedSafetyStop {
+            return await prepareSafetyStoppedRunsForClose()
+        }
         if record.activity?.workflow != nil {
             return await prepareGenericWorkflowForClose(strategy: strategy)
         }
@@ -969,7 +1270,11 @@ public final class RepositoryCoordinator {
                 } else {
                     pauseState = .interrupting
                     statusMessage = "Stopping " + run.kind.displayName.lowercased() + "…"
-                    try await appServer.interrupt(threadID: threadID, turnID: turnID)
+                    try await interruptLegacyTurn(
+                        runID: run.id,
+                        threadID: threadID,
+                        turnID: turnID
+                    )
                 }
                 return await waitForCloseCompletion()
             } catch {
@@ -1005,7 +1310,11 @@ public final class RepositoryCoordinator {
         do {
             pauseState = .interrupting
             statusMessage = "Stopping " + run.kind.displayName.lowercased() + "…"
-            try await appServer.interrupt(threadID: threadID, turnID: turnID)
+            try await interruptLegacyTurn(
+                runID: run.id,
+                threadID: threadID,
+                turnID: turnID
+            )
         } catch {
             _ = await reconcileCloseControlFailure(error.localizedDescription)
         }
@@ -1013,8 +1322,22 @@ public final class RepositoryCoordinator {
 
     public func documentDidClose() {
         isClosing = true
+        invalidateLoadGeneration()
+        clearAllLegacyInterruptionDebts(advanceGeneration: false)
         viewStateSaveTask?.cancel()
         viewStateSaveTask = nil
+        transcriptLoadTask?.cancel()
+        transcriptLoadTask = nil
+        visibleTranscriptTasks.values.forEach { $0.cancel() }
+        visibleTranscriptTasks.removeAll()
+        visibleTranscriptChunks.removeAll()
+        visibleTranscriptUTF8ByteCounts.removeAll()
+        scheduledTranscriptFlushTasks.values.forEach { $0.cancel() }
+        scheduledTranscriptFlushTasks.removeAll()
+        transcriptFlushFailureRunIDs.removeAll()
+        transcriptBackpressureRunIDs.removeAll()
+        droppedTranscriptUTF8Bytes.removeAll()
+        transcriptBackpressureFailureDetails.removeAll()
         cancelWorkOverviewSummaryRequest()
     }
 
@@ -1058,14 +1381,15 @@ public final class RepositoryCoordinator {
     }
 
     public func resolveApproval(_ decision: ApprovalDecision) async {
-        guard let interaction = pendingInteraction else { return }
-        let route = genericRoute(for: interaction.id)
-        focusActiveProgress(on: route?.runID)
+        guard let claim = claimPendingInteractionForResolution() else { return }
+        let interaction = claim.interaction
+        let route = claim.route
+        focusActiveProgress(on: claim.runID)
         if let route {
             await resolveGenericInteraction(
                 route,
-                resolution: .decision(decision.value),
-                presentationID: interaction.id
+                claimID: claim.claimID,
+                resolution: .decision(decision.value)
             )
             return
         }
@@ -1074,21 +1398,26 @@ public final class RepositoryCoordinator {
                 to: interaction.id,
                 result: .object(["decision": decision.value])
             )
-            await finishInteraction(id: interaction.id)
         } catch {
-            errorMessage = error.localizedDescription
+            await failClaimedInteraction(
+                claimID: claim.claimID,
+                runID: claim.runID,
+                detail: "Could not send the Codex approval response: \(error.localizedDescription)"
+            )
         }
+        await completeInteractionResolutionClaim(claimID: claim.claimID)
     }
 
     public func resolveQuestions(_ answers: [String: [String]]) async {
-        guard let interaction = pendingInteraction else { return }
-        let route = genericRoute(for: interaction.id)
-        focusActiveProgress(on: route?.runID)
+        guard let claim = claimPendingInteractionForResolution() else { return }
+        let interaction = claim.interaction
+        let route = claim.route
+        focusActiveProgress(on: claim.runID)
         if let route {
             await resolveGenericInteraction(
                 route,
-                resolution: .answers(answers),
-                presentationID: interaction.id
+                claimID: claim.claimID,
+                resolution: .answers(answers)
             )
             return
         }
@@ -1097,54 +1426,80 @@ public final class RepositoryCoordinator {
         }
         do {
             try await appServer.respond(to: interaction.id, result: .object(["answers": .object(values)]))
-            await finishInteraction(id: interaction.id)
         } catch {
-            errorMessage = error.localizedDescription
+            await failClaimedInteraction(
+                claimID: claim.claimID,
+                runID: claim.runID,
+                detail: "Could not send the Codex answer response: \(error.localizedDescription)"
+            )
         }
+        await completeInteractionResolutionClaim(claimID: claim.claimID)
     }
 
     public func resolveRawInteraction(_ resultText: String) async {
         guard let interaction = pendingInteraction else { return }
+        let value: JSONValue
         do {
-            let value = try JSONDecoder().decode(JSONValue.self, from: Data(resultText.utf8))
-            let route = genericRoute(for: interaction.id)
-            focusActiveProgress(on: route?.runID)
-            if let route {
-                await resolveGenericInteraction(
-                    route,
-                    resolution: .raw(value),
-                    presentationID: interaction.id
-                )
-                return
-            }
-            try await appServer.respond(to: interaction.id, result: value)
-            await finishInteraction(id: interaction.id)
+            value = try JSONDecoder().decode(JSONValue.self, from: Data(resultText.utf8))
         } catch {
             errorMessage = "The response is not valid JSON: \(error.localizedDescription)"
+            return
         }
-    }
-
-    public func cancelInteraction() async {
-        guard let interaction = pendingInteraction else { return }
-        let route = genericRoute(for: interaction.id)
-        focusActiveProgress(on: route?.runID)
+        guard let claim = claimPendingInteractionForResolution(
+            expectedID: interaction.id
+        ) else { return }
+        let route = claim.route
+        focusActiveProgress(on: claim.runID)
         if let route {
             await resolveGenericInteraction(
                 route,
-                resolution: .cancel,
-                presentationID: interaction.id
+                claimID: claim.claimID,
+                resolution: .raw(value)
+            )
+            return
+        }
+        do {
+            try await appServer.respond(to: interaction.id, result: value)
+        } catch {
+            await failClaimedInteraction(
+                claimID: claim.claimID,
+                runID: claim.runID,
+                detail: "Could not send the Codex JSON response: \(error.localizedDescription)"
+            )
+        }
+        await completeInteractionResolutionClaim(claimID: claim.claimID)
+    }
+
+    public func cancelInteraction() async {
+        guard let claim = claimPendingInteractionForResolution() else { return }
+        let interaction = claim.interaction
+        let route = claim.route
+        focusActiveProgress(on: claim.runID)
+        if let route {
+            await resolveGenericInteraction(
+                route,
+                claimID: claim.claimID,
+                resolution: .cancel
             )
             return
         }
         do {
             try await appServer.respondWithError(to: interaction.id, message: "Cancelled by the user")
-            await finishInteraction(id: interaction.id)
         } catch {
-            errorMessage = error.localizedDescription
+            await failClaimedInteraction(
+                claimID: claim.claimID,
+                runID: claim.runID,
+                detail: "Could not send the Codex cancellation response: \(error.localizedDescription)"
+            )
         }
+        await completeInteractionResolutionClaim(claimID: claim.claimID)
     }
 
     public func restartWorkflowStep(_ runID: UUID) async {
+        guard !hasUnconfirmedSafetyStop else {
+            errorMessage = "Wait until the stopped provider turn confirms termination before restarting this workflow step."
+            return
+        }
         guard var context = restartableWorkflowContext(for: runID) else {
             errorMessage = "Only the current failed or stopped workflow step can be restarted."
             return
@@ -1159,6 +1514,21 @@ public final class RepositoryCoordinator {
         let previousPauseAfterCurrent = pauseAfterCurrent
         let previousViewPauseAfterCurrent = viewState.pauseAfterCurrent
         let interruptedRun = context.activity.runs[context.runIndex]
+        let supersededSession = context.activity.stepSessions[context.step.id]
+            .flatMap { session in
+                session.providerSessionID.map {
+                    ProviderSessionReference(
+                        providerID: session.target.providerID,
+                        sessionID: $0
+                    )
+                }
+            }
+            ?? interruptedRun.threadID.map {
+                ProviderSessionReference(
+                    providerID: context.step.target.providerID,
+                    sessionID: $0
+                )
+            }
         let previousHandoff = context.activity.runs[..<context.runIndex]
             .last(where: { $0.workflowHandoff != nil })?
             .workflowHandoff
@@ -1193,6 +1563,10 @@ public final class RepositoryCoordinator {
             errorMessage = "Could not save the fresh step restart: \(error.localizedDescription)"
             statusMessage = pausedStatusMessage
             return
+        }
+
+        if let supersededSession {
+            await releaseProviderSessions([supersededSession])
         }
 
         let stepPrompt = GenericPromptBuilder.stepPrompt(
@@ -1410,10 +1784,17 @@ public final class RepositoryCoordinator {
         }
 
         let previousActivity = activity
+        var supersededSessions: Set<ProviderSessionReference> = []
         for updatedStep in updatedWorkflow.steps {
             guard let previousStep = currentWorkflow.step(id: updatedStep.id) else { continue }
             guard var session = activity.stepSessions[updatedStep.id] else { continue }
             if Self.requiresNewLineage(from: previousStep.target, to: updatedStep.target) {
+                if let sessionID = session.providerSessionID {
+                    supersededSessions.insert(ProviderSessionReference(
+                        providerID: session.target.providerID,
+                        sessionID: sessionID
+                    ))
+                }
                 session.lineage += 1
                 session.providerSessionID = nil
             }
@@ -1424,6 +1805,7 @@ public final class RepositoryCoordinator {
         record.activity = activity
         do {
             try await persist()
+            await releaseProviderSessions(supersededSessions)
             statusMessage = pausedStatusMessage
             return true
         } catch {
@@ -1517,11 +1899,16 @@ public final class RepositoryCoordinator {
         let pendingViewSave = viewStateSaveTask
         viewStateSaveTask?.cancel()
         viewStateSaveTask = nil
+        let pendingTranscriptLoad = transcriptLoadTask
+        transcriptLoadTask?.cancel()
+        transcriptLoadTask = nil
         cancelWorkOverviewSummaryRequest()
         await pendingViewSave?.value
+        await pendingTranscriptLoad?.value
         await cancelRoutingTasks()
 
         let archivedRecord = record
+        let abandonedSessions = providerSessions(in: archivedRecord)
         let restartGoal = previousActivity.pendingGoalAmendment?.revisedGoal
             ?? previousActivity.goal
         let resetRecord = RepositoryRecord(
@@ -1555,27 +1942,62 @@ public final class RepositoryCoordinator {
             guard !isClosing else {
                 throw RepositoryCoordinatorError.startOverWhileClosing
             }
-            try await store.archiveActivity(archivedRecord)
+            try await flushPendingTranscripts()
+            // `record` may contain only the bounded UI projection of a large
+            // transcript. Empty metadata tells WorkspaceStore to reconstruct the
+            // authoritative, complete archive from the append-only run logs.
+            try await store.archiveActivity(workspaceMetadataSnapshot(archivedRecord))
             guard !isClosing else {
                 throw RepositoryCoordinatorError.startOverWhileClosing
             }
+            let unreleasedSessions = await unreleasedProviderSessions(
+                afterReleasing: abandonedSessions
+            )
+            guard unreleasedSessions.isEmpty else {
+                throw RepositoryCoordinatorError.providerSessionsStillAttached(
+                    providerSessionDescription(unreleasedSessions)
+                )
+            }
+            sessionsPrepared = false
             // workspace.json is the authoritative reset commit. The view-state
-            // file is non-authoritative and can safely be retried afterward.
+            // file is non-authoritative and can safely be retried afterward. The
+            // old provider sessions have already confirmed detachment, so this
+            // reset can never make an unconfirmed live turn invisible.
             try await store.save(resetRecord)
 
             record = resetRecord
             viewState = resetViewState
             selectedRunID = nil
             pauseAfterCurrent = false
-            sessionsPrepared = false
             itemsWithDeltas.removeAll()
+            deltaItemRetainedByteCounts.removeAll()
+            interactionSafetyTerminatingRunIDs.removeAll(keepingCapacity: false)
             runIsAtBottom.removeAll()
             completingRunIDs.removeAll()
-            pendingInteractions.removeAll()
-            genericInteractionRoutes.removeAll()
+            clearPendingInteractions()
+            interactionResolutionInFlight = false
             genericRunTasks.values.forEach { $0.cancel() }
             genericRunTasks.removeAll()
             genericSessionFallbacks.removeAll()
+            hydratedTranscriptRunIDs.removeAll()
+            pendingTranscriptBuffers.removeAll()
+            visibleTranscriptChunks.removeAll()
+            visibleTranscriptUTF8ByteCounts.removeAll()
+            visibleTranscriptTasks.values.forEach { $0.cancel() }
+            visibleTranscriptTasks.removeAll()
+            transcriptHydrationIDs.removeAll()
+            transcriptHydrationChunks.removeAll()
+            let hydrationWaiters = transcriptHydrationWaiters.values.flatMap { $0 }
+            transcriptHydrationWaiters.removeAll()
+            hydrationWaiters.forEach { $0.resume() }
+            scheduledTranscriptFlushTasks.values.forEach { $0.cancel() }
+            scheduledTranscriptFlushTasks.removeAll()
+            transcriptFlushes.values.forEach { $0.task.cancel() }
+            transcriptFlushes.removeAll()
+            transcriptFlushFailureRunIDs.removeAll()
+            transcriptBackpressureRunIDs.removeAll()
+            droppedTranscriptUTF8Bytes.removeAll()
+            transcriptBackpressureFailureDetails.removeAll()
             pauseState = .idle
             statusMessage = "Configure this activity"
             errorMessage = nil
@@ -1590,14 +2012,186 @@ public final class RepositoryCoordinator {
         }
     }
 
+    private func providerSessions(
+        in record: RepositoryRecord
+    ) -> Set<ProviderSessionReference> {
+        var sessions: Set<ProviderSessionReference> = []
+        if let sessionID = record.implementerThreadID {
+            sessions.insert(ProviderSessionReference(providerID: .codex, sessionID: sessionID))
+        }
+        if let sessionID = record.reviewerThreadID {
+            sessions.insert(ProviderSessionReference(providerID: .codex, sessionID: sessionID))
+        }
+        guard let activity = record.activity else { return sessions }
+        for session in activity.stepSessions.values {
+            if let sessionID = session.providerSessionID {
+                sessions.insert(ProviderSessionReference(
+                    providerID: session.target.providerID,
+                    sessionID: sessionID
+                ))
+            }
+        }
+        for run in activity.runs {
+            guard let sessionID = run.threadID,
+                  let providerID = run.agentTarget?.providerID else { continue }
+            sessions.insert(ProviderSessionReference(
+                providerID: providerID,
+                sessionID: sessionID
+            ))
+        }
+        return sessions
+    }
+
+    @discardableResult
+    private func releaseProviderSessions(
+        _ sessions: some Sequence<ProviderSessionReference>
+    ) async -> Set<ProviderSessionReference> {
+        let sessions = Set(sessions).subtracting(releasedProviderSessions)
+        var released: Set<ProviderSessionReference> = []
+        for session in sessions {
+            if await releaseProviderSession(session) {
+                released.insert(session)
+            }
+        }
+        completionSessionDetachmentDebt.subtract(released)
+        return released
+    }
+
+    private func releaseProviderSession(_ session: ProviderSessionReference) async -> Bool {
+        if releasedProviderSessions.contains(session) {
+            return true
+        }
+        if providerSessionReleaseWaiters[session] != nil {
+            return await withCheckedContinuation { continuation in
+                if releasedProviderSessions.contains(session) {
+                    continuation.resume(returning: true)
+                } else if providerSessionReleaseWaiters[session] != nil {
+                    providerSessionReleaseWaiters[session, default: []].append(continuation)
+                } else {
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+
+        providerSessionReleaseWaiters[session] = []
+        let attemptSucceeded: Bool
+        if let agentProviders {
+            attemptSucceeded = await agentProviders.releaseSession(
+                providerID: session.providerID,
+                id: session.sessionID
+            )
+        } else if session.providerID == .codex {
+            do {
+                let status = try await appServer.unsubscribeThread(id: session.sessionID)
+                attemptSucceeded = ["unsubscribed", "notSubscribed", "notLoaded"].contains(status)
+            } catch {
+                attemptSucceeded = false
+            }
+        } else {
+            attemptSucceeded = false
+        }
+
+        // An App Server generation boundary can confirm Codex detachment while
+        // the unsubscribe request above is suspended. Honor that stronger proof
+        // even if the now-defunct request itself resumes with notRunning.
+        let succeeded = attemptSucceeded || releasedProviderSessions.contains(session)
+        if succeeded {
+            releasedProviderSessions.insert(session)
+        }
+        let waiters = providerSessionReleaseWaiters.removeValue(forKey: session) ?? []
+        waiters.forEach { $0.resume(returning: succeeded) }
+        return succeeded
+    }
+
+    private func markProviderSessionAttached(_ session: ProviderSessionReference) {
+        releasedProviderSessions.remove(session)
+    }
+
+    private func unreleasedProviderSessions(
+        afterReleasing sessions: some Sequence<ProviderSessionReference>
+    ) async -> Set<ProviderSessionReference> {
+        let requested = Set(sessions)
+        _ = await releaseProviderSessions(requested)
+        return requested.subtracting(releasedProviderSessions)
+    }
+
+    private func detachProviderSessionsForCurrentDocument() async -> Set<ProviderSessionReference> {
+        let unreleased = await unreleasedProviderSessions(
+            afterReleasing: providerSessions(in: record)
+        )
+        sessionsPrepared = false
+        return unreleased
+    }
+
+    private func providerSessionDescription(
+        _ sessions: Set<ProviderSessionReference>
+    ) -> String {
+        sessions
+            .map { "\($0.providerID.rawValue):\($0.sessionID)" }
+            .sorted()
+            .joined(separator: ", ")
+    }
+
+    private func prepareGenericSession(
+        _ request: AgentSessionRequest,
+        runID: UUID,
+        using agentProviders: AgentProviderRegistry
+    ) async throws -> AgentSession? {
+        let leaseID = beginProviderLaunchLease(runID: runID)
+        defer { finishProviderLaunchLease(leaseID) }
+
+        let session = try await agentProviders.prepareSession(request)
+        let reference = ProviderSessionReference(
+            providerID: session.providerID,
+            sessionID: session.id
+        )
+        markProviderSessionAttached(reference)
+        guard !isClosing else {
+            _ = await releaseProviderSessions([reference])
+            return nil
+        }
+        return session
+    }
+
+    private func beginProviderLaunchLease(runID: UUID) -> UUID {
+        let leaseID = UUID()
+        providerLaunchLeases[leaseID] = runID
+        return leaseID
+    }
+
+    private func finishProviderLaunchLease(_ leaseID: UUID) {
+        providerLaunchLeases.removeValue(forKey: leaseID)
+        guard providerLaunchLeases.isEmpty else { return }
+        let waiters = providerLaunchWaiters
+        providerLaunchWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForProviderLaunches() async {
+        guard !providerLaunchLeases.isEmpty else { return }
+        await withCheckedContinuation { continuation in
+            if providerLaunchLeases.isEmpty {
+                continuation.resume()
+            } else {
+                providerLaunchWaiters.append(continuation)
+            }
+        }
+    }
+
     public func appServerRestarted() async {
         sessionsPrepared = false
+        // The process-generation boundary is definitive even if a prior
+        // bounded termination wait returned without observing cleanup.
+        protocolContainment = nil
+        clearAllLegacyInterruptionDebts(advanceGeneration: true)
+        markCodexProviderSessionsDetachedByAppServerBoundary()
         if record.activity?.workflow != nil,
            activeRun?.agentTarget?.providerID != .codex {
             return
         }
-        pendingInteractions.removeAll()
-        genericInteractionRoutes.removeAll()
+        clearPendingInteractions()
+        clearSafetyStopStateAfterAppServerBoundary()
+        interactionResolutionInFlight = false
         if record.activity?.status == .running {
             record.activity?.status = .paused
             if record.activity?.workflow != nil {
@@ -1615,6 +2209,32 @@ public final class RepositoryCoordinator {
         }
     }
 
+    private func clearSafetyStopStateAfterAppServerBoundary() {
+        interactionSafetyTerminatingRunIDs.removeAll(keepingCapacity: false)
+        let terminatedBackpressureRunIDs = transcriptBackpressureRunIDs
+        for runID in terminatedBackpressureRunIDs {
+            applyTranscriptBackpressureFailure(runID: runID)
+            itemsWithDeltas.removeValue(forKey: runID)
+            deltaItemRetainedByteCounts.removeValue(forKey: runID)
+            tokenUsageBaselines.removeValue(forKey: runID)
+            droppedTranscriptUTF8Bytes.removeValue(forKey: runID)
+            transcriptBackpressureFailureDetails.removeValue(forKey: runID)
+        }
+        transcriptBackpressureRunIDs.removeAll(keepingCapacity: false)
+    }
+
+    private func markCodexProviderSessionsDetachedByAppServerBoundary() {
+        let detached = providerSessions(in: record).filter {
+            $0.providerID == .codex
+        }
+        releasedProviderSessions.formUnion(detached)
+        completionSessionDetachmentDebt.subtract(detached)
+        for session in detached {
+            let waiters = providerSessionReleaseWaiters.removeValue(forKey: session) ?? []
+            waiters.forEach { $0.resume(returning: true) }
+        }
+    }
+
     public func clearError() {
         errorMessage = nil
     }
@@ -1628,9 +2248,79 @@ public final class RepositoryCoordinator {
             return
         }
 
+        if method == "turn/started",
+           await terminateGenerationForUnexpectedLegacyStartedIdentityIfNeeded(
+                event: event
+           ) {
+            return
+        }
+
+        if method == "turn/completed",
+           let threadID = event.threadID,
+           let turnID = event.turnID {
+            // Only the exact terminal for the acknowledged turn discharges its
+            // watchdog. Delayed terminals from another turn or generation do
+            // not affect the debt.
+            clearLegacyInterruptionDebt(threadID: threadID, turnID: turnID)
+        }
+
+        if method == "thread/closed",
+           let threadID = event.threadID,
+           let unresolved = unresolvedLegacyInterruption(forThreadID: threadID) {
+            let detail = "Codex closed thread \(threadID) after Codeness requested interruption of turn \(unresolved.key.turnID), but did not emit the exact matching turn/completed notification. Codeness stopped the App Server generation because thread closure alone cannot prove that turn and its MCP/background processes ended."
+            await containLegacyAppServerGeneration(
+                runID: unresolved.debt.runID,
+                turnIDs: [unresolved.key.turnID],
+                detail: detail
+            )
+            return
+        }
+
         guard let runID = runID(for: event) else { return }
 
-        if method == "turn/started", let turnID = params["turn"]?["id"]?.stringValue {
+        if ["thread/closed", "turn/completed"].contains(method) {
+            if let terminalTurnID = event.turnID ?? run(withID: runID)?.turnID {
+                retireTurnID(terminalTurnID)
+            }
+            if await finishInteractionSafetyStopIfNeeded(runID: runID) {
+                return
+            }
+            if transcriptBackpressureRunIDs.contains(runID) {
+                itemsWithDeltas.removeValue(forKey: runID)
+                deltaItemRetainedByteCounts.removeValue(forKey: runID)
+                tokenUsageBaselines.removeValue(forKey: runID)
+                await finishBackpressuredRunAfterTerminalEvent(runID: runID)
+                return
+            }
+        }
+
+        if method == "thread/closed" {
+            clearPendingInteractions()
+            interactionSafetyTerminatingRunIDs.remove(runID)
+            itemsWithDeltas.removeValue(forKey: runID)
+            deltaItemRetainedByteCounts.removeValue(forKey: runID)
+            tokenUsageBaselines.removeValue(forKey: runID)
+            updateRun(runID) {
+                $0.status = .interrupted
+                $0.completedAt = .now
+                $0.relayError = "Codex closed the active thread unexpectedly."
+            }
+            activatePendingGoalAmendment()
+            record.activity?.resumeCheckpoint = .recoverRun(runID)
+            pauseActivity(
+                message: "Codex closed the active thread. Inspect the repository before resuming."
+            )
+            if isClosing {
+                await completeCloseAfterTerminalEvent()
+            } else {
+                try? await persist()
+            }
+            return
+        }
+
+        if method == "turn/started",
+           !transcriptBackpressureRunIDs.contains(runID),
+           let turnID = params["turn"]?["id"]?.stringValue {
             updateRun(runID) {
                 $0.turnID = turnID
                 $0.status = .running
@@ -1651,18 +2341,44 @@ public final class RepositoryCoordinator {
         let deltaItems = itemsWithDeltas[runID] ?? []
         let update = TranscriptFormatter.update(method: method, params: params, itemsWithDeltas: deltaItems)
         if let itemID = update.itemID, method.hasSuffix("/delta") || method.hasSuffix("Delta") {
-            itemsWithDeltas[runID, default: []].insert(itemID)
+            if itemsWithDeltas[runID]?.contains(itemID) != true {
+                let retainedByteCount = itemID.utf8.count
+                let currentByteCount = deltaItemRetainedByteCounts[runID] ?? 0
+                guard (itemsWithDeltas[runID]?.count ?? 0)
+                        < Self.maximumTrackedDeltaItemCount,
+                      retainedByteCount <= Self.maximumTrackedDeltaItemRetainedBytes,
+                      currentByteCount
+                        <= Self.maximumTrackedDeltaItemRetainedBytes - retainedByteCount else {
+                    await stopRunForInteractionSafety(
+                        runID: runID,
+                        detail: "Codex emitted deltas for too many unfinished items. Codeness stopped the turn to prevent unbounded memory growth."
+                    )
+                    return
+                }
+                itemsWithDeltas[runID, default: []].insert(itemID)
+                deltaItemRetainedByteCounts[runID] = currentByteCount + retainedByteCount
+            }
+        }
+        if method == "item/completed", let itemID = update.itemID {
+            if itemsWithDeltas[runID]?.remove(itemID) != nil {
+                deltaItemRetainedByteCounts[runID] = max(
+                    0,
+                    (deltaItemRetainedByteCounts[runID] ?? 0) - itemID.utf8.count
+                )
+            }
         }
         let storedText = RunTranscriptPresentation.storedText(for: update)
         if !storedText.isEmpty {
-            updateRun(runID) { $0.transcript += storedText }
-            await appendTranscript(storedText, runID: runID)
+            await recordTranscript(storedText, runID: runID)
         }
         if let finalOutput = update.finalOutput, !finalOutput.isEmpty {
             updateRun(runID) { $0.finalOutput = finalOutput }
         }
 
         if method == "turn/completed" {
+            interactionSafetyTerminatingRunIDs.remove(runID)
+            itemsWithDeltas.removeValue(forKey: runID)
+            deltaItemRetainedByteCounts.removeValue(forKey: runID)
             let turn = params["turn"] ?? .null
             let finalOutput = TranscriptFormatter.finalOutput(from: turn) ?? run(withID: runID)?.finalOutput
             let status = turn["status"]?.stringValue ?? "failed"
@@ -1784,6 +2500,11 @@ public final class RepositoryCoordinator {
             disposition: envelope.sourceDisposition
         ) {
         case .pause(let reason):
+            // Make the stopped-step controls observable atomically with the paused
+            // state. The routing task is already on its terminal branch, and its
+            // defer will harmlessly repeat these removals.
+            completingRunIDs.remove(runID)
+            routingTasks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.status = .paused
                 $0.relayError = reason
@@ -1816,6 +2537,10 @@ public final class RepositoryCoordinator {
                     allowRecreate: record.requiresFreshProviderSessions
                 )
             } catch {
+                guard !isClosing else {
+                    record.activity?.status = .paused
+                    return
+                }
                 record.activity?.status = .paused
                 record.activity?.pendingAction = action
                 record.activity?.resumeCheckpoint = .perform(action)
@@ -1880,12 +2605,14 @@ public final class RepositoryCoordinator {
             pauseAfterCurrent = false
             viewState.pauseAfterCurrent = false
             scheduleViewStateSave()
-            try? await persist()
+            await persistCompletedActivityAndDetachSessions()
         }
     }
 
     private func launchRun(role: AgentRole, kind: RunKind, prompt: String) async {
         guard !isClosing, record.activity != nil else { return }
+        let launchLeaseID = beginProviderLaunchLease(runID: UUID())
+        defer { finishProviderLaunchLease(launchLeaseID) }
         let selection: ModelSelection = switch kind {
         case .implementation: record.settings.implementer
         case .review: record.settings.reviewer
@@ -1926,6 +2653,7 @@ public final class RepositoryCoordinator {
             selectedRunID = run.id
         }
         itemsWithDeltas[run.id] = []
+        deltaItemRetainedByteCounts[run.id] = 0
         statusMessage = "Starting \(kind.displayName.lowercased())…"
 
         do {
@@ -1936,6 +2664,7 @@ public final class RepositoryCoordinator {
             // previous durable phase checkpoint instead of running without a record.
             record.activity?.runs.removeAll(where: { $0.id == run.id })
             itemsWithDeltas.removeValue(forKey: run.id)
+            deltaItemRetainedByteCounts.removeValue(forKey: run.id)
             runIsAtBottom.removeValue(forKey: run.id)
             record.activity?.status = .paused
             record.activity?.pendingAction = action
@@ -1950,6 +2679,17 @@ public final class RepositoryCoordinator {
                 errorMessage = "Could not save the next run before starting Codex: \(queuedSaveError.localizedDescription). The paused checkpoint also could not be saved: \(error.localizedDescription)"
             }
             statusMessage = "Paused before \(action.displayName.lowercased())"
+            return
+        }
+
+        guard !isClosing else {
+            updateRun(run.id) {
+                $0.status = .interrupted
+                $0.completedAt = .now
+            }
+            record.activity?.status = .paused
+            record.activity?.resumeCheckpoint = .recoverRun(run.id)
+            try? await persist()
             return
         }
 
@@ -1980,16 +2720,23 @@ public final class RepositoryCoordinator {
             updateRun(run.id) {
                 $0.status = .failed
                 $0.completedAt = .now
-                $0.transcript += failureText
             }
-            await appendTranscript(failureText, runID: run.id)
+            await recordTranscript(failureText, runID: run.id)
             record.activity?.resumeCheckpoint = .recoverRun(run.id)
             pauseActivity(message: error.localizedDescription)
-            if isClosing {
-                await completeCloseAfterTerminalEvent()
-            } else {
+            if !isClosing {
                 try? await persist()
             }
+            return
+        }
+
+        if let notificationTurnID = self.run(withID: run.id)?.turnID,
+           notificationTurnID != turnID {
+            await containLegacyAppServerGeneration(
+                runID: run.id,
+                turnIDs: [notificationTurnID, turnID],
+                detail: "Codex identified the same started turn as both \(notificationTurnID) and \(turnID). Codeness stopped the App Server generation instead of attaching this run to an ambiguous execution."
+            )
             return
         }
 
@@ -2012,13 +2759,9 @@ public final class RepositoryCoordinator {
         }
 
         if isClosing {
-            pauseState = .interrupting
-            statusMessage = "Stopping \(kind.displayName.lowercased())…"
-            do {
-                try await appServer.interrupt(threadID: threadID, turnID: turnID)
-            } catch {
-                _ = await reconcileCloseControlFailure(error.localizedDescription)
-            }
+            // Close is waiting for this launch lease. Let its single control path
+            // issue the interrupt after the accepted turn is durably registered.
+            statusMessage = "Preparing to stop \(kind.displayName.lowercased())…"
             return
         }
         statusMessage = "\(kind.displayName) running"
@@ -2071,6 +2814,7 @@ public final class RepositoryCoordinator {
                     )
                 } else if GenericWorkflowStateMachine.initialCursor(for: workflow) == nil {
                     completeGenericActivity()
+                    await persistCompletedActivityAndDetachSessions()
                 }
             }
         } catch {
@@ -2167,6 +2911,8 @@ public final class RepositoryCoordinator {
             selectedRunID = run.id
         }
         statusMessage = "Starting \(step.name.lowercased())…"
+        let launchLeaseID = beginProviderLaunchLease(runID: run.id)
+        defer { finishProviderLaunchLease(launchLeaseID) }
 
         do {
             try await persist()
@@ -2183,6 +2929,8 @@ public final class RepositoryCoordinator {
             return
         }
 
+        guard !isClosing else { return }
+
         let reusableSessionID = reusableProviderSessionID(
             sessionState,
             stepID: step.id
@@ -2190,17 +2938,20 @@ public final class RepositoryCoordinator {
         var resumedExistingSession = reusableSessionID != nil
         var session: AgentSession
         do {
-            session = try await agentProviders.prepareSession(
+            guard let preparedSession = try await prepareGenericSession(
                 genericSessionRequest(
                     existingSessionID: reusableSessionID,
                     workflow: workflow,
                     step: step
-                )
-            )
+                ),
+                runID: run.id,
+                using: agentProviders
+            ) else { return }
+            session = preparedSession
         } catch {
             guard !isClosing else { return }
             guard allowsSessionFallback,
-                  reusableSessionID != nil,
+                  let reusableSessionID,
                   Self.confirmsUnavailableSession(error) else {
                 await failGenericRunBeforeStart(
                     runID: run.id,
@@ -2210,15 +2961,22 @@ public final class RepositoryCoordinator {
             }
             await recordGenericSessionFallback(runID: run.id, error: error)
             guard !isClosing else { return }
+            await releaseProviderSessions([ProviderSessionReference(
+                providerID: step.target.providerID,
+                sessionID: reusableSessionID
+            )])
+            guard !isClosing else { return }
             do {
-                session = try await agentProviders.prepareSession(
+                guard let preparedSession = try await prepareGenericSession(
                     genericSessionRequest(
                         existingSessionID: nil,
                         workflow: workflow,
                         step: step
-                    )
-                )
-                guard !isClosing else { return }
+                    ),
+                    runID: run.id,
+                    using: agentProviders
+                ) else { return }
+                session = preparedSession
                 sessionState = advanceGenericSessionLineage(
                     sessionState,
                     step: step,
@@ -2290,14 +3048,24 @@ public final class RepositoryCoordinator {
                 genericSessionFallbacks.removeValue(forKey: run.id)
                 await recordGenericSessionFallback(runID: run.id, error: error)
                 guard !isClosing else { return }
-                session = try await agentProviders.prepareSession(
+                // `prepareSession` successfully attached the resumed phase before
+                // `startRun` proved it unavailable. Detach that exact attachment
+                // before replacing the durable phase ID with the fallback lineage.
+                await releaseProviderSessions([ProviderSessionReference(
+                    providerID: session.providerID,
+                    sessionID: session.id
+                )])
+                guard !isClosing else { return }
+                guard let preparedSession = try await prepareGenericSession(
                     genericSessionRequest(
                         existingSessionID: nil,
                         workflow: workflow,
                         step: step
-                    )
-                )
-                guard !isClosing else { return }
+                    ),
+                    runID: run.id,
+                    using: agentProviders
+                ) else { return }
+                session = preparedSession
                 sessionState = advanceGenericSessionLineage(
                     sessionState,
                     step: step,
@@ -2338,17 +3106,13 @@ public final class RepositoryCoordinator {
                 self?.genericRunTasks.removeValue(forKey: run.id)
             }
             if isClosing {
-                pauseState = .interrupting
-                statusMessage = "Stopping \(step.name.lowercased())…"
-                try await agentProviders.interrupt(
-                    providerID: step.target.providerID,
-                    runID: run.id
-                )
+                statusMessage = "Preparing to stop \(step.name.lowercased())…"
             } else {
                 statusMessage = "\(step.name) running"
             }
         } catch {
             genericSessionFallbacks.removeValue(forKey: run.id)
+            guard !isClosing else { return }
             await failGenericRunBeforeStart(
                 runID: run.id,
                 message: "Could not start \(step.name): \(error.localizedDescription)"
@@ -2415,8 +3179,7 @@ public final class RepositoryCoordinator {
             "\nThe existing agent session could not be resumed (\(error.localizedDescription)). Retrying automatically in a fresh session.\n",
             section: .diagnostic
         )
-        updateRun(runID) { $0.transcript += text }
-        await appendTranscript(text, runID: runID)
+        await recordTranscript(text, runID: runID)
         statusMessage = "Recreating the unavailable agent session…"
     }
 
@@ -2436,9 +3199,8 @@ public final class RepositoryCoordinator {
         updateRun(runID) {
             $0.status = .failed
             $0.completedAt = .now
-            $0.transcript += text
         }
-        await appendTranscript(text, runID: runID)
+        await recordTranscript(text, runID: runID)
         record.activity?.status = .paused
         record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
         statusMessage = "Paused after an agent start failure"
@@ -2452,8 +3214,20 @@ public final class RepositoryCoordinator {
 
     private func handleAgentEvent(_ event: AgentEvent, runID: UUID) async {
         guard let run = run(withID: runID) else { return }
+        let activeStatuses: [RunStatus] = [.queued, .running, .awaitingApproval]
+        let isTerminalEvent: Bool = switch event {
+        case .completed, .interrupted, .sessionUnavailable, .failed: true
+        case .started, .transcript, .diagnostic, .tokenUsage, .interaction,
+                .interactionResolved: false
+        }
+        guard activeStatuses.contains(run.status)
+                || (isTerminalEvent && interactionSafetyTerminatingRunIDs.contains(runID))
+                || (isTerminalEvent && transcriptBackpressureRunIDs.contains(runID)) else {
+            return
+        }
         switch event {
         case .started(let executionID):
+            guard !transcriptBackpressureRunIDs.contains(runID) else { return }
             genericSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.turnID = executionID
@@ -2463,15 +3237,19 @@ public final class RepositoryCoordinator {
 
         case .transcript(let text), .diagnostic(let text):
             guard !text.isEmpty else { return }
-            updateRun(runID) { $0.transcript += text }
-            await appendTranscript(text, runID: runID)
+            await recordTranscript(text, runID: runID)
 
         case .tokenUsage(let usage):
             updateRun(runID) { $0.tokenUsage = usage }
             await appendTokenUsage(usage, runID: runID)
 
         case .interaction(let interaction):
-            presentGenericInteraction(interaction, runID: runID, providerID: run.agentTarget?.providerID)
+            guard !transcriptBackpressureRunIDs.contains(runID) else { return }
+            await presentGenericInteraction(
+                interaction,
+                runID: runID,
+                providerID: run.agentTarget?.providerID
+            )
             try? await persist()
 
         case .interactionResolved(let interactionID):
@@ -2482,6 +3260,11 @@ public final class RepositoryCoordinator {
             }
 
         case .completed(let output, let duration, let usage):
+            if await finishInteractionSafetyStopIfNeeded(runID: runID) { return }
+            guard !transcriptBackpressureRunIDs.contains(runID) else {
+                await finishBackpressuredRunAfterTerminalEvent(runID: runID)
+                return
+            }
             genericSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.finalOutput = output
@@ -2503,6 +3286,11 @@ public final class RepositoryCoordinator {
             }
 
         case .interrupted(let detail):
+            if await finishInteractionSafetyStopIfNeeded(runID: runID) { return }
+            guard !transcriptBackpressureRunIDs.contains(runID) else {
+                await finishBackpressuredRunAfterTerminalEvent(runID: runID)
+                return
+            }
             genericSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.status = .interrupted
@@ -2521,6 +3309,11 @@ public final class RepositoryCoordinator {
             }
 
         case .sessionUnavailable(let detail):
+            if await finishInteractionSafetyStopIfNeeded(runID: runID) { return }
+            guard !transcriptBackpressureRunIDs.contains(runID) else {
+                await finishBackpressuredRunAfterTerminalEvent(runID: runID)
+                return
+            }
             await failGenericRunFromEvent(
                 runID: runID,
                 detail: detail,
@@ -2528,6 +3321,11 @@ public final class RepositoryCoordinator {
             )
 
         case .failed(let detail):
+            if await finishInteractionSafetyStopIfNeeded(runID: runID) { return }
+            guard !transcriptBackpressureRunIDs.contains(runID) else {
+                await finishBackpressuredRunAfterTerminalEvent(runID: runID)
+                return
+            }
             await failGenericRunFromEvent(
                 runID: runID,
                 detail: detail,
@@ -2573,6 +3371,8 @@ public final class RepositoryCoordinator {
         after failedRunID: UUID,
         fallback: GenericSessionFallback
     ) async {
+        let launchLeaseID = beginProviderLaunchLease(runID: failedRunID)
+        defer { finishProviderLaunchLease(launchLeaseID) }
         guard !isClosing,
               var activity = record.activity,
               activity.status == .paused,
@@ -2588,6 +3388,13 @@ public final class RepositoryCoordinator {
         let previousActivity = activity
         var sessionState = activity.stepSessions[step.id]
             ?? WorkflowSessionState(stepID: step.id, target: step.target)
+        if let supersededSessionID = sessionState.providerSessionID {
+            await releaseProviderSessions([ProviderSessionReference(
+                providerID: sessionState.target.providerID,
+                sessionID: supersededSessionID
+            )])
+            guard !isClosing else { return }
+        }
         sessionState = advanceGenericSessionLineage(
             sessionState,
             step: step,
@@ -2727,6 +3534,11 @@ public final class RepositoryCoordinator {
             in: workflow
         ) {
         case .pause(let reason):
+            // Publish the paused checkpoint only after the terminal routing task is
+            // no longer considered active, so retry/restart cannot lose a click to
+            // a transient state where the UI looks paused but remains ineligible.
+            completingRunIDs.remove(runID)
+            routingTasks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.status = .paused
                 $0.relayError = reason
@@ -2748,7 +3560,7 @@ public final class RepositoryCoordinator {
 
         case .complete:
             completeGenericActivity()
-            try? await persist()
+            await persistCompletedActivityAndDetachSessions()
         }
     }
 
@@ -2762,6 +3574,46 @@ public final class RepositoryCoordinator {
         pauseAfterCurrent = false
         viewState.pauseAfterCurrent = false
         scheduleViewStateSave()
+    }
+
+    private func persistCompletedActivityAndDetachSessions() async {
+        completionSessionDetachmentDebt.formUnion(providerSessions(in: record))
+        do {
+            try await persist()
+        } catch {
+            errorMessage = "The activity completed, but its final state could not be saved: \(error.localizedDescription)"
+        }
+    }
+
+    private func retryCompletionSessionDetachmentDebt() async {
+        guard record.activity?.status == .completed,
+              record.activity?.providerSessionsDetachedAt == nil else { return }
+        if !completionSessionDetachmentDebt.isEmpty {
+            _ = await releaseProviderSessions(completionSessionDetachmentDebt)
+        }
+        guard completionSessionDetachmentDebt.isEmpty else { return }
+        guard !isSavingCompletionSessionDetachmentAcknowledgement else { return }
+
+        sessionsPrepared = false
+        let activityID = record.activity?.id
+        let detachedAt = Date.now
+        var acknowledgedRecord = record
+        acknowledgedRecord.activity?.providerSessionsDetachedAt = detachedAt
+        acknowledgedRecord.updatedAt = detachedAt
+        isSavingCompletionSessionDetachmentAcknowledgement = true
+        defer { isSavingCompletionSessionDetachmentAcknowledgement = false }
+        do {
+            // This small acknowledgement is deliberately written without calling
+            // `persist()` again: the provider side effect has already succeeded,
+            // and recursively retrying cleanup would reopen the same operation.
+            try await store.save(workspaceMetadataSnapshot(acknowledgedRecord))
+            if record.activity?.id == activityID {
+                record.activity?.providerSessionsDetachedAt = detachedAt
+                record.updatedAt = detachedAt
+            }
+        } catch {
+            errorMessage = "Provider sessions were detached, but that cleanup acknowledgement could not be saved: \(error.localizedDescription)"
+        }
     }
 
     private func recoverGenericRun(_ interruptedRun: RunRecord) async {
@@ -2792,33 +3644,46 @@ public final class RepositoryCoordinator {
         _ interaction: AgentInteraction,
         runID: UUID,
         providerID: AgentProviderID?
-    ) {
+    ) async {
         guard let providerID else { return }
+        guard !interactionSafetyTerminatingRunIDs.contains(runID) else { return }
         let presentationKey = "agent:\(providerID.rawValue):\(runID.uuidString):\(interaction.id)"
         let presentationID = JSONValue.string(presentationKey)
-        guard !pendingInteractions.contains(where: { $0.id == presentationID }) else { return }
+        guard claimedInteractionID != presentationID,
+              !pendingInteractions.contains(where: { $0.id == presentationID }) else {
+            await stopRunForInteractionSafety(
+                runID: runID,
+                detail: "The agent reused an unresolved interaction identifier. Codeness stopped the run instead of allowing a hidden request to replace the visible request."
+            )
+            return
+        }
+        let pending = PendingServerInteraction(
+            id: presentationID,
+            method: "agent/\(providerID.rawValue)/\(interaction.kind.rawValue)",
+            title: interaction.title,
+            detail: interaction.detail,
+            questions: interaction.questions,
+            approvalDecisions: interaction.decisions.map {
+                ApprovalDecision(
+                    value: $0.payload,
+                    label: $0.label,
+                    explanation: $0.explanation,
+                    isDestructive: $0.isDestructive
+                )
+            },
+            rawParameters: interaction.rawParameters
+        )
+        guard appendPendingInteraction(pending) else {
+            await stopRunForInteractionSafety(
+                runID: runID,
+                detail: "The agent accumulated too many unresolved interactions. Codeness stopped the run to prevent unbounded memory growth."
+            )
+            return
+        }
         genericInteractionRoutes[presentationKey] = GenericInteractionRoute(
             providerID: providerID,
             runID: runID,
             interactionID: interaction.id
-        )
-        pendingInteractions.append(
-            PendingServerInteraction(
-                id: presentationID,
-                method: "agent/\(providerID.rawValue)/\(interaction.kind.rawValue)",
-                title: interaction.title,
-                detail: interaction.detail,
-                questions: interaction.questions,
-                approvalDecisions: interaction.decisions.map {
-                    ApprovalDecision(
-                        value: $0.payload,
-                        label: $0.label,
-                        explanation: $0.explanation,
-                        isDestructive: $0.isDestructive
-                    )
-                },
-                rawParameters: interaction.rawParameters
-            )
         )
         updateRun(runID) { $0.status = .awaitingApproval }
         if pendingInteractions.count == 1 {
@@ -2831,12 +3696,63 @@ public final class RepositoryCoordinator {
         return genericInteractionRoutes[key]
     }
 
+    private func claimPendingInteractionForResolution(
+        expectedID: JSONValue? = nil
+    ) -> (
+        interaction: PendingServerInteraction,
+        route: GenericInteractionRoute?,
+        runID: UUID?,
+        claimID: UUID
+    )? {
+        guard !interactionResolutionInFlight,
+              let interaction = pendingInteraction,
+              expectedID == nil || expectedID == interaction.id else { return nil }
+        interactionResolutionInFlight = true
+        let claimID = UUID()
+        interactionResolutionClaimID = claimID
+        claimedInteractionID = interaction.id
+        claimedInteractionRetainedByteCount = Self.retainedCost(of: interaction)
+        let route = genericRoute(for: interaction.id)
+        let runID = route?.runID ?? activeRun?.id
+        removePendingInteraction(id: interaction.id)
+        if let key = interaction.id.stringValue {
+            genericInteractionRoutes.removeValue(forKey: key)
+        }
+        return (interaction, route, runID, claimID)
+    }
+
+    private func failClaimedInteraction(
+        claimID: UUID,
+        runID: UUID?,
+        detail: String
+    ) async {
+        guard interactionResolutionClaimID == claimID else { return }
+        guard let runID else {
+            errorMessage = detail
+            clearPendingInteractions()
+            return
+        }
+        await stopRunForInteractionSafety(runID: runID, detail: detail)
+    }
+
+    private func completeInteractionResolutionClaim(claimID: UUID) async {
+        guard interactionResolutionClaimID == claimID else { return }
+        interactionResolutionInFlight = false
+        interactionResolutionClaimID = nil
+        claimedInteractionID = nil
+        claimedInteractionRetainedByteCount = 0
+        await refreshInteractionPresentationState()
+    }
+
     private func resolveGenericInteraction(
         _ route: GenericInteractionRoute,
-        resolution: AgentInteractionResolution,
-        presentationID: JSONValue
+        claimID: UUID,
+        resolution: AgentInteractionResolution
     ) async {
-        guard let agentProviders else { return }
+        guard let agentProviders else {
+            await completeInteractionResolutionClaim(claimID: claimID)
+            return
+        }
         do {
             try await agentProviders.resolveInteraction(
                 providerID: route.providerID,
@@ -2844,13 +3760,14 @@ public final class RepositoryCoordinator {
                 interactionID: route.interactionID,
                 resolution: resolution
             )
-            if let key = presentationID.stringValue {
-                genericInteractionRoutes.removeValue(forKey: key)
-            }
-            await finishInteraction(id: presentationID)
         } catch {
-            errorMessage = error.localizedDescription
+            await failClaimedInteraction(
+                claimID: claimID,
+                runID: route.runID,
+                detail: "Could not send the agent interaction response: \(error.localizedDescription)"
+            )
         }
+        await completeInteractionResolutionClaim(claimID: claimID)
     }
 
     private func finishGenericInteraction(presentationKey: String) async {
@@ -2930,6 +3847,59 @@ public final class RepositoryCoordinator {
             }
             return await finishCloseWithoutActiveTurn()
         }
+    }
+
+    private func prepareSafetyStoppedRunsForClose() async -> DocumentClosePreparationResult {
+        pauseState = .interrupting
+        statusMessage = "Confirming that the safety-stopped agent turn has ended…"
+        let runIDs = interactionSafetyTerminatingRunIDs
+            .union(transcriptBackpressureRunIDs)
+            .sorted { $0.uuidString < $1.uuidString }
+
+        for runID in runIDs {
+            guard interactionSafetyTerminatingRunIDs.contains(runID)
+                    || transcriptBackpressureRunIDs.contains(runID) else {
+                continue
+            }
+            guard let run = run(withID: runID) else {
+                return failClose(
+                    "Codeness could not identify a safety-stopped run whose termination is still unconfirmed. The document remains open."
+                )
+            }
+            do {
+                if let target = run.agentTarget {
+                    guard let agentProviders else {
+                        return failClose(
+                            "The active agent provider is unavailable, so Codeness could not confirm that the safety-stopped run ended."
+                        )
+                    }
+                    try await agentProviders.interrupt(
+                        providerID: target.providerID,
+                        runID: runID
+                    )
+                } else {
+                    guard let threadID = run.threadID,
+                          let turnID = run.turnID else {
+                        return failClose(
+                            "The safety-stopped Codex run has no interruptible turn identifier. The document remains open until termination can be confirmed."
+                        )
+                    }
+                    try await interruptLegacyTurn(
+                        runID: runID,
+                        threadID: threadID,
+                        turnID: turnID
+                    )
+                }
+            } catch {
+                return await reconcileCloseControlFailure(error.localizedDescription)
+            }
+        }
+
+        if pauseState == .paused { return .ready }
+        if !isClosing {
+            return .failed(errorMessage ?? "Codeness could not confirm that the safety-stopped run ended.")
+        }
+        return await waitForCloseCompletion()
     }
 
     private func pauseGenericActivity(message: String) {
@@ -3074,8 +4044,14 @@ public final class RepositoryCoordinator {
 
     private func ensureSessions(allowRecreate: Bool) async throws {
         guard !sessionsPrepared else { return }
+        let leaseID = beginProviderLaunchLease(runID: UUID())
+        defer { finishProviderLaunchLease(leaseID) }
+        guard !isClosing else {
+            throw RepositoryCoordinatorError.providerLaunchCancelledForClose
+        }
+        let previousImplementerThreadID = record.implementerThreadID
         let implementerThreadID = try await prepareThread(
-            existingID: record.implementerThreadID,
+            existingID: previousImplementerThreadID,
             role: .implementer,
             selection: record.settings.implementer,
             instructions: PromptBuilder.implementerInstructions,
@@ -3083,9 +4059,20 @@ public final class RepositoryCoordinator {
         )
         record.implementerThreadID = implementerThreadID
         try await persist()
+        if let previousImplementerThreadID,
+           previousImplementerThreadID != implementerThreadID {
+            await releaseProviderSessions([ProviderSessionReference(
+                providerID: .codex,
+                sessionID: previousImplementerThreadID
+            )])
+        }
+        guard !isClosing else {
+            throw RepositoryCoordinatorError.providerLaunchCancelledForClose
+        }
 
+        let previousReviewerThreadID = record.reviewerThreadID
         let reviewerThreadID = try await prepareThread(
-            existingID: record.reviewerThreadID,
+            existingID: previousReviewerThreadID,
             role: .reviewer,
             selection: record.settings.reviewer,
             instructions: PromptBuilder.reviewerInstructions,
@@ -3094,6 +4081,13 @@ public final class RepositoryCoordinator {
         record.reviewerThreadID = reviewerThreadID
         record.requiresFreshProviderSessions = false
         try await persist()
+        if let previousReviewerThreadID,
+           previousReviewerThreadID != reviewerThreadID {
+            await releaseProviderSessions([ProviderSessionReference(
+                providerID: .codex,
+                sessionID: previousReviewerThreadID
+            )])
+        }
         sessionsPrepared = true
     }
 
@@ -3112,8 +4106,20 @@ public final class RepositoryCoordinator {
                     model: selection.model,
                     developerInstructions: instructions
                 )
+                let reference = ProviderSessionReference(
+                    providerID: .codex,
+                    sessionID: existingID
+                )
+                markProviderSessionAttached(reference)
+                guard !isClosing else {
+                    await releaseProviderSessions([reference])
+                    throw RepositoryCoordinatorError.providerLaunchCancelledForClose
+                }
                 return existingID
             } catch where allowRecreate {
+                guard !isClosing else {
+                    throw RepositoryCoordinatorError.providerLaunchCancelledForClose
+                }
                 statusMessage = "Recreating unavailable \(role.displayName.lowercased()) session…"
             }
         }
@@ -3125,7 +4131,25 @@ public final class RepositoryCoordinator {
             model: selection.model,
             developerInstructions: instructions
         )
-        try await appServer.setThreadName(id: identifier, name: "\(repositoryName) — \(role.displayName)")
+        let reference = ProviderSessionReference(providerID: .codex, sessionID: identifier)
+        markProviderSessionAttached(reference)
+        guard !isClosing else {
+            await releaseProviderSessions([reference])
+            throw RepositoryCoordinatorError.providerLaunchCancelledForClose
+        }
+        do {
+            try await appServer.setThreadName(
+                id: identifier,
+                name: "\(repositoryName) — \(role.displayName)"
+            )
+        } catch {
+            await releaseProviderSessions([reference])
+            throw error
+        }
+        guard !isClosing else {
+            await releaseProviderSessions([reference])
+            throw RepositoryCoordinatorError.providerLaunchCancelledForClose
+        }
         return identifier
     }
 
@@ -3149,6 +4173,10 @@ public final class RepositoryCoordinator {
             """
             await launchRun(role: interruptedRun.role, kind: interruptedRun.kind, prompt: recoveryPrompt)
         } catch {
+            guard !isClosing else {
+                record.activity?.status = .paused
+                return
+            }
             errorMessage = error.localizedDescription
             record.activity?.resumeCheckpoint = .recoverRun(interruptedRun.id)
             pauseActivity(message: "Could not resume the interrupted session.")
@@ -3185,24 +4213,208 @@ public final class RepositoryCoordinator {
         }
     }
 
-    private func recoverAppendOnlyTranscripts() async {
-        guard let activity = record.activity else { return }
-        for run in activity.runs {
-            guard let recovered = try? await store.recoveredTranscript(
-                repositoryPath: record.canonicalPath,
-                activityID: activity.id,
-                runID: run.id
-            ), !recovered.isEmpty, recovered != run.transcript else { continue }
-            let reconciled = RunTranscriptPresentation.reconciledTranscript(
-                metadata: run.transcript,
-                appendLog: recovered
+    func recoverAppendOnlyTranscript(
+        runID: UUID?,
+        loadGeneration: UUID? = nil
+    ) async {
+        guard loadGeneration.map(isCurrentLoad) ?? true else { return }
+        guard let runID,
+              let activity = record.activity,
+              activity.runs.contains(where: { $0.id == runID }) else { return }
+
+        // A scheduled UI append may contain the same bytes that are about to be
+        // reconstructed from disk. Cancel it and rebuild from the durable log plus
+        // identity-tracked pending chunks instead of guessing from string content.
+        visibleTranscriptTasks.removeValue(forKey: runID)?.cancel()
+        visibleTranscriptChunks.removeValue(forKey: runID)
+        visibleTranscriptUTF8ByteCounts.removeValue(forKey: runID)
+        let wasAlreadyHydrated = hydratedTranscriptRunIDs.contains(runID)
+        hydratedTranscriptRunIDs.remove(runID)
+        let hydrationID = UUID()
+        transcriptHydrationIDs[runID] = hydrationID
+        transcriptHydrationChunks[runID] = []
+        defer { finishTranscriptHydration(runID: runID, hydrationID: hydrationID) }
+
+        do {
+            try await flushPendingTranscript(runID: runID)
+            guard loadGeneration.map(isCurrentLoad) ?? true else { return }
+            guard transcriptHydrationIDs[runID] == hydrationID else { return }
+            // Every chunk captured before this point is now in the durable prefix
+            // that the following tail read observes. New chunks are held aside
+            // until that read publishes, preventing disk-tail/UI-batch overlap.
+            transcriptHydrationChunks[runID] = []
+        } catch {
+            // Keep both the pre-existing pending buffer and hydration captures.
+            // Their sequence identities are merged below without guessing from
+            // repeated text content.
+        }
+        guard transcriptHydrationIDs[runID] == hydrationID else { return }
+        let currentTranscript = self.run(withID: runID)?.transcript ?? ""
+        let metadata = wasAlreadyHydrated ? "" : currentTranscript
+        var completeTranscript: String
+        do {
+            if metadata.isEmpty {
+                // WorkspaceStore externalizes live transcripts into per-run files.
+                // Read only the suffix that can survive the presentation bound;
+                // selecting a very large run must not allocate its entire log.
+                let recovered = try await store.recoveredTranscriptTail(
+                    repositoryPath: record.canonicalPath,
+                    activityID: activity.id,
+                    runID: runID,
+                    maximumUTF8Bytes: Self.maximumPresentedTranscriptUTF8Bytes
+                )
+                guard loadGeneration.map(isCurrentLoad) ?? true else { return }
+                completeTranscript = recovered.wasTruncated
+                    ? Self.truncatedTranscriptMarker + recovered.text
+                    : recovered.text
+            } else {
+                // A non-externalizing store or legacy fixture can still supply
+                // transcript metadata. Full reconciliation is required once to
+                // avoid choosing a divergent append-log suffix as canonical.
+                let recovered = try await store.recoveredTranscript(
+                    repositoryPath: record.canonicalPath,
+                    activityID: activity.id,
+                    runID: runID
+                )
+                guard loadGeneration.map(isCurrentLoad) ?? true else { return }
+                completeTranscript = RunTranscriptPresentation.reconciledTranscript(
+                    metadata: metadata,
+                    appendLog: recovered
+                )
+            }
+        } catch {
+            return
+        }
+        guard loadGeneration.map(isCurrentLoad) ?? true else { return }
+        guard transcriptHydrationIDs[runID] == hydrationID else { return }
+        let pendingTranscript = transcriptSuffixCapturedDuringHydration(runID: runID)
+        if !pendingTranscript.isEmpty {
+            // Pending chunks have not been acknowledged by WorkspaceStore. They
+            // are a distinct ordered suffix even when their text is byte-for-byte
+            // identical to the existing log tail.
+            completeTranscript += pendingTranscript
+        }
+        guard !Task.isCancelled, selectedRunID == runID else { return }
+        hydratedTranscriptRunIDs.insert(runID)
+        setRunTranscript(
+            Self.boundedTranscriptForPresentation(completeTranscript),
+            runID: runID
+        )
+    }
+
+    private func transcriptSuffixCapturedDuringHydration(runID: UUID) -> String {
+        var chunksBySequence: [UInt64: TranscriptChunk] = [:]
+        if let pending = pendingTranscriptBuffers[runID] {
+            for chunk in pending.chunks {
+                chunksBySequence[chunk.sequence] = chunk
+            }
+        }
+        for chunk in transcriptHydrationChunks[runID] ?? [] {
+            chunksBySequence[chunk.sequence] = chunk
+        }
+        return chunksBySequence.values
+            .sorted { $0.sequence < $1.sequence }
+            .map(\.text)
+            .joined()
+    }
+
+    private func finishTranscriptHydration(runID: UUID, hydrationID: UUID) {
+        guard transcriptHydrationIDs[runID] == hydrationID else { return }
+        transcriptHydrationIDs.removeValue(forKey: runID)
+        transcriptHydrationChunks.removeValue(forKey: runID)
+        if let buffer = pendingTranscriptBuffers[runID], !buffer.chunks.isEmpty {
+            scheduleTranscriptFlush(
+                runID: runID,
+                immediately: buffer.utf8Count >= Self.transcriptFlushByteThreshold
+                    || buffer.chunks.count >= Self.transcriptFlushChunkThreshold
             )
-            updateRun(run.id) { $0.transcript = reconciled }
+        }
+        let waiters = transcriptHydrationWaiters.removeValue(forKey: runID) ?? []
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForTranscriptHydration(runID: UUID) async {
+        guard transcriptHydrationIDs[runID] != nil else { return }
+        await withCheckedContinuation { continuation in
+            if transcriptHydrationIDs[runID] == nil {
+                continuation.resume()
+            } else {
+                transcriptHydrationWaiters[runID, default: []].append(continuation)
+            }
         }
     }
 
-    private func recoverAppendOnlyTokenUsage() async {
-        guard let activity = record.activity else { return }
+    private func scheduleSelectedTranscriptLoad(previousRunID: UUID?) {
+        guard isLoaded, !isClosing, !isStartingOver else { return }
+        transcriptLoadTask?.cancel()
+        let requestedRunID = selectedRunID
+        transcriptLoadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var canEvictPreviousTranscripts = true
+            if let previousRunID, self.pendingTranscriptBuffers[previousRunID] != nil {
+                do {
+                    try await self.flushPendingTranscript(runID: previousRunID)
+                } catch {
+                    canEvictPreviousTranscripts = false
+                }
+            }
+            guard !Task.isCancelled, self.selectedRunID == requestedRunID else { return }
+            await self.recoverAppendOnlyTranscript(runID: requestedRunID)
+            guard !Task.isCancelled, self.selectedRunID == requestedRunID else { return }
+            if canEvictPreviousTranscripts {
+                self.evictTranscripts(except: requestedRunID)
+            }
+            self.transcriptLoadTask = nil
+        }
+    }
+
+    private func evictTranscripts(except retainedRunID: UUID?) {
+        guard var activity = record.activity else { return }
+        var changed = false
+        for runIndex in activity.runs.indices {
+            let runID = activity.runs[runIndex].id
+            guard runID != retainedRunID else { continue }
+            hydratedTranscriptRunIDs.remove(runID)
+            visibleTranscriptTasks.removeValue(forKey: runID)?.cancel()
+            visibleTranscriptChunks.removeValue(forKey: runID)
+            visibleTranscriptUTF8ByteCounts.removeValue(forKey: runID)
+            guard !activity.runs[runIndex].transcript.isEmpty else { continue }
+            activity.runs[runIndex].transcript = ""
+            changed = true
+        }
+        if changed {
+            record.activity = activity
+        }
+    }
+
+    private func setRunTranscript(_ transcript: String, runID: UUID) {
+        guard var activity = record.activity,
+              let runIndex = activity.runs.firstIndex(where: { $0.id == runID }) else { return }
+        guard activity.runs[runIndex].transcript != transcript else { return }
+        activity.runs[runIndex].transcript = transcript
+        record.activity = activity
+        transcriptPresentationMutationCount += 1
+    }
+
+    private static func boundedTranscriptForPresentation(_ transcript: String) -> String {
+        guard transcript.utf8.count > maximumPresentedTranscriptUTF8Bytes else {
+            return transcript
+        }
+        let markerBytes = truncatedTranscriptMarker.utf8.count
+        let suffixBudget = max(0, maximumPresentedTranscriptUTF8Bytes - markerBytes)
+        let utf8 = transcript.utf8
+        var start = utf8.index(utf8.endIndex, offsetBy: -suffixBudget)
+        while start != utf8.endIndex, utf8[start] & 0xC0 == 0x80 {
+            start = utf8.index(after: start)
+        }
+        return truncatedTranscriptMarker + String(decoding: utf8[start...], as: UTF8.self)
+    }
+
+    private func recoverAppendOnlyTokenUsage(
+        loadGeneration: UUID? = nil
+    ) async -> Bool {
+        guard loadGeneration.map(isCurrentLoad) ?? true else { return false }
+        guard let activity = record.activity else { return true }
         for run in activity.runs {
             let mayHaveUnpersistedUsage = [
                 RunStatus.queued,
@@ -3216,13 +4428,183 @@ public final class RepositoryCoordinator {
                 activityID: activity.id,
                 runID: run.id
             ), recovered != run.tokenUsage else {
+                guard loadGeneration.map(isCurrentLoad) ?? true else { return false }
                 continue
             }
+            guard loadGeneration.map(isCurrentLoad) ?? true else { return false }
             updateRun(run.id) { $0.tokenUsage = recovered }
+        }
+        return true
+    }
+
+    private func appendPendingInteraction(_ interaction: PendingServerInteraction) -> Bool {
+        let retainedByteCount = Self.retainedCost(of: interaction)
+        let claimedCount = claimedInteractionID == nil ? 0 : 1
+        let retainedBeforeAppend = Self.saturatingSum(
+            pendingInteractionRetainedByteCount,
+            claimedInteractionRetainedByteCount
+        )
+        guard pendingInteractions.count + claimedCount
+                < Self.maximumPendingInteractionCount,
+              retainedByteCount <= Self.maximumPendingInteractionRetainedBytes,
+              retainedBeforeAppend
+                <= Self.maximumPendingInteractionRetainedBytes - retainedByteCount else {
+            return false
+        }
+        pendingInteractions.append(interaction)
+        pendingInteractionRetainedByteCount += retainedByteCount
+        return true
+    }
+
+    private func clearPendingInteractions() {
+        pendingInteractions.removeAll(keepingCapacity: false)
+        pendingInteractionRetainedByteCount = 0
+        genericInteractionRoutes.removeAll(keepingCapacity: false)
+        interactionResolutionInFlight = false
+        interactionResolutionClaimID = nil
+        claimedInteractionID = nil
+        claimedInteractionRetainedByteCount = 0
+    }
+
+    private func stopRunForInteractionSafety(runID: UUID, detail: String) async {
+        interactionSafetyTerminatingRunIDs.insert(runID)
+        clearPendingInteractions()
+        errorMessage = detail
+        updateRun(runID) {
+            $0.status = .failed
+            $0.completedAt = .now
+            $0.relayError = detail
+        }
+        var controlFailure: String?
+        if let run = run(withID: runID), let target = run.agentTarget {
+            if let agentProviders {
+                do {
+                    try await agentProviders.interrupt(
+                        providerID: target.providerID,
+                        runID: runID
+                    )
+                } catch {
+                    controlFailure = error.localizedDescription
+                }
+            } else {
+                controlFailure = "The active agent provider is unavailable."
+            }
+            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+            pauseGenericActivity(message: detail)
+        } else if let run = run(withID: runID),
+                  let threadID = run.threadID,
+                  let turnID = run.turnID {
+            do {
+                try await interruptLegacyTurn(
+                    runID: runID,
+                    threadID: threadID,
+                    turnID: turnID
+                )
+            } catch {
+                controlFailure = error.localizedDescription
+            }
+            record.activity?.resumeCheckpoint = .recoverRun(runID)
+            pauseActivity(message: detail)
+        } else {
+            controlFailure = "The stopped run has no interruptible provider turn identifier."
+            pauseActivity(message: detail)
+        }
+        if let controlFailure {
+            errorMessage = "\(detail) Codeness could not confirm that the provider turn stopped: \(controlFailure)"
+            statusMessage = "Paused; provider termination is unconfirmed"
+        }
+        try? await persist()
+    }
+
+    /// A natural-looking terminal can race the interrupt requested by a
+    /// fail-closed interaction or delta-limit stop. Never let that terminal
+    /// promote the run to routing after the safety failure was committed.
+    private func finishInteractionSafetyStopIfNeeded(runID: UUID) async -> Bool {
+        guard interactionSafetyTerminatingRunIDs.remove(runID) != nil else {
+            return false
+        }
+        clearPendingInteractions()
+        itemsWithDeltas.removeValue(forKey: runID)
+        deltaItemRetainedByteCounts.removeValue(forKey: runID)
+        tokenUsageBaselines.removeValue(forKey: runID)
+        let detail = run(withID: runID)?.relayError
+            ?? "Codeness stopped this run after an unsafe interaction or output flood."
+        updateRun(runID) {
+            $0.status = .failed
+            $0.completedAt = $0.completedAt ?? .now
+            $0.relayError = detail
+        }
+        if record.activity?.workflow != nil {
+            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+            pauseGenericActivity(message: detail)
+        } else {
+            record.activity?.resumeCheckpoint = .recoverRun(runID)
+            pauseActivity(message: detail)
+        }
+        if isClosing, !hasUnconfirmedSafetyStop {
+            await completeCloseAfterTerminalEvent()
+        } else if !isClosing {
+            try? await persist()
+        }
+        return true
+    }
+
+    private nonisolated static func retainedCost(
+        of interaction: PendingServerInteraction
+    ) -> Int {
+        var cost = 256
+        cost = saturatingSum(cost, retainedCost(of: interaction.id))
+        cost = saturatingSum(cost, interaction.method.utf8.count)
+        cost = saturatingSum(cost, interaction.title.utf8.count)
+        cost = saturatingSum(cost, interaction.detail.utf8.count)
+        cost = saturatingSum(cost, retainedCost(of: interaction.rawParameters))
+        for question in interaction.questions {
+            cost = saturatingSum(cost, question.id.utf8.count)
+            cost = saturatingSum(cost, question.header.utf8.count)
+            cost = saturatingSum(cost, question.question.utf8.count)
+            for option in question.options {
+                cost = saturatingSum(cost, option.label.utf8.count)
+                cost = saturatingSum(cost, option.description.utf8.count)
+            }
+        }
+        for decision in interaction.approvalDecisions {
+            cost = saturatingSum(cost, retainedCost(of: decision.value))
+            cost = saturatingSum(cost, decision.label.utf8.count)
+            cost = saturatingSum(cost, decision.explanation.utf8.count)
+        }
+        return cost
+    }
+
+    private nonisolated static func retainedCost(of value: JSONValue) -> Int {
+        switch value {
+        case .null, .bool, .integer, .number:
+            return 16
+        case .string(let string):
+            return saturatingSum(16, string.utf8.count)
+        case .array(let values):
+            return values.reduce(16) { partial, value in
+                saturatingSum(partial, retainedCost(of: value))
+            }
+        case .object(let object):
+            return object.reduce(16) { partial, entry in
+                saturatingSum(
+                    saturatingSum(partial, entry.key.utf8.count),
+                    retainedCost(of: entry.value)
+                )
+            }
         }
     }
 
-    private func presentInteraction(id: JSONValue, method: String, params: JSONValue) {
+    private nonisolated static func saturatingSum(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
+    }
+
+    private func presentInteraction(
+        id: JSONValue,
+        method: String,
+        params: JSONValue
+    ) async {
         let title: String
         let detail: String
         var questions: [InputQuestion] = []
@@ -3258,8 +4640,29 @@ public final class RepositoryCoordinator {
             approvalDecisions: approvalDecisions,
             rawParameters: params
         )
-        guard !pendingInteractions.contains(where: { $0.id == id }) else { return }
-        pendingInteractions.append(interaction)
+        if let runID = activeRun?.id,
+           interactionSafetyTerminatingRunIDs.contains(runID) {
+            return
+        }
+        guard claimedInteractionID != id,
+              !pendingInteractions.contains(where: { $0.id == id }) else {
+            if let runID = activeRun?.id {
+                await stopRunForInteractionSafety(
+                    runID: runID,
+                    detail: "Codex reused an unresolved interaction identifier. Codeness stopped the turn instead of allowing a hidden request to replace the visible request."
+                )
+            }
+            return
+        }
+        guard appendPendingInteraction(interaction) else {
+            if let runID = activeRun?.id {
+                await stopRunForInteractionSafety(
+                    runID: runID,
+                    detail: "Codex accumulated too many unresolved interactions. Codeness stopped the turn to prevent unbounded memory growth."
+                )
+            }
+            return
+        }
         if let run = activeRun {
             updateRun(run.id) { $0.status = .awaitingApproval }
         }
@@ -3269,7 +4672,27 @@ public final class RepositoryCoordinator {
     }
 
     private func finishInteraction(id: JSONValue) async {
-        pendingInteractions.removeAll(where: { $0.id == id })
+        removePendingInteraction(id: id)
+        await refreshInteractionPresentationState()
+    }
+
+    private func removePendingInteraction(id: JSONValue) {
+        var removedByteCount = 0
+        pendingInteractions.removeAll { interaction in
+            guard interaction.id == id else { return false }
+            removedByteCount = Self.saturatingSum(
+                removedByteCount,
+                Self.retainedCost(of: interaction)
+            )
+            return true
+        }
+        pendingInteractionRetainedByteCount = max(
+            0,
+            pendingInteractionRetainedByteCount - removedByteCount
+        )
+    }
+
+    private func refreshInteractionPresentationState() async {
         if pendingInteractions.isEmpty,
            let run = activeRun,
            run.status == .awaitingApproval {
@@ -3354,6 +4777,241 @@ public final class RepositoryCoordinator {
         }
     }
 
+    private func interruptLegacyTurn(
+        runID: UUID,
+        threadID: String,
+        turnID: String
+    ) async throws {
+        let key = LegacyInterruptionKey(
+            appServerGeneration: legacyAppServerGeneration,
+            threadID: threadID,
+            turnID: turnID
+        )
+        let debtIdentity: UUID
+        if var debt = legacyInterruptionDebts[key] {
+            guard debt.runID == runID,
+                  debt.state == .requestFailed else {
+                return
+            }
+            debtIdentity = debt.identity
+            debt.lastError = "Codeness is retrying the interruption request."
+            debt.state = .requestInFlight
+            legacyInterruptionDebts[key] = debt
+            legacyInterruptionRetryTasks.removeValue(forKey: key)?.cancel()
+        } else {
+            debtIdentity = UUID()
+            legacyInterruptionDebts[key] = LegacyInterruptionDebt(
+                runID: runID,
+                identity: debtIdentity,
+                attempts: 0,
+                lastError: "Codeness requested interruption and is waiting for Codex to acknowledge the request.",
+                state: .requestInFlight
+            )
+        }
+        do {
+            try await appServer.interrupt(threadID: threadID, turnID: turnID)
+        } catch {
+            await recordLegacyInterruptionFailureIfCurrent(
+                runID: runID,
+                key: key,
+                debtIdentity: debtIdentity,
+                detail: error.localizedDescription
+            )
+            throw error
+        }
+        recordLegacyInterruptionAcknowledgement(
+            runID: runID,
+            key: key,
+            debtIdentity: debtIdentity
+        )
+    }
+
+    private func recordLegacyInterruptionFailureIfCurrent(
+        runID: UUID,
+        key: LegacyInterruptionKey,
+        debtIdentity: UUID,
+        detail: String
+    ) async {
+        guard protocolContainment == nil,
+              key.appServerGeneration == legacyAppServerGeneration,
+              var debt = legacyInterruptionDebts[key],
+              debt.runID == runID,
+              debt.identity == debtIdentity,
+              debt.state == .requestInFlight else {
+            // The exact terminal or a generation boundary may have won while
+            // the RPC was suspended. Never recreate debt after either proof.
+            return
+        }
+        debt.attempts += 1
+        debt.lastError = detail
+        debt.state = .requestFailed
+        legacyInterruptionDebts[key] = debt
+
+        guard debt.attempts < legacyInterruptionMaximumAttemptCount else {
+            let attemptLabel = debt.attempts == 1 ? "attempt" : "attempts"
+            let containmentDetail = "Codeness could not confirm interruption of Codex turn \(key.turnID) after \(debt.attempts) \(attemptLabel): \(detail) Codeness stopped the App Server generation so the turn and its MCP/background processes cannot remain orphaned."
+            await containLegacyAppServerGeneration(
+                runID: runID,
+                turnIDs: [key.turnID],
+                detail: containmentDetail
+            )
+            return
+        }
+        scheduleLegacyInterruptionRetry(
+            runID: runID,
+            key: key,
+            debtIdentity: debtIdentity
+        )
+    }
+
+    private func scheduleLegacyInterruptionRetry(
+        runID: UUID,
+        key: LegacyInterruptionKey,
+        debtIdentity: UUID
+    ) {
+        guard legacyInterruptionRetryTasks[key] == nil else { return }
+        let delay = legacyInterruptionRetryDelay
+        legacyInterruptionRetryTasks[key] = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            await self?.retryLegacyInterruption(
+                runID: runID,
+                key: key,
+                debtIdentity: debtIdentity
+            )
+        }
+    }
+
+    private func retryLegacyInterruption(
+        runID: UUID,
+        key: LegacyInterruptionKey,
+        debtIdentity: UUID
+    ) async {
+        // Remove the current task before retrying so generation containment can
+        // cancel every other retry without cancelling its own cleanup wait.
+        legacyInterruptionRetryTasks.removeValue(forKey: key)
+        guard protocolContainment == nil,
+              key.appServerGeneration == legacyAppServerGeneration,
+              let debt = legacyInterruptionDebts[key],
+              debt.runID == runID,
+              debt.identity == debtIdentity,
+              debt.state == .requestFailed else {
+            return
+        }
+        try? await interruptLegacyTurn(
+            runID: runID,
+            threadID: key.threadID,
+            turnID: key.turnID
+        )
+    }
+
+    private func recordLegacyInterruptionAcknowledgement(
+        runID: UUID,
+        key: LegacyInterruptionKey,
+        debtIdentity: UUID
+    ) {
+        guard protocolContainment == nil,
+              key.appServerGeneration == legacyAppServerGeneration,
+              let run = run(withID: runID),
+              run.threadID == key.threadID,
+              run.turnID == key.turnID,
+              legacyTurnStillRequiresTermination(runID: runID, run: run),
+              var debt = legacyInterruptionDebts[key],
+              debt.runID == runID,
+              debt.identity == debtIdentity,
+              debt.state == .requestInFlight else {
+            return
+        }
+        debt.lastError = "Codex acknowledged interruption, but Codeness is waiting for the exact matching turn/completed notification."
+        debt.state = .awaitingTerminal
+        legacyInterruptionDebts[key] = debt
+        legacyInterruptionRetryTasks.removeValue(forKey: key)?.cancel()
+        // Repeated Pause/Stop requests must not extend the bounded deadline.
+        guard legacyInterruptionWatchdogs[key] == nil else { return }
+        let timeout = legacyInterruptionTerminalTimeout
+        legacyInterruptionWatchdogs[key] = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            await self?.legacyInterruptionTimedOut(
+                key: key,
+                debtIdentity: debtIdentity
+            )
+        }
+    }
+
+    private func legacyTurnStillRequiresTermination(
+        runID: UUID,
+        run: RunRecord
+    ) -> Bool {
+        [.queued, .running, .awaitingApproval].contains(run.status)
+            || interactionSafetyTerminatingRunIDs.contains(runID)
+            || transcriptBackpressureRunIDs.contains(runID)
+    }
+
+    private func legacyInterruptionTimedOut(
+        key: LegacyInterruptionKey,
+        debtIdentity: UUID
+    ) async {
+        guard protocolContainment == nil,
+              key.appServerGeneration == legacyAppServerGeneration,
+              legacyInterruptionDebts[key]?.identity == debtIdentity,
+              legacyInterruptionDebts[key]?.state == .awaitingTerminal,
+              let runID = legacyInterruptionDebts[key]?.runID else {
+            return
+        }
+        legacyInterruptionWatchdogs.removeValue(forKey: key)
+        let detail = "Codex acknowledged interruption of turn \(key.turnID), but did not emit the exact matching turn/completed notification within the bounded wait. Codeness stopped the App Server generation so the turn and its MCP/background processes cannot be orphaned."
+        await containLegacyAppServerGeneration(
+            runID: runID,
+            turnIDs: [key.turnID],
+            detail: detail
+        )
+    }
+
+    private func clearLegacyInterruptionDebt(
+        threadID: String,
+        turnID: String
+    ) {
+        let key = LegacyInterruptionKey(
+            appServerGeneration: legacyAppServerGeneration,
+            threadID: threadID,
+            turnID: turnID
+        )
+        clearLegacyInterruptionDebt(key)
+    }
+
+    private func clearLegacyInterruptionDebt(_ key: LegacyInterruptionKey) {
+        legacyInterruptionDebts.removeValue(forKey: key)
+        legacyInterruptionRetryTasks.removeValue(forKey: key)?.cancel()
+        legacyInterruptionWatchdogs.removeValue(forKey: key)?.cancel()
+    }
+
+    private func clearAllLegacyInterruptionDebts(advanceGeneration: Bool) {
+        legacyInterruptionRetryTasks.values.forEach { $0.cancel() }
+        legacyInterruptionRetryTasks.removeAll()
+        legacyInterruptionWatchdogs.values.forEach { $0.cancel() }
+        legacyInterruptionWatchdogs.removeAll()
+        legacyInterruptionDebts.removeAll()
+        if advanceGeneration {
+            legacyAppServerGeneration &+= 1
+        }
+    }
+
+    private func unresolvedLegacyInterruption(
+        forThreadID threadID: String
+    ) -> (key: LegacyInterruptionKey, debt: LegacyInterruptionDebt)? {
+        legacyInterruptionDebts.first { key, _ in
+            key.appServerGeneration == legacyAppServerGeneration
+                && key.threadID == threadID
+        }.map { (key: $0.key, debt: $0.value) }
+    }
+
     private func belongsToRepository(_ event: AppServerEvent) -> Bool {
         guard let threadID = event.threadID else { return false }
         return threadID == record.implementerThreadID || threadID == record.reviewerThreadID
@@ -3361,14 +5019,148 @@ public final class RepositoryCoordinator {
 
     private func runID(for event: AppServerEvent) -> UUID? {
         guard let threadID = event.threadID else { return nil }
+        let activeStatuses: [RunStatus] = [.queued, .running, .awaitingApproval]
+        let isTerminalEvent: Bool = switch event {
+        case .notification(let method, _, _):
+            ["thread/closed", "turn/completed"].contains(method)
+        case .request, .standardError, .exited:
+            false
+        }
+        let admitsRun: (RunRecord) -> Bool = { run in
+            activeStatuses.contains(run.status)
+                || (isTerminalEvent && self.interactionSafetyTerminatingRunIDs.contains(run.id))
+                || (isTerminalEvent && self.transcriptBackpressureRunIDs.contains(run.id))
+        }
         if let turnID = event.turnID {
-            if let run = record.activity?.runs.last(where: { $0.turnID == turnID }) {
+            if let run = record.activity?.runs.last(where: {
+                $0.turnID == turnID && admitsRun($0)
+            }) {
                 return run.id
             }
+            if retiredTurnIDs.contains(turnID)
+                || record.activity?.runs.contains(where: {
+                    $0.threadID == threadID && $0.turnID == turnID
+                }) == true {
+                return nil
+            }
+            // Only turn/started is allowed to bind a previously queued run by
+            // thread. Every later turn-scoped event must match its exact turn;
+            // otherwise a delayed terminal from a superseded turn could be
+            // attributed to the replacement run on the same persistent thread.
+            guard case .notification(let method, _, _) = event,
+                  method == "turn/started" else {
+                return nil
+            }
+            let candidates = record.activity?.runs.filter {
+                $0.threadID == threadID
+                    && $0.status == .queued
+                    && $0.turnID == nil
+            } ?? []
+            guard candidates.count == 1 else { return nil }
+            return candidates[0].id
         }
         return record.activity?.runs.last(where: {
-            $0.threadID == threadID && [.queued, .running, .awaitingApproval].contains($0.status)
+            $0.threadID == threadID && admitsRun($0)
         })?.id
+    }
+
+    private func terminateGenerationForUnexpectedLegacyStartedIdentityIfNeeded(
+        event: AppServerEvent
+    ) async -> Bool {
+        guard let threadID = event.threadID,
+              let incomingTurnID = event.turnID,
+              !retiredTurnIDs.contains(incomingTurnID),
+              record.activity?.runs.contains(where: {
+                  $0.threadID == threadID && $0.turnID == incomingTurnID
+              }) != true,
+              let run = record.activity?.runs.last(where: {
+                  $0.threadID == threadID
+                      && [.queued, .running, .awaitingApproval].contains($0.status)
+                      && $0.turnID != nil
+              }),
+              let currentTurnID = run.turnID,
+              currentTurnID != incomingTurnID else {
+            return false
+        }
+        await containLegacyAppServerGeneration(
+            runID: run.id,
+            turnIDs: [currentTurnID, incomingTurnID],
+            detail: "Codex identified the active turn as both \(currentTurnID) and \(incomingTurnID). Codeness stopped the App Server generation instead of attaching this run to an ambiguous execution."
+        )
+        return true
+    }
+
+    private func containLegacyAppServerGeneration(
+        runID: UUID,
+        turnIDs: Set<String>,
+        detail: String
+    ) async {
+        guard protocolContainment == nil else { return }
+        let preservedSafetyFailure = (
+            interactionSafetyTerminatingRunIDs.contains(runID)
+                || transcriptBackpressureRunIDs.contains(runID)
+        ) ? run(withID: runID)?.relayError : nil
+        let containmentID = UUID()
+        // Install the generation-wide gate before any persistence or process
+        // cleanup await can re-enter this actor. A terminal for either candidate
+        // turn ID must never release this ownership fence.
+        protocolContainment = ProtocolContainment(
+            id: containmentID,
+            detail: detail
+        )
+        clearAllLegacyInterruptionDebts(advanceGeneration: false)
+        for turnID in turnIDs {
+            retireTurnID(turnID)
+        }
+        clearPendingInteractions()
+        itemsWithDeltas.removeValue(forKey: runID)
+        deltaItemRetainedByteCounts.removeValue(forKey: runID)
+        tokenUsageBaselines.removeValue(forKey: runID)
+        updateRun(runID) {
+            $0.status = .failed
+            $0.turnID = nil
+            $0.completedAt = .now
+            $0.relayError = preservedSafetyFailure ?? detail
+        }
+        record.activity?.resumeCheckpoint = .recoverRun(runID)
+        pauseActivity(message: detail)
+        errorMessage = detail
+        let containmentConfirmed = await appServer
+            .terminateGenerationForProtocolViolation(detail)
+        guard protocolContainment?.id == containmentID else {
+            // An .exited event confirmed cleanup while termination was waiting.
+            return
+        }
+        if !containmentConfirmed {
+            let unresolvedDetail = "\(detail) Codeness could not confirm that the isolated App Server process scope terminated, so replacement work remains blocked."
+            protocolContainment?.detail = unresolvedDetail
+            errorMessage = unresolvedDetail
+            statusMessage = "Paused; App Server containment is unconfirmed"
+        } else {
+            protocolContainment = nil
+            clearAllLegacyInterruptionDebts(advanceGeneration: true)
+            markCodexProviderSessionsDetachedByAppServerBoundary()
+            clearSafetyStopStateAfterAppServerBoundary()
+        }
+        if isClosing, containmentConfirmed {
+            await completeCloseAfterTerminalEvent()
+        } else if isClosing {
+            try? await persist()
+            _ = failClose(errorMessage ?? detail)
+        } else {
+            try? await persist()
+        }
+    }
+
+    private func retireTurnID(_ turnID: String) {
+        guard retiredTurnIDs.insert(turnID).inserted else { return }
+        retiredTurnIDOrder.append(turnID)
+        let overflow = retiredTurnIDOrder.count - Self.maximumRetiredTurnIDCount
+        guard overflow > 0 else { return }
+        for retiredID in retiredTurnIDOrder.prefix(overflow) {
+            retiredTurnIDs.remove(retiredID)
+        }
+        retiredTurnIDOrder.removeFirst(overflow)
     }
 
     private func run(withID id: UUID) -> RunRecord? {
@@ -3435,15 +5227,343 @@ public final class RepositoryCoordinator {
         )
     }
 
-    private func appendTranscript(_ text: String, runID: UUID) async {
-        guard let activityID = record.activity?.id,
+    private func recordTranscript(_ text: String, runID: UUID) async {
+        guard !text.isEmpty,
               record.activity?.runs.contains(where: { $0.id == runID }) == true else { return }
-        try? await store.appendTranscript(
-            text,
-            repositoryPath: record.canonicalPath,
-            activityID: activityID,
+
+        let utf8 = text.utf8
+        var cursor = utf8.startIndex
+        while cursor != utf8.endIndex {
+            if transcriptBackpressureRunIDs.contains(runID) {
+                recordDroppedTranscriptBytes(
+                    utf8.distance(from: cursor, to: utf8.endIndex),
+                    runID: runID
+                )
+                return
+            }
+
+            let bufferedByteCount = pendingTranscriptBuffers[runID]?.utf8Count ?? 0
+            let bufferedChunkCount = pendingTranscriptBuffers[runID]?.chunks.count ?? 0
+            if bufferedByteCount == Self.maximumPendingTranscriptUTF8Bytes
+                || bufferedChunkCount == Self.maximumPendingTranscriptChunkCount {
+                if transcriptHydrationIDs[runID] != nil {
+                    await waitForTranscriptHydration(runID: runID)
+                    continue
+                }
+                do {
+                    try await flushPendingTranscript(runID: runID)
+                } catch {
+                    await stopRunForTranscriptBackpressure(
+                        runID: runID,
+                        droppedByteCount: utf8.distance(from: cursor, to: utf8.endIndex),
+                        error: error
+                    )
+                    return
+                }
+                continue
+            }
+            let availableByteCount = Self.maximumPendingTranscriptUTF8Bytes - bufferedByteCount
+
+            let remainingByteCount = utf8.distance(from: cursor, to: utf8.endIndex)
+            let fragmentByteBudget = min(availableByteCount, remainingByteCount)
+            var fragmentEnd = utf8.index(cursor, offsetBy: fragmentByteBudget)
+            while fragmentEnd != cursor,
+                  fragmentEnd != utf8.endIndex,
+                  utf8[fragmentEnd] & 0xC0 == 0x80 {
+                fragmentEnd = utf8.index(before: fragmentEnd)
+            }
+            // The remaining capacity can be smaller than the next multi-byte
+            // scalar. Flush the existing prefix and retry with an empty buffer.
+            if fragmentEnd == cursor {
+                if transcriptHydrationIDs[runID] != nil {
+                    await waitForTranscriptHydration(runID: runID)
+                    continue
+                }
+                do {
+                    try await flushPendingTranscript(runID: runID)
+                } catch {
+                    await stopRunForTranscriptBackpressure(
+                        runID: runID,
+                        droppedByteCount: remainingByteCount,
+                        error: error
+                    )
+                    return
+                }
+                continue
+            }
+
+            let fragment = String(text[cursor..<fragmentEnd])
+            appendPendingTranscriptFragment(fragment, runID: runID)
+            cursor = fragmentEnd
+        }
+    }
+
+    private func appendPendingTranscriptFragment(_ text: String, runID: UUID) {
+        nextTranscriptSequence &+= 1
+        let chunk = TranscriptChunk(
+            sequence: nextTranscriptSequence,
+            text: text,
+            utf8Count: text.utf8.count
+        )
+        let buffer: PendingTranscriptBuffer
+        if let existing = pendingTranscriptBuffers[runID] {
+            buffer = existing
+        } else {
+            buffer = PendingTranscriptBuffer()
+            pendingTranscriptBuffers[runID] = buffer
+        }
+        buffer.append(chunk)
+
+        precondition(buffer.utf8Count <= Self.maximumPendingTranscriptUTF8Bytes)
+        precondition(buffer.chunks.count <= Self.maximumPendingTranscriptChunkCount)
+        if transcriptHydrationIDs[runID] != nil {
+            transcriptHydrationChunks[runID, default: []].append(chunk)
+        } else if selectedRunID == runID, hydratedTranscriptRunIDs.contains(runID) {
+            visibleTranscriptChunks[runID, default: []].append(chunk)
+            visibleTranscriptUTF8ByteCounts[runID, default: 0] += chunk.utf8Count
+            if visibleTranscriptUTF8ByteCounts[runID, default: 0]
+                >= Self.transcriptFlushByteThreshold
+                || visibleTranscriptChunks[runID, default: []].count
+                    >= Self.transcriptFlushChunkThreshold {
+                visibleTranscriptTasks.removeValue(forKey: runID)?.cancel()
+                flushVisibleTranscriptUpdate(runID: runID)
+            } else {
+                scheduleVisibleTranscriptUpdate(runID: runID)
+            }
+            precondition(
+                visibleTranscriptUTF8ByteCounts[runID, default: 0]
+                    < Self.transcriptFlushByteThreshold
+            )
+            precondition(
+                visibleTranscriptChunks[runID, default: []].count
+                    < Self.transcriptFlushChunkThreshold
+            )
+        }
+        scheduleTranscriptFlush(
+            runID: runID,
+            immediately: buffer.utf8Count >= Self.transcriptFlushByteThreshold
+                || buffer.chunks.count >= Self.transcriptFlushChunkThreshold
+        )
+    }
+
+    private func scheduleVisibleTranscriptUpdate(runID: UUID) {
+        guard visibleTranscriptTasks[runID] == nil else { return }
+        visibleTranscriptTasks[runID] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.transcriptFlushDelay)
+            guard !Task.isCancelled, let self else { return }
+            self.visibleTranscriptTasks.removeValue(forKey: runID)
+            self.flushVisibleTranscriptUpdate(runID: runID)
+        }
+    }
+
+    private func flushVisibleTranscriptUpdate(runID: UUID) {
+        guard selectedRunID == runID,
+              hydratedTranscriptRunIDs.contains(runID) else { return }
+        let chunks = visibleTranscriptChunks.removeValue(forKey: runID) ?? []
+        visibleTranscriptUTF8ByteCounts.removeValue(forKey: runID)
+        guard !chunks.isEmpty else { return }
+        let appended = chunks.map(\.text).joined()
+        let current = run(withID: runID)?.transcript ?? ""
+        let currentTail = current.hasPrefix(Self.truncatedTranscriptMarker)
+            ? String(current.dropFirst(Self.truncatedTranscriptMarker.count))
+            : current
+        setRunTranscript(
+            Self.boundedTranscriptForPresentation(currentTail + appended),
             runID: runID
         )
+    }
+
+    private func scheduleTranscriptFlush(runID: UUID, immediately: Bool) {
+        guard transcriptHydrationIDs[runID] == nil,
+              scheduledTranscriptFlushTasks[runID] == nil,
+              transcriptFlushes[runID] == nil else { return }
+        scheduledTranscriptFlushTasks[runID] = Task { @MainActor [weak self] in
+            if !immediately {
+                try? await Task.sleep(for: Self.transcriptFlushDelay)
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.scheduledTranscriptFlushTasks.removeValue(forKey: runID)
+            do {
+                try await self.flushPendingTranscript(runID: runID)
+            } catch {
+                self.transcriptFlushFailureRunIDs.insert(runID)
+            }
+        }
+    }
+
+    private func flushPendingTranscript(runID: UUID) async throws {
+        scheduledTranscriptFlushTasks.removeValue(forKey: runID)?.cancel()
+        var shouldRefreshSelectedTranscript = false
+
+        while let buffer = pendingTranscriptBuffers[runID], !buffer.chunks.isEmpty {
+            let flush: TranscriptFlush
+            if let existing = transcriptFlushes[runID] {
+                flush = existing
+            } else {
+                guard let activity = record.activity,
+                      activity.runs.contains(where: { $0.id == runID }),
+                      let lastSequence = buffer.chunks.last?.sequence else {
+                    throw RepositoryCoordinatorError.missingTranscriptRun(runID)
+                }
+                let pending = buffer.text(through: lastSequence)
+                let operationID = UUID()
+                let store = self.store
+                let repositoryPath = record.canonicalPath
+                let activityID = activity.id
+                let task = Task {
+                    try await store.appendTranscript(
+                        pending,
+                        repositoryPath: repositoryPath,
+                        activityID: activityID,
+                        runID: runID
+                    )
+                }
+                flush = TranscriptFlush(
+                    id: operationID,
+                    lastSequence: lastSequence,
+                    task: task
+                )
+                transcriptFlushes[runID] = flush
+            }
+
+            do {
+                try await flush.task.value
+            } catch {
+                if transcriptFlushes[runID]?.id == flush.id {
+                    transcriptFlushes.removeValue(forKey: runID)
+                    transcriptFlushFailureRunIDs.insert(runID)
+                }
+                throw error
+            }
+
+            if transcriptFlushes[runID]?.id == flush.id {
+                transcriptFlushes.removeValue(forKey: runID)
+                buffer.consume(through: flush.lastSequence)
+                if buffer.chunks.isEmpty {
+                    pendingTranscriptBuffers.removeValue(forKey: runID)
+                    evictTranscriptIfUnselected(runID: runID)
+                }
+                shouldRefreshSelectedTranscript = transcriptFlushFailureRunIDs.remove(runID) != nil
+                    || shouldRefreshSelectedTranscript
+            }
+        }
+
+        if shouldRefreshSelectedTranscript,
+           transcriptHydrationIDs[runID] == nil,
+           selectedRunID == runID {
+            await recoverAppendOnlyTranscript(runID: runID)
+        }
+    }
+
+    private func evictTranscriptIfUnselected(runID: UUID) {
+        guard selectedRunID != runID else { return }
+        hydratedTranscriptRunIDs.remove(runID)
+        setRunTranscript("", runID: runID)
+    }
+
+    private func flushPendingTranscripts() async throws {
+        for runID in Array(pendingTranscriptBuffers.keys) {
+            try await flushPendingTranscript(runID: runID)
+        }
+    }
+
+    private func stopRunForTranscriptBackpressure(
+        runID: UUID,
+        droppedByteCount: Int,
+        error: Error
+    ) async {
+        let isFirstFailure = transcriptBackpressureRunIDs.insert(runID).inserted
+        if transcriptBackpressureFailureDetails[runID] == nil {
+            transcriptBackpressureFailureDetails[runID] = error.localizedDescription
+        }
+        recordDroppedTranscriptBytes(droppedByteCount, runID: runID)
+        guard isFirstFailure, let run = run(withID: runID) else { return }
+
+        var controlFailure: String?
+        if let target = run.agentTarget {
+            if let agentProviders {
+                do {
+                    try await agentProviders.interrupt(
+                        providerID: target.providerID,
+                        runID: runID
+                    )
+                } catch {
+                    controlFailure = error.localizedDescription
+                }
+            } else {
+                controlFailure = "The active agent provider is unavailable."
+            }
+        } else if let threadID = run.threadID, let turnID = run.turnID {
+            do {
+                try await interruptLegacyTurn(
+                    runID: runID,
+                    threadID: threadID,
+                    turnID: turnID
+                )
+            } catch {
+                controlFailure = error.localizedDescription
+            }
+        } else {
+            controlFailure = "The stopped run has no interruptible provider turn identifier."
+        }
+        if let controlFailure {
+            errorMessage = "\(transcriptBackpressureMessage(runID: runID)) Codeness could not confirm that the provider turn stopped: \(controlFailure)"
+            statusMessage = "Paused; provider termination is unconfirmed"
+        }
+        await persistTranscriptBackpressureMetadata()
+    }
+
+    private func recordDroppedTranscriptBytes(_ byteCount: Int, runID: UUID) {
+        guard byteCount > 0 else { return }
+        let current = droppedTranscriptUTF8Bytes[runID] ?? 0
+        let (sum, overflow) = current.addingReportingOverflow(byteCount)
+        droppedTranscriptUTF8Bytes[runID] = overflow ? Int.max : sum
+        applyTranscriptBackpressureFailure(runID: runID)
+    }
+
+    private func applyTranscriptBackpressureFailure(runID: UUID) {
+        let message = transcriptBackpressureMessage(runID: runID)
+        errorMessage = message
+        updateRun(runID) {
+            $0.status = .failed
+            $0.completedAt = $0.completedAt ?? .now
+            $0.relayError = message
+        }
+        record.activity?.status = .paused
+        if record.activity?.workflow != nil {
+            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+        } else {
+            record.activity?.resumeCheckpoint = .recoverRun(runID)
+        }
+        statusMessage = "Paused because transcript output could not be saved"
+    }
+
+    private func transcriptBackpressureMessage(runID: UUID) -> String {
+        let droppedByteCount = droppedTranscriptUTF8Bytes[runID] ?? 0
+        let detail = transcriptBackpressureFailureDetails[runID]
+            ?? RepositoryCoordinatorError.transcriptBackpressureLimit(runID).localizedDescription
+        return "Codeness stopped this run after \(droppedByteCount) UTF-8 bytes of transcript output could not be persisted. Its pending transcript memory remains capped at 8 MiB. \(detail)"
+    }
+
+    private func finishBackpressuredRunAfterTerminalEvent(runID: UUID) async {
+        applyTranscriptBackpressureFailure(runID: runID)
+        // The terminal event is definitive, so it no longer needs an admission
+        // tombstone. Keep any pending transcript buffer and flush-failure marker:
+        // those bytes remain authoritative and must still be retried durably.
+        transcriptBackpressureRunIDs.remove(runID)
+        droppedTranscriptUTF8Bytes.removeValue(forKey: runID)
+        transcriptBackpressureFailureDetails.removeValue(forKey: runID)
+        if isClosing, !hasUnconfirmedSafetyStop {
+            await completeCloseAfterTerminalEvent()
+        } else if !isClosing {
+            await persistTranscriptBackpressureMetadata()
+        }
+    }
+
+    private func persistTranscriptBackpressureMetadata() async {
+        guard isLoaded else { return }
+        record.updatedAt = .now
+        try? await store.save(workspaceMetadataSnapshot(record))
     }
 
     private func appendTokenUsage(_ usage: RunTokenUsage, runID: UUID) async {
@@ -3459,8 +5579,19 @@ public final class RepositoryCoordinator {
 
     private func persist() async throws {
         guard isLoaded else { throw RepositoryCoordinatorError.documentNotLoaded }
+        try await flushPendingTranscripts()
         record.updatedAt = .now
-        try await store.save(record)
+        try await store.save(workspaceMetadataSnapshot(record))
+        await retryCompletionSessionDetachmentDebt()
+    }
+
+    private func workspaceMetadataSnapshot(_ source: RepositoryRecord) -> RepositoryRecord {
+        var snapshot = source
+        guard let runIndices = snapshot.activity?.runs.indices else { return snapshot }
+        for runIndex in runIndices {
+            snapshot.activity?.runs[runIndex].transcript = ""
+        }
+        return snapshot
     }
 
     private func persistDocumentState() async throws {
@@ -3607,6 +5738,12 @@ public final class RepositoryCoordinator {
         guard await flushDocumentState() else {
             return failClose(errorMessage ?? "Could not save this repository document.")
         }
+        let unreleasedSessions = await detachProviderSessionsForCurrentDocument()
+        guard unreleasedSessions.isEmpty else {
+            return failClose(
+                "Codeness saved this repository, but could not confirm provider-session detachment for \(providerSessionDescription(unreleasedSessions)). The document remains open so no agent work is orphaned."
+            )
+        }
         pauseState = .paused
         statusMessage = record.activity == nil ? "Repository saved" : pausedStatusMessage
         return .ready
@@ -3623,13 +5760,21 @@ public final class RepositoryCoordinator {
 
     private func completeCloseAfterTerminalEvent() async {
         pauseState = .saving
-        pendingInteractions.removeAll()
+        clearPendingInteractions()
+        interactionResolutionInFlight = false
         let saved = await flushDocumentState()
         if saved {
-            pauseState = .paused
-            let waiter = closeWaiter
-            closeWaiter = nil
-            waiter?.resume(returning: .ready)
+            let unreleasedSessions = await detachProviderSessionsForCurrentDocument()
+            if unreleasedSessions.isEmpty {
+                pauseState = .paused
+                let waiter = closeWaiter
+                closeWaiter = nil
+                waiter?.resume(returning: .ready)
+            } else {
+                _ = failClose(
+                    "Codeness saved this repository, but could not confirm provider-session detachment for \(providerSessionDescription(unreleasedSessions)). The document remains open so no agent work is orphaned."
+                )
+            }
         } else {
             let result = failClose(errorMessage ?? "Could not save this repository document.")
             let waiter = closeWaiter
@@ -3675,8 +5820,12 @@ public final class RepositoryCoordinator {
 private enum RepositoryCoordinatorError: LocalizedError {
     case documentNotLoaded
     case startOverWhileClosing
+    case providerLaunchCancelledForClose
+    case providerSessionsStillAttached(String)
     case missingSession(AgentRole)
     case missingRun(UUID)
+    case missingTranscriptRun(UUID)
+    case transcriptBackpressureLimit(UUID)
     case missingRunOutput(UUID)
 
     var errorDescription: String? {
@@ -3685,10 +5834,18 @@ private enum RepositoryCoordinatorError: LocalizedError {
             "Repository state has not loaded; its saved data was left unchanged."
         case .startOverWhileClosing:
             "The repository window began closing before its activity could be reset."
+        case .providerLaunchCancelledForClose:
+            "The provider launch stopped because this repository window is closing."
+        case .providerSessionsStillAttached(let sessions):
+            "Provider-session detachment was not confirmed for \(sessions). The existing activity was left in place so no agent work is orphaned."
         case .missingSession(let role):
             "The saved \(role.displayName.lowercased()) Codex session is missing. Its context was not replaced."
         case .missingRun(let id):
             "The saved resume checkpoint refers to missing run \(id.uuidString)."
+        case .missingTranscriptRun(let id):
+            "Transcript output for run \(id.uuidString) no longer belongs to the current activity."
+        case .transcriptBackpressureLimit(let id):
+            "Transcript output for run \(id.uuidString) reached Codeness's 8 MiB pending-write safety limit."
         case .missingRunOutput(let id):
             "Run \(id.uuidString) has no completed output to route."
         }

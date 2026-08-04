@@ -25,4 +25,55 @@ struct JSONValueTests {
 
         #expect(output.firstIndex(of: "a")! < output.firstIndex(of: "z")!)
     }
+
+    @Test
+    func integerValueRejectsFractionalNonFiniteAndOutOfRangeNumbers() {
+        #expect(JSONValue.number(42).integerValue == 42)
+        #expect(JSONValue.number(1.5).integerValue == nil)
+        #expect(JSONValue.number(.infinity).integerValue == nil)
+        #expect(JSONValue.number(.nan).integerValue == nil)
+        #expect(JSONValue.number(Double(Int64.max)).integerValue == nil)
+        #expect(JSONValue.number(-Double(Int64.max) * 2).integerValue == nil)
+    }
+
+    @Test
+    func tokenUsageArithmeticSaturatesAndNormalizesMutatedNegativeCounters() {
+        let nearMaximum = RunTokenUsage(
+            totalTokens: .max,
+            inputTokens: .max - 1,
+            cachedInputTokens: .max,
+            cacheWriteInputTokens: .max,
+            outputTokens: .max,
+            reasoningOutputTokens: .max
+        )
+        let increment = RunTokenUsage(
+            totalTokens: 1,
+            inputTokens: 2,
+            cachedInputTokens: 1,
+            cacheWriteInputTokens: 1,
+            outputTokens: 1,
+            reasoningOutputTokens: 1
+        )
+        let saturated = nearMaximum.adding(increment)
+        #expect(saturated.totalTokens == .max)
+        #expect(saturated.inputTokens == .max)
+        #expect(saturated.cachedInputTokens == .max)
+        #expect(saturated.cacheWriteInputTokens == .max)
+        #expect(saturated.outputTokens == .max)
+        #expect(saturated.reasoningOutputTokens == .max)
+
+        var malformed = RunTokenUsage(
+            totalTokens: 10,
+            inputTokens: 10,
+            outputTokens: 10
+        )
+        malformed.totalTokens = .min
+        malformed.inputTokens = .min
+        malformed.outputTokens = .min
+        let normalized = malformed.adding(.zero)
+        #expect(normalized.totalTokens == 0)
+        #expect(normalized.inputTokens == 0)
+        #expect(normalized.outputTokens == 0)
+        #expect(RunTokenUsage.zero.subtracting(malformed) == .zero)
+    }
 }

@@ -70,8 +70,10 @@ public enum AgentExecutableLocator {
     public static func verify(
         _ executableURL: URL,
         descriptor: AgentProviderDescriptor,
-        environment: [String: String] = CodexExecutableLocator.processEnvironment()
-    ) throws -> String {
+        environment: [String: String] = CodexExecutableLocator.processEnvironment(),
+        timeout: Duration = .seconds(5),
+        maximumOutputByteCount: Int = 1 * 1_024 * 1_024
+    ) async throws -> String {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw AgentExecutableError.invalidExecutable(
                 provider: descriptor.displayName,
@@ -79,30 +81,38 @@ public enum AgentExecutableLocator {
             )
         }
 
-        let process = Process()
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.executableURL = executableURL
-        process.arguments = ["--version"]
-        process.environment = environment
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
-        process.waitUntilExit()
-
+        let result: BoundedOwnedProcessResult
+        do {
+            result = try await BoundedOwnedProcessRunner.run(
+                configuration: SupervisedProcessLaunchConfiguration(
+                    executableURL: executableURL,
+                    arguments: ["--version"],
+                    environment: environment
+                ),
+                timeout: timeout,
+                maximumStandardOutputByteCount: maximumOutputByteCount,
+                maximumStandardErrorByteCount: maximumOutputByteCount
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw AgentExecutableError.versionCheckFailed(
+                provider: descriptor.displayName,
+                detail: error.localizedDescription
+            )
+        }
         let output = String(
-            decoding: stdout.fileHandleForReading.readDataToEndOfFile(),
+            decoding: result.standardOutput,
             as: UTF8.self
         ).trimmingCharacters(in: .whitespacesAndNewlines)
         let error = String(
-            decoding: stderr.fileHandleForReading.readDataToEndOfFile(),
+            decoding: result.standardError,
             as: UTF8.self
         ).trimmingCharacters(in: .whitespacesAndNewlines)
-        let termination = SubprocessTermination(process: process)
-        guard termination.succeeded else {
+        guard result.termination.succeeded else {
             throw AgentExecutableError.versionCheckTerminated(
                 provider: descriptor.displayName,
-                termination: termination,
+                termination: result.termination,
                 detail: error.isEmpty ? output : error
             )
         }

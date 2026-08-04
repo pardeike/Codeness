@@ -204,6 +204,7 @@ public enum AgentProviderError: LocalizedError, Sendable {
     case invalidSession(String)
     case missingRun(UUID)
     case invalidResponse(String)
+    case resourceLimit(String)
     case processExited(
         provider: AgentProviderID,
         termination: SubprocessTermination,
@@ -224,6 +225,8 @@ public enum AgentProviderError: LocalizedError, Sendable {
             return "The agent run \(runID.uuidString) is no longer active."
         case .invalidResponse(let detail):
             return "The agent CLI returned an invalid response: \(detail)"
+        case .resourceLimit(let detail):
+            return detail
         case .processExited(let provider, let termination, let detail):
             let summary = termination.userFacingDescription(
                 subject: provider.rawValue.capitalized
@@ -246,11 +249,43 @@ public protocol AgentProviding: Actor {
         resolution: AgentInteractionResolution
     ) async throws
     func runUtility(_ request: AgentUtilityRequest) async throws -> AgentUtilityResult
+    /// Releases a prepared provider session and reports whether the provider
+    /// confirmed that no live session remains attached to Codeness.
+    ///
+    /// Returning `false` keeps the coordinator's durable detachment debt in
+    /// place so a later save or reopen can retry the release.
+    @discardableResult
+    func releaseSession(id: String) async -> Bool
     func shutdown() async
+    /// Stops the provider and reports whether every process owned by the
+    /// provider was confirmed gone.
+    ///
+    /// Providers without an independent process lifetime can use the default
+    /// implementation. Process-owning providers override this so application
+    /// shutdown and provider replacement can fail closed.
+    @discardableResult
+    func shutdownAndVerify() async -> Bool
+}
+
+public extension AgentProviding {
+    func releaseSession(id: String) async -> Bool { false }
+
+    @discardableResult
+    func shutdownAndVerify() async -> Bool {
+        await shutdown()
+        return true
+    }
 }
 
 public actor AgentProviderRegistry {
+    public struct LaunchFence: Sendable, Equatable {
+        fileprivate let providerID: AgentProviderID
+        fileprivate let identifier: UUID
+    }
+
     private var providers: [AgentProviderID: any AgentProviding] = [:]
+    private var launchFences: [AgentProviderID: UUID] = [:]
+    private var activeLaunchAdmissions: [AgentProviderID: Int] = [:]
 
     public init(providers: [any AgentProviding] = []) {
         for provider in providers {
@@ -267,11 +302,17 @@ public actor AgentProviderRegistry {
     }
 
     public func prepareSession(_ request: AgentSessionRequest) async throws -> AgentSession {
-        try await provider(request.target.providerID).prepareSession(request)
+        let providerID = request.target.providerID
+        let admittedProvider = try admitLaunch(for: providerID)
+        defer { finishLaunchAdmission(for: providerID) }
+        return try await admittedProvider.prepareSession(request)
     }
 
     public func startRun(_ request: AgentRunRequest) async throws -> AgentRunHandle {
-        try await provider(request.target.providerID).startRun(request)
+        let providerID = request.target.providerID
+        let admittedProvider = try admitLaunch(for: providerID)
+        defer { finishLaunchAdmission(for: providerID) }
+        return try await admittedProvider.startRun(request)
     }
 
     public func steer(
@@ -300,13 +341,80 @@ public actor AgentProviderRegistry {
     }
 
     public func runUtility(_ request: AgentUtilityRequest) async throws -> AgentUtilityResult {
-        try await provider(request.target.providerID).runUtility(request)
+        let providerID = request.target.providerID
+        let admittedProvider = try admitLaunch(for: providerID)
+        defer { finishLaunchAdmission(for: providerID) }
+        return try await admittedProvider.runUtility(request)
     }
 
-    public func shutdown() async {
-        for provider in providers.values {
-            await provider.shutdown()
+    /// Atomically rejects new work for one provider. Settings replacement then
+    /// performs a separate bounded drain of calls that crossed the registry
+    /// boundary first and holds this token through activation or rollback.
+    public func fenceLaunches(for providerID: AgentProviderID) throws -> LaunchFence {
+        guard launchFences[providerID] == nil else {
+            throw AgentProviderError.unavailable(
+                providerID,
+                "\(providerID.rawValue.capitalized) is restarting; new work is temporarily paused"
+            )
         }
+        let identifier = UUID()
+        launchFences[providerID] = identifier
+        return LaunchFence(providerID: providerID, identifier: identifier)
+    }
+
+    /// Waits only for the bounded launch-acceptance handoff. A provider call
+    /// that never acknowledges must not make Settings Retry hang forever. The
+    /// fence remains installed on timeout so callers can fail closed and retry
+    /// with the same token after the admitted operation eventually settles.
+    public func waitForLaunchesToDrain(
+        _ fence: LaunchFence,
+        timeout: Duration
+    ) async -> Bool {
+        guard launchFences[fence.providerID] == fence.identifier else { return false }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: max(.zero, timeout))
+        while activeLaunchAdmissions[fence.providerID, default: 0] > 0,
+              clock.now < deadline {
+            do {
+                try await Task.sleep(for: .milliseconds(10))
+            } catch {
+                return false
+            }
+            guard launchFences[fence.providerID] == fence.identifier else { return false }
+        }
+        return activeLaunchAdmissions[fence.providerID, default: 0] == 0
+    }
+
+    public func resumeLaunches(_ fence: LaunchFence) {
+        guard launchFences[fence.providerID] == fence.identifier else { return }
+        launchFences.removeValue(forKey: fence.providerID)
+    }
+
+    public func acceptsLaunches(for providerID: AgentProviderID) -> Bool {
+        launchFences[providerID] == nil
+    }
+
+    @discardableResult
+    public func releaseSession(providerID: AgentProviderID, id: String) async -> Bool {
+        guard let provider = providers[providerID] else { return false }
+        return await provider.releaseSession(id: id)
+    }
+
+    @discardableResult
+    public func shutdown() async -> Bool {
+        await shutdownReport().values.allSatisfy { $0 }
+    }
+
+    /// Preserves component-level teardown results so a canceled application
+    /// Quit can represent providers that did stop as stopped while keeping only
+    /// the unverified component failed closed.
+    public func shutdownReport() async -> [AgentProviderID: Bool] {
+        let snapshot = providers
+        var report: [AgentProviderID: Bool] = [:]
+        for (identifier, provider) in snapshot {
+            report[identifier] = await provider.shutdownAndVerify()
+        }
+        return report
     }
 
     private func provider(_ id: AgentProviderID) throws -> any AgentProviding {
@@ -314,5 +422,26 @@ public actor AgentProviderRegistry {
             throw AgentProviderError.unsupportedProvider(id)
         }
         return provider
+    }
+
+    private func admitLaunch(for providerID: AgentProviderID) throws -> any AgentProviding {
+        guard launchFences[providerID] == nil else {
+            throw AgentProviderError.unavailable(
+                providerID,
+                "\(providerID.rawValue.capitalized) is restarting; new work is temporarily paused"
+            )
+        }
+        let admittedProvider = try provider(providerID)
+        activeLaunchAdmissions[providerID, default: 0] += 1
+        return admittedProvider
+    }
+
+    private func finishLaunchAdmission(for providerID: AgentProviderID) {
+        let remaining = max(0, activeLaunchAdmissions[providerID, default: 0] - 1)
+        if remaining == 0 {
+            activeLaunchAdmissions.removeValue(forKey: providerID)
+        } else {
+            activeLaunchAdmissions[providerID] = remaining
+        }
     }
 }

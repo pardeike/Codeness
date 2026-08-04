@@ -63,16 +63,26 @@ struct RepositoryWindowLifecycleSafetyTests {
         #expect(transferPreview.record == opened.coordinator.record)
         try original.assertUnchanged(at: fixture.repositoryURL, after: "File > Export Workspace")
 
+        let normallyClosedCoordinator = opened.coordinator
         opened.window?.performClose(nil)
         try await waitUntil { manager.isEmpty }
+        #expect(application.allCoordinators.isEmpty)
         try original.assertUnchanged(at: fixture.repositoryURL, after: "normal close")
 
         // Start a real queued Codex turn through the coordinator, then exercise the
         // warning sheet and graceful pause-and-close path. The fake App Server keeps
         // the turn alive until the test supplies its authoritative terminal event.
         opened = try await manager.openRepository(at: fixture.repositoryURL, display: true).controller
+        #expect(opened.coordinator !== normallyClosedCoordinator)
         await opened.coordinator.load()
+        #expect(opened.coordinator.isLoaded)
+        #expect(opened.coordinator.record.activity == nil)
+        #expect(opened.coordinator.canStartActivity)
         await opened.coordinator.startActivity(goal: "Protect this fixture", prompts: .builtInDefaults)
+        #expect(
+            opened.coordinator.errorMessage == nil,
+            "Start failure: \(opened.coordinator.errorMessage ?? "none")"
+        )
         #expect(opened.coordinator.requiresCloseConfirmation)
         let activeRun = try #require(opened.coordinator.activeRun)
         let threadID = try #require(activeRun.threadID)
@@ -322,12 +332,16 @@ for line in sys.stdin:
     identifier = message.get("id")
     if method == "initialize":
         emit({"id": identifier, "result": {"userAgent": "fixture"}})
+    elif method == "thread/loaded/list":
+        emit({"id": identifier, "result": {"data": [], "nextCursor": None}})
     elif method == "thread/start":
         thread_count += 1
         emit({"id": identifier, "result": {"thread": {"id": "thread-" + str(thread_count)}}})
     elif method == "turn/start":
         turn_count += 1
         emit({"id": identifier, "result": {"turn": {"id": "turn-" + str(turn_count)}}})
+    elif method == "thread/unsubscribe":
+        emit({"id": identifier, "result": {"status": "unsubscribed"}})
     elif identifier is not None:
         emit({"id": identifier, "result": {}})
 """#

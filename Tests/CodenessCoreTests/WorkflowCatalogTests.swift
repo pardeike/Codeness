@@ -114,6 +114,70 @@ struct WorkflowCatalogTests {
         }
     }
 
+    @Test
+    func codexCoordinatorReservesTransientHeadroomFromPersistentStepSessions() {
+        #expect(CodexAgentProvider.maximumPersistentWorkflowSessionCount == 23)
+        let accepted = capacityWorkflow(
+            codexStepCount: CodexAgentProvider.maximumPersistentWorkflowSessionCount,
+            coordinatorProvider: .codex
+        )
+        let rejected = capacityWorkflow(
+            codexStepCount: CodexAgentProvider.maximumPersistentWorkflowSessionCount + 1,
+            coordinatorProvider: .codex
+        )
+
+        #expect(accepted.validationMessage == nil)
+        #expect(rejected.validationMessage?.contains("24 persistent Codex step sessions") == true)
+        #expect(rejected.validationMessage?.contains("one temporary Codex coordinator session") == true)
+        #expect(rejected.validationMessage?.contains("24-thread loaded-session budget") == true)
+    }
+
+    @Test
+    func nonCodexCoordinatorAllowsTheFullCodexPersistentSessionBudget() {
+        let accepted = capacityWorkflow(
+            codexStepCount: CodexAgentProvider.maximumLoadedThreadBudget,
+            coordinatorProvider: .claude
+        )
+        let rejected = capacityWorkflow(
+            codexStepCount: CodexAgentProvider.maximumLoadedThreadBudget + 1,
+            coordinatorProvider: .claude
+        )
+
+        #expect(accepted.validationMessage == nil)
+        #expect(rejected.validationMessage?.contains("25 persistent Codex step sessions") == true)
+        #expect(rejected.validationMessage?.contains("temporary Codex coordinator") == false)
+        #expect(rejected.validationMessage?.contains("24-thread loaded-session budget") == true)
+    }
+
+    private func capacityWorkflow(
+        codexStepCount: Int,
+        coordinatorProvider: AgentProviderID
+    ) -> WorkflowTemplate {
+        let codex = AgentTarget(providerID: .codex, model: "codex-model")
+        let coordinator = AgentTarget(
+            providerID: coordinatorProvider,
+            model: "coordinator-model"
+        )
+        return WorkflowTemplate(
+            id: "capacity-\(codexStepCount)-\(coordinatorProvider.rawValue)",
+            name: "Capacity workflow",
+            summary: "Exercises provider session capacity.",
+            steps: (0..<codexStepCount).map { index in
+                WorkflowStep(
+                    id: "step-\(index)",
+                    name: "Step \(index)",
+                    section: .loop,
+                    instructions: "Perform step \(index).",
+                    target: codex
+                )
+            },
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: coordinator,
+                instructions: "Route the result."
+            )
+        )
+    }
+
     private func workflowJSON(identifier: String) -> String {
         """
         {

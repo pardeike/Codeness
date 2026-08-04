@@ -15,6 +15,38 @@ final class CodenessApplicationModel {
     private static let defaultWorkflowTemplateIDKey = "DefaultWorkflowTemplateID"
     private static let claudeExecutablePathKey = "ClaudeExecutablePath"
     private static let appServerLogger = Logger(subsystem: "ap.codeness", category: "CodexAppServer")
+    private static let appServerCleanupFailure =
+        "Codeness could not verify that every Codex App Server and MCP process stopped. Restart Codeness before starting or restarting Codex."
+    private static let claudeRestartCleanupFailure =
+        "Codeness could not verify that every Claude and MCP process stopped. Starting a replacement is blocked to prevent overlapping orphan processes. Try restarting Claude again; if it still fails, end the remaining Claude process in Activity Monitor first."
+    private static let providerQuitCleanupFailure =
+        "Codeness could not verify that every Claude and MCP process stopped, so Quit was canceled to avoid leaving an orphan. Try Quit again; if it still fails, end the remaining Claude process in Activity Monitor and quit again."
+    private static let probeQuitCleanupFailure =
+        "Codeness could not verify that every executable-check process stopped, so Quit was canceled to avoid leaving an orphan. Try Quit again."
+    private static let providerLaunchDrainFailure =
+        "Codeness paused new provider work, but an already-admitted launch did not finish within the bounded restart window. The current provider was left running and new launches remain paused. Retry after the active work settles."
+
+    private struct LifecycleLease: Equatable {
+        let identifier: UUID
+        let generation: UInt64
+    }
+
+    private struct PendingProviderRestart {
+        let identifier: UUID
+        let task: Task<Bool, Never>
+    }
+
+    private enum ProviderRestartOutcome {
+        case succeeded
+        case oldProviderUntouched
+        case restoredCoherently
+        case failedClosed
+
+        var succeeded: Bool {
+            if case .succeeded = self { return true }
+            return false
+        }
+    }
 
     enum ServerState: Equatable {
         case starting
@@ -69,6 +101,8 @@ final class CodenessApplicationModel {
     private(set) var repositoryModelDefaults: RepositoryModelDefaults
     private(set) var separatesRunTranscripts: Bool
     private(set) var transcriptVisibility: TranscriptVisibility
+    private(set) var pendingProviderRestarts: Set<AgentProviderID> = []
+    private(set) var retainedProviderLaunchFences: Set<AgentProviderID> = []
     var applicationError: String?
 
     @ObservationIgnored private let appServer: CodexAppServerClient
@@ -76,18 +110,42 @@ final class CodenessApplicationModel {
     @ObservationIgnored private let store: WorkspaceStore
     @ObservationIgnored private let resolver: WorkspaceResolver
     @ObservationIgnored private let codexProvider: CodexAgentProvider
-    @ObservationIgnored private var claudeProvider: ClaudeAgentProvider?
+    @ObservationIgnored private var claudeProvider: (any AgentProviding)?
     @ObservationIgnored private let agentProviders: AgentProviderRegistry
     @ObservationIgnored private let workflowRouter: AgentWorkflowHandoffRouter
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var didBootstrap = false
     @ObservationIgnored private var intentionalShutdown = false
+    @ObservationIgnored private var lifecycleGeneration: UInt64 = 0
+    @ObservationIgnored private var shutdownFenced = false
+    @ObservationIgnored private var activeLifecycleLease: LifecycleLease?
+    @ObservationIgnored private var activeLifecycleCancellation: (() -> Void)?
+    @ObservationIgnored private var lifecycleWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private var providerRestartTasks: [
+        AgentProviderID: PendingProviderRestart
+    ] = [:]
+    @ObservationIgnored private var retainedProviderLaunchFenceTokens: [
+        AgentProviderID: AgentProviderRegistry.LaunchFence
+    ] = [:]
+    @ObservationIgnored private var retainedEventRoutingPauses: [
+        AgentProviderID: AppServerEventRoutingPause
+    ] = [:]
+    @ObservationIgnored private let appServerShutdown: @Sendable () async -> Bool
+    @ObservationIgnored private let codexShutdownAndVerify: @Sendable () async -> Bool
+    @ObservationIgnored private let testingDocumentPreparationResult: Bool?
+    @ObservationIgnored private let providerLaunchDrainTimeout: Duration
 
     init(
         appServer: CodexAppServerClient = CodexAppServerClient(),
         router: any HandoffRouting = HandoffRouter(),
         store: WorkspaceStore = WorkspaceStore(),
-        resolver: WorkspaceResolver = WorkspaceResolver()
+        resolver: WorkspaceResolver = WorkspaceResolver(),
+        testingCodexProvider: CodexAgentProvider? = nil,
+        initialClaudeProvider: (any AgentProviding)? = nil,
+        testingAppServerShutdown: (@Sendable () async -> Bool)? = nil,
+        testingCodexShutdownAndVerify: (@Sendable () async -> Bool)? = nil,
+        testingDocumentPreparationResult: Bool? = nil,
+        testingProviderLaunchDrainTimeout: Duration = .seconds(2)
     ) {
         let loadedProviderCatalog: AgentProviderCatalog
         let loadedWorkflowCatalog: WorkflowCatalog
@@ -112,16 +170,27 @@ final class CodenessApplicationModel {
         }
 
         self.appServer = appServer
+        appServerShutdown = testingAppServerShutdown ?? { await appServer.shutdown() }
         self.router = router
         self.store = store
         self.resolver = resolver
         providerCatalog = loadedProviderCatalog
         claudeModels = loadedProviderCatalog.provider(.claude)?.knownModels ?? []
         builtInWorkflowCatalog = loadedWorkflowCatalog
-        let codexProvider = CodexAgentProvider(appServer: appServer)
+        let codexProvider = testingCodexProvider
+            ?? CodexAgentProvider(appServer: appServer)
         self.codexProvider = codexProvider
-        let agentProviders = AgentProviderRegistry(providers: [codexProvider])
+        codexShutdownAndVerify = testingCodexShutdownAndVerify
+            ?? { await codexProvider.shutdownAndVerify() }
+        self.testingDocumentPreparationResult = testingDocumentPreparationResult
+        providerLaunchDrainTimeout = max(.zero, testingProviderLaunchDrainTimeout)
+        var providers: [any AgentProviding] = [codexProvider]
+        if let initialClaudeProvider {
+            providers.append(initialClaudeProvider)
+        }
+        let agentProviders = AgentProviderRegistry(providers: providers)
         self.agentProviders = agentProviders
+        claudeProvider = initialClaudeProvider
         workflowRouter = AgentWorkflowHandoffRouter(providers: agentProviders)
         configuredExecutablePath = UserDefaults.standard.string(forKey: "CodexExecutablePath") ?? ""
         configuredClaudeExecutablePath = UserDefaults.standard.string(
@@ -199,7 +268,17 @@ final class CodenessApplicationModel {
         )
         return !providerIDs.isEmpty
             && providerIDs.allSatisfy(isProviderReady)
+            && providerIDs.isDisjoint(with: pendingProviderRestarts)
+            && providerIDs.isDisjoint(with: retainedProviderLaunchFences)
             && workflowCompatibilityMessage(workflow) == nil
+    }
+
+    func isProviderRestartPending(_ providerID: AgentProviderID) -> Bool {
+        pendingProviderRestarts.contains(providerID)
+    }
+
+    func agentProviderRegistryForTesting() -> AgentProviderRegistry {
+        agentProviders
     }
 
     func workflowCompatibilityMessage(_ workflow: WorkflowTemplate) -> String? {
@@ -286,18 +365,38 @@ final class CodenessApplicationModel {
     }
 
     func bootstrap() async {
-        guard !didBootstrap else { return }
+        guard !didBootstrap,
+              let lease = await acquireLifecycleLease() else { return }
+        // The event consumer shares this lifecycle lease and therefore cannot
+        // route startup notifications until bootstrap finishes. Use bounded,
+        // nonblocking admission during that deliberate pause so initialization
+        // responses can never deadlock behind a saturated notification backlog.
+        let eventRoutingPause = await appServer.pauseEventRouting()
+        let operation = Task { @MainActor [weak self] in
+            await self?.performBootstrap(lease: lease)
+        }
+        activeLifecycleCancellation = { operation.cancel() }
+        await operation.value
+        await appServer.resumeEventRouting(eventRoutingPause)
+        finishLifecycleOperation(lease)
+    }
+
+    private func performBootstrap(lease: LifecycleLease) async {
+        guard lifecycleIsCurrent(lease) else { return }
         didBootstrap = true
         let catalogError = applicationError
         let stream = await appServer.events()
+        guard lifecycleIsCurrent(lease) else { return }
         eventTask = Task { [weak self] in
-            for await event in stream {
+            for await transportEvent in stream {
                 guard let self else { return }
-                await self.handle(event)
+                await self.route(transportEvent)
             }
         }
-        await startServer(configuredPath: configuredExecutablePath)
-        await startClaude(configuredPath: configuredClaudeExecutablePath)
+        await startServer(configuredPath: configuredExecutablePath, lease: lease)
+        guard lifecycleIsCurrent(lease) else { return }
+        await startClaude(configuredPath: configuredClaudeExecutablePath, lease: lease)
+        guard lifecycleIsCurrent(lease) else { return }
         if catalogError == nil, !isReady, !claudeState.isReady {
             applicationError = [
                 "No supported agent CLI is currently available.",
@@ -427,52 +526,181 @@ final class CodenessApplicationModel {
 
     @discardableResult
     func restartServer(configuredPath: String) async -> Bool {
+        if let pending = providerRestartTasks[.codex] {
+            return await pending.task.value
+        }
+        let identifier = UUID()
+        // This observable UI gate is established synchronously, before the
+        // first suspension in this call. Registry admission below is the
+        // authoritative enforcement boundary for launches that bypass UI.
+        pendingProviderRestarts.insert(.codex)
+        let task = Task { @MainActor [weak self] in
+            await self?.executeRestartServer(configuredPath: configuredPath) ?? false
+        }
+        providerRestartTasks[.codex] = PendingProviderRestart(
+            identifier: identifier,
+            task: task
+        )
+        let result = await task.value
+        if providerRestartTasks[.codex]?.identifier == identifier {
+            providerRestartTasks.removeValue(forKey: .codex)
+            pendingProviderRestarts.remove(.codex)
+        }
+        return result
+    }
+
+    private func executeRestartServer(configuredPath: String) async -> Bool {
+        guard let lease = await acquireLifecycleLease() else {
+            applicationError = "Codeness is shutting down; Codex cannot be restarted."
+            return false
+        }
+        let operation = Task { @MainActor [weak self] in
+            await self?.performRestartServer(
+                configuredPath: configuredPath,
+                lease: lease
+            ) ?? false
+        }
+        activeLifecycleCancellation = { operation.cancel() }
+        let result = await operation.value
+        finishLifecycleOperation(lease)
+        return result
+    }
+
+    private func performRestartServer(
+        configuredPath: String,
+        lease: LifecycleLease
+    ) async -> Bool {
+        guard lifecycleIsCurrent(lease) else { return false }
         guard !coordinators.values.contains(where: {
             $0.hasActiveWork(for: .codex)
         }) else {
             applicationError = "Finish active Codex turns or coordinator work before restarting App Server."
             return false
         }
+        let launchFence: AgentProviderRegistry.LaunchFence
+        let acquiredFreshFence: Bool
+        if let retainedFence = retainedProviderLaunchFenceTokens[.codex] {
+            launchFence = retainedFence
+            acquiredFreshFence = false
+        } else {
+            do {
+                launchFence = try await agentProviders.fenceLaunches(for: .codex)
+                acquiredFreshFence = true
+            } catch {
+                guard lifecycleIsCurrent(lease) else { return false }
+                applicationError = error.localizedDescription
+                return false
+            }
+        }
+        guard await agentProviders.waitForLaunchesToDrain(
+            launchFence,
+            timeout: providerLaunchDrainTimeout
+        ) else {
+            retainedProviderLaunchFenceTokens[.codex] = launchFence
+            retainedProviderLaunchFences.insert(.codex)
+            if lifecycleIsCurrent(lease) {
+                applicationError = Self.providerLaunchDrainFailure
+                serverState = .failed(Self.providerLaunchDrainFailure)
+            }
+            return false
+        }
+        let outcome = await performRestartServerWhileLaunchesFenced(
+            configuredPath: configuredPath,
+            lease: lease
+        )
+        await finishProviderRestart(
+            providerID: .codex,
+            outcome: outcome,
+            launchFence: launchFence,
+            acquiredFreshFence: acquiredFreshFence,
+            lifecycleRemainsCurrent: lifecycleIsCurrent(lease)
+        )
+        return outcome.succeeded
+    }
+
+    private func performRestartServerWhileLaunchesFenced(
+        configuredPath: String,
+        lease: LifecycleLease
+    ) async -> ProviderRestartOutcome {
+        guard lifecycleIsCurrent(lease) else { return .oldProviderUntouched }
+        guard !coordinators.values.contains(where: {
+            $0.hasActiveWork(for: .codex)
+        }) else {
+            applicationError = "Finish active Codex turns or coordinator work before restarting App Server."
+            return .oldProviderUntouched
+        }
 
         let configuredPath = configuredPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let executable: URL
         let version: String
         do {
+            try await CodexExecutableLocator.prepareProcessEnvironment()
+            try requireCurrentLifecycle(lease)
             executable = try CodexExecutableLocator.resolve(configuredPath: configuredPath)
-            version = try CodexExecutableLocator.verify(executable)
+            version = try await CodexExecutableLocator.verify(executable)
+            try requireCurrentLifecycle(lease)
             if let descriptor = providerCatalog.provider(.codex) {
                 try AgentExecutableLocator.validateVersion(version, descriptor: descriptor)
             }
         } catch {
+            guard lifecycleIsCurrent(lease) else { return .oldProviderUntouched }
             applicationError = error.localizedDescription
-            return false
+            return .oldProviderUntouched
         }
 
         let previousConfiguredPath = UserDefaults.standard.string(forKey: "CodexExecutablePath") ?? ""
+        guard lifecycleIsCurrent(lease) else { return .oldProviderUntouched }
+        if retainedEventRoutingPauses[.codex] == nil {
+            retainedEventRoutingPauses[.codex] = await appServer.pauseEventRouting()
+        }
+        guard lifecycleIsCurrent(lease) else { return .failedClosed }
         intentionalShutdown = true
-        await appServer.shutdown()
+        let oldServerStopped = await codexShutdownAndVerify()
+        guard oldServerStopped else {
+            if lifecycleIsCurrent(lease) {
+                applicationError = Self.appServerCleanupFailure
+                serverState = .failed(Self.appServerCleanupFailure)
+                intentionalShutdown = false
+            }
+            return .failedClosed
+        }
+        guard lifecycleIsCurrent(lease) else { return .failedClosed }
         for coordinator in coordinators.values {
             await coordinator.appServerRestarted()
+            guard lifecycleIsCurrent(lease) else { return .failedClosed }
         }
         do {
-            try await activateServer(executable: executable, version: version)
+            try await activateServer(
+                executable: executable,
+                version: version,
+                lease: lease
+            )
+            try requireCurrentLifecycle(lease)
             UserDefaults.standard.set(configuredPath, forKey: "CodexExecutablePath")
             configuredExecutablePath = configuredPath
             intentionalShutdown = false
-            return true
+            return .succeeded
         } catch {
+            guard lifecycleIsCurrent(lease) else { return .failedClosed }
             let requestedError = error.localizedDescription
             var restoredPreviousServer = false
             if let previousExecutable = try? CodexExecutableLocator.resolve(configuredPath: previousConfiguredPath),
-               let previousVersion = try? CodexExecutableLocator.verify(previousExecutable),
+               let previousVersion = try? await CodexExecutableLocator.verify(previousExecutable),
+               lifecycleIsCurrent(lease),
                Self.isSupportedCodexVersion(previousVersion, catalog: providerCatalog) {
                 do {
-                    try await activateServer(executable: previousExecutable, version: previousVersion)
+                    try await activateServer(
+                        executable: previousExecutable,
+                        version: previousVersion,
+                        lease: lease
+                    )
+                    try requireCurrentLifecycle(lease)
                     restoredPreviousServer = true
                 } catch {
                     // The requested error remains the actionable settings failure.
                 }
             }
+            guard lifecycleIsCurrent(lease) else { return .failedClosed }
             if !restoredPreviousServer {
                 currentExecutablePath = ""
                 models = []
@@ -480,72 +708,306 @@ final class CodenessApplicationModel {
             }
             applicationError = "Could not restart Codex with the requested executable: \(requestedError)"
             intentionalShutdown = false
-            return false
+            return restoredPreviousServer ? .restoredCoherently : .failedClosed
         }
     }
 
     @discardableResult
     func restartClaude(configuredPath: String) async -> Bool {
+        if let pending = providerRestartTasks[.claude] {
+            return await pending.task.value
+        }
+        let identifier = UUID()
+        pendingProviderRestarts.insert(.claude)
+        let task = Task { @MainActor [weak self] in
+            await self?.executeRestartClaude(configuredPath: configuredPath) ?? false
+        }
+        providerRestartTasks[.claude] = PendingProviderRestart(
+            identifier: identifier,
+            task: task
+        )
+        let result = await task.value
+        if providerRestartTasks[.claude]?.identifier == identifier {
+            providerRestartTasks.removeValue(forKey: .claude)
+            pendingProviderRestarts.remove(.claude)
+        }
+        return result
+    }
+
+    private func executeRestartClaude(configuredPath: String) async -> Bool {
+        guard let lease = await acquireLifecycleLease() else {
+            applicationError = "Codeness is shutting down; Claude cannot be restarted."
+            return false
+        }
+        let operation = Task { @MainActor [weak self] in
+            await self?.performRestartClaude(
+                configuredPath: configuredPath,
+                lease: lease
+            ) ?? false
+        }
+        activeLifecycleCancellation = { operation.cancel() }
+        let result = await operation.value
+        finishLifecycleOperation(lease)
+        return result
+    }
+
+    private func performRestartClaude(
+        configuredPath: String,
+        lease: LifecycleLease
+    ) async -> Bool {
+        guard lifecycleIsCurrent(lease) else { return false }
         guard !coordinators.values.contains(where: {
             $0.hasActiveWork(for: .claude)
         }) else {
             applicationError = "Finish active Claude turns or coordinator work before restarting Claude."
             return false
         }
+        let launchFence: AgentProviderRegistry.LaunchFence
+        let acquiredFreshFence: Bool
+        if let retainedFence = retainedProviderLaunchFenceTokens[.claude] {
+            launchFence = retainedFence
+            acquiredFreshFence = false
+        } else {
+            do {
+                launchFence = try await agentProviders.fenceLaunches(for: .claude)
+                acquiredFreshFence = true
+            } catch {
+                guard lifecycleIsCurrent(lease) else { return false }
+                applicationError = error.localizedDescription
+                return false
+            }
+        }
+        guard await agentProviders.waitForLaunchesToDrain(
+            launchFence,
+            timeout: providerLaunchDrainTimeout
+        ) else {
+            retainedProviderLaunchFenceTokens[.claude] = launchFence
+            retainedProviderLaunchFences.insert(.claude)
+            if lifecycleIsCurrent(lease) {
+                applicationError = Self.providerLaunchDrainFailure
+                claudeState = .failed(Self.providerLaunchDrainFailure)
+            }
+            return false
+        }
+        let outcome = await performRestartClaudeWhileLaunchesFenced(
+            configuredPath: configuredPath,
+            lease: lease
+        )
+        await finishProviderRestart(
+            providerID: .claude,
+            outcome: outcome,
+            launchFence: launchFence,
+            acquiredFreshFence: acquiredFreshFence,
+            lifecycleRemainsCurrent: lifecycleIsCurrent(lease)
+        )
+        return outcome.succeeded
+    }
+
+    private func performRestartClaudeWhileLaunchesFenced(
+        configuredPath: String,
+        lease: LifecycleLease
+    ) async -> ProviderRestartOutcome {
+        guard lifecycleIsCurrent(lease) else { return .oldProviderUntouched }
+        guard !coordinators.values.contains(where: {
+            $0.hasActiveWork(for: .claude)
+        }) else {
+            applicationError = "Finish active Claude turns or coordinator work before restarting Claude."
+            return .oldProviderUntouched
+        }
         guard let descriptor = providerCatalog.provider(.claude) else {
             applicationError = "The Claude provider is missing from AgentProviders.json."
-            return false
+            return .oldProviderUntouched
         }
         let cleanPath = configuredPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let previousPath = UserDefaults.standard.string(forKey: Self.claudeExecutablePathKey) ?? ""
-        await claudeProvider?.shutdown()
-        await agentProviders.unregister(.claude)
-        claudeProvider = nil
+        let executable: URL
+        let version: String
         do {
-            let executable = try AgentExecutableLocator.resolve(
+            // Validate the replacement completely before pausing App Server
+            // routing or disturbing the healthy provider. A bad settings path
+            // is an ordinary refusal, not a cleanup failure.
+            try await CodexExecutableLocator.prepareProcessEnvironment()
+            try requireCurrentLifecycle(lease)
+            executable = try AgentExecutableLocator.resolve(
                 configuredPath: cleanPath,
                 descriptor: descriptor
             )
-            let version = try AgentExecutableLocator.verify(executable, descriptor: descriptor)
-            await activateClaude(executable: executable, version: version)
+            version = try await AgentExecutableLocator.verify(
+                executable,
+                descriptor: descriptor
+            )
+            try requireCurrentLifecycle(lease)
+        } catch {
+            guard lifecycleIsCurrent(lease) else { return .oldProviderUntouched }
+            applicationError = error.localizedDescription
+            return .oldProviderUntouched
+        }
+
+        let oldProviderStopped = await claudeProvider?.shutdownAndVerify() ?? true
+        guard oldProviderStopped else {
+            if lifecycleIsCurrent(lease) {
+                applicationError = Self.claudeRestartCleanupFailure
+                claudeState = .failed(Self.claudeRestartCleanupFailure)
+            }
+            return .failedClosed
+        }
+        guard lifecycleIsCurrent(lease) else { return .failedClosed }
+        await agentProviders.unregister(.claude)
+        guard lifecycleIsCurrent(lease) else { return .failedClosed }
+        claudeProvider = nil
+        do {
+            try await activateClaude(
+                executable: executable,
+                version: version,
+                lease: lease
+            )
+            try requireCurrentLifecycle(lease)
             UserDefaults.standard.set(cleanPath, forKey: Self.claudeExecutablePathKey)
             configuredClaudeExecutablePath = cleanPath
-            return true
+            return .succeeded
         } catch {
+            guard lifecycleIsCurrent(lease) else { return .failedClosed }
             let requestedError = error.localizedDescription
+            var restoredPreviousProvider = false
             if let previousExecutable = try? AgentExecutableLocator.resolve(
                 configuredPath: previousPath,
                 descriptor: descriptor
-            ), let previousVersion = try? AgentExecutableLocator.verify(
+            ), let previousVersion = try? await AgentExecutableLocator.verify(
                 previousExecutable,
                 descriptor: descriptor
-            ) {
-                await activateClaude(
-                    executable: previousExecutable,
-                    version: previousVersion
-                )
+            ), lifecycleIsCurrent(lease) {
+                do {
+                    try await activateClaude(
+                        executable: previousExecutable,
+                        version: previousVersion,
+                        lease: lease
+                    )
+                    try requireCurrentLifecycle(lease)
+                    restoredPreviousProvider = true
+                } catch {
+                    // Keep the requested failure as the actionable settings error.
+                }
             } else {
                 currentClaudeExecutablePath = ""
                 claudeState = .failed(requestedError)
             }
+            guard lifecycleIsCurrent(lease) else { return .failedClosed }
+            if !restoredPreviousProvider {
+                currentClaudeExecutablePath = ""
+                claudeState = .failed(requestedError)
+            }
             applicationError = "Could not restart Claude with the requested executable: \(requestedError)"
-            return false
+            return restoredPreviousProvider ? .restoredCoherently : .failedClosed
+        }
+    }
+
+    private func finishProviderRestart(
+        providerID: AgentProviderID,
+        outcome: ProviderRestartOutcome,
+        launchFence: AgentProviderRegistry.LaunchFence,
+        acquiredFreshFence: Bool,
+        lifecycleRemainsCurrent: Bool
+    ) async {
+        let mayResume: Bool
+        switch outcome {
+        case .succeeded, .restoredCoherently:
+            mayResume = true
+        case .oldProviderUntouched:
+            // An early refusal proves coherence only when this attempt created
+            // the fence. A fence retained from a prior failed cleanup remains
+            // authoritative until a later activation or rollback succeeds.
+            mayResume = acquiredFreshFence && lifecycleRemainsCurrent
+        case .failedClosed:
+            mayResume = false
+        }
+        if mayResume {
+            if let routingPause = retainedEventRoutingPauses.removeValue(forKey: providerID) {
+                // Reopen App Server event delivery before provider launches so
+                // a newly admitted run cannot race a still-paused consumer.
+                await appServer.resumeEventRouting(routingPause)
+            }
+            await agentProviders.resumeLaunches(launchFence)
+            retainedProviderLaunchFenceTokens.removeValue(forKey: providerID)
+            retainedProviderLaunchFences.remove(providerID)
+        } else {
+            retainedProviderLaunchFenceTokens[providerID] = launchFence
+            retainedProviderLaunchFences.insert(providerID)
         }
     }
 
     func shutdown(prepareDocuments: Bool = true) async -> Bool {
+        // Fence launches synchronously before the first suspension. Incrementing
+        // the generation makes every in-flight lease permanently stale, even if
+        // this Quit is later canceled and the gate reopens.
+        lifecycleGeneration &+= 1
+        shutdownFenced = true
+        activeLifecycleCancellation?()
         intentionalShutdown = true
         if prepareDocuments {
+            if testingDocumentPreparationResult == false {
+                return await cancelShutdownAfterPreparationFailure()
+            }
             for coordinator in coordinators.values {
                 let result = await coordinator.prepareForClose(strategy: .immediate)
                 guard result == .ready else {
-                    intentionalShutdown = false
-                    return false
+                    return await cancelShutdownAfterPreparationFailure()
                 }
             }
         }
-        await agentProviders.shutdown()
-        await appServer.shutdown()
+
+        let probesStopped = await OwnedSubprocessSupervisor.shutdownAll()
+        activeLifecycleCancellation?()
+        await waitForLifecycleOperationToFinish()
+
+        var providerReport = await agentProviders.shutdownReport()
+        let appServerStopped = await appServerShutdown()
+        if providerReport[.codex] == false, appServerStopped {
+            await codexProvider.appServerCleanupConfirmed()
+            providerReport[.codex] = await codexProvider.shutdownAndVerify()
+        }
+        let codexStopped = (providerReport[.codex] ?? true) && appServerStopped
+        let claudeStopped = providerReport[.claude] ?? true
+        let providersStopped = providerReport.values.allSatisfy { $0 }
+        guard providersStopped, appServerStopped, probesStopped else {
+            var failures: [String] = []
+            if !claudeStopped {
+                failures.append(Self.providerQuitCleanupFailure)
+                claudeState = .failed(Self.providerQuitCleanupFailure)
+            } else {
+                claudeState = .stopped
+                currentClaudeExecutablePath = ""
+            }
+            if !codexStopped {
+                failures.append(Self.appServerCleanupFailure)
+                serverState = .failed(Self.appServerCleanupFailure)
+            } else {
+                serverState = .stopped
+                currentExecutablePath = ""
+                models = []
+                await codexProvider.updateModels([])
+                for coordinator in coordinators.values {
+                    await coordinator.appServerRestarted()
+                }
+            }
+            if !probesStopped {
+                failures.append(Self.probeQuitCleanupFailure)
+            }
+            applicationError = failures.joined(separator: "\n")
+            var resumedProbeLaunching = false
+            if probesStopped {
+                resumedProbeLaunching = await OwnedSubprocessSupervisor.resumeLaunching()
+            }
+            if !resumedProbeLaunching {
+                if !failures.contains(Self.probeQuitCleanupFailure) {
+                    failures.append(Self.probeQuitCleanupFailure)
+                    applicationError = failures.joined(separator: "\n")
+                }
+            } else {
+                shutdownFenced = false
+            }
+            intentionalShutdown = false
+            return false
+        }
         eventTask?.cancel()
         eventTask = nil
         serverState = .stopped
@@ -638,45 +1100,79 @@ final class CodenessApplicationModel {
         }
     }
 
-    private func startServer(configuredPath: String) async {
+    private func startServer(
+        configuredPath: String,
+        lease: LifecycleLease
+    ) async {
+        guard lifecycleIsCurrent(lease) else { return }
         serverState = .starting
         do {
+            try await CodexExecutableLocator.prepareProcessEnvironment()
+            try requireCurrentLifecycle(lease)
             let executable = try CodexExecutableLocator.resolve(configuredPath: configuredPath)
-            let version = try CodexExecutableLocator.verify(executable)
+            let version = try await CodexExecutableLocator.verify(executable)
+            try requireCurrentLifecycle(lease)
             if let descriptor = providerCatalog.provider(.codex) {
                 try AgentExecutableLocator.validateVersion(version, descriptor: descriptor)
             }
-            try await activateServer(executable: executable, version: version)
+            try await activateServer(
+                executable: executable,
+                version: version,
+                lease: lease
+            )
         } catch {
+            guard lifecycleIsCurrent(lease) else { return }
             serverState = .failed(error.localizedDescription)
         }
     }
 
-    private func startClaude(configuredPath: String) async {
+    private func startClaude(
+        configuredPath: String,
+        lease: LifecycleLease
+    ) async {
+        guard lifecycleIsCurrent(lease) else { return }
         claudeState = .starting
         guard let descriptor = providerCatalog.provider(.claude) else {
             claudeState = .failed("Provider metadata is missing.")
             return
         }
         do {
+            try await CodexExecutableLocator.prepareProcessEnvironment()
+            try requireCurrentLifecycle(lease)
             let executable = try AgentExecutableLocator.resolve(
                 configuredPath: configuredPath,
                 descriptor: descriptor
             )
-            let version = try AgentExecutableLocator.verify(executable, descriptor: descriptor)
-            await activateClaude(executable: executable, version: version)
+            let version = try await AgentExecutableLocator.verify(
+                executable,
+                descriptor: descriptor
+            )
+            try requireCurrentLifecycle(lease)
+            try await activateClaude(
+                executable: executable,
+                version: version,
+                lease: lease
+            )
         } catch {
+            guard lifecycleIsCurrent(lease) else { return }
             currentClaudeExecutablePath = ""
             claudeState = .failed(error.localizedDescription)
         }
     }
 
-    private func activateClaude(executable: URL, version: String) async {
-        let discoveredModels = await Task.detached {
-            try? ClaudeExecutableInspector.models(executableURL: executable)
-        }.value
+    private func activateClaude(
+        executable: URL,
+        version: String,
+        lease: LifecycleLease
+    ) async throws {
+        try requireCurrentLifecycle(lease)
+        let discoveredModels = try? await ClaudeExecutableInspector.models(
+            executableURL: executable
+        )
+        try requireCurrentLifecycle(lease)
         let provider = ClaudeAgentProvider(executableURL: executable)
         await agentProviders.register(provider)
+        try requireCurrentLifecycle(lease)
         claudeProvider = provider
         if let discoveredModels, !discoveredModels.isEmpty {
             claudeModels = discoveredModels
@@ -687,23 +1183,56 @@ final class CodenessApplicationModel {
         claudeState = .ready(version)
     }
 
-    private func activateServer(executable: URL, version: String) async throws {
+    private func activateServer(
+        executable: URL,
+        version: String,
+        lease: LifecycleLease
+    ) async throws {
+        try requireCurrentLifecycle(lease)
         serverState = .starting
         try await appServer.start(configuration: CodexLaunchConfiguration(executableURL: executable))
         do {
+            try requireCurrentLifecycle(lease)
             let availableModels = try await appServer.listModels().filter { !$0.hidden }
+            try requireCurrentLifecycle(lease)
+            await codexProvider.updateModels(availableModels)
+            try requireCurrentLifecycle(lease)
             currentExecutablePath = executable.path
             models = availableModels
-            await codexProvider.updateModels(availableModels)
             serverState = .ready(version)
         } catch {
-            await appServer.shutdown()
+            let startupError = error.localizedDescription
+            guard await appServer.shutdown() else {
+                throw AppServerActivationCleanupError(startupError: startupError)
+            }
             throw error
         }
     }
 
-    private func handle(_ event: AppServerEvent) async {
+    /// Routes one transport event under the same lifecycle lease used by
+    /// bootstrap and settings restarts. Keeping the envelope through this
+    /// boundary prevents a queued event from generation N from reaching the
+    /// provider after a restart has already started generation N+1.
+    func route(_ transportEvent: AppServerTransportEvent) async {
+        guard let lease = await acquireLifecycleLease() else { return }
+        let operation = Task { @MainActor [weak self] in
+            await self?.handle(transportEvent, lease: lease)
+        }
+        activeLifecycleCancellation = { operation.cancel() }
+        await operation.value
+        finishLifecycleOperation(lease)
+    }
+
+    private func handle(
+        _ transportEvent: AppServerTransportEvent,
+        lease: LifecycleLease
+    ) async {
+        guard lifecycleIsCurrent(lease),
+              await appServer.isLatestGeneration(transportEvent.generation),
+              lifecycleIsCurrent(lease) else { return }
+        let event = transportEvent.event
         await codexProvider.receive(event)
+        guard lifecycleIsCurrent(lease) else { return }
         switch event {
         case .standardError(let text):
             let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -732,6 +1261,66 @@ final class CodenessApplicationModel {
         }
     }
 
+    private func acquireLifecycleLease() async -> LifecycleLease? {
+        while activeLifecycleLease != nil {
+            await withCheckedContinuation { continuation in
+                lifecycleWaiters.append(continuation)
+            }
+            guard !shutdownFenced else { return nil }
+        }
+        guard !shutdownFenced else { return nil }
+        let lease = LifecycleLease(
+            identifier: UUID(),
+            generation: lifecycleGeneration
+        )
+        activeLifecycleLease = lease
+        return lease
+    }
+
+    private func finishLifecycleOperation(_ lease: LifecycleLease) {
+        guard activeLifecycleLease == lease else { return }
+        activeLifecycleLease = nil
+        activeLifecycleCancellation = nil
+        let waiters = lifecycleWaiters
+        lifecycleWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    private func waitForLifecycleOperationToFinish() async {
+        while activeLifecycleLease != nil {
+            await withCheckedContinuation { continuation in
+                lifecycleWaiters.append(continuation)
+            }
+        }
+    }
+
+    private func cancelShutdownAfterPreparationFailure() async -> Bool {
+        let probesStopped = await OwnedSubprocessSupervisor.shutdownAll()
+        await waitForLifecycleOperationToFinish()
+        var resumedProbeLaunching = false
+        if probesStopped {
+            resumedProbeLaunching = await OwnedSubprocessSupervisor.resumeLaunching()
+        }
+        if resumedProbeLaunching {
+            shutdownFenced = false
+        } else {
+            applicationError = Self.probeQuitCleanupFailure
+        }
+        intentionalShutdown = false
+        return false
+    }
+
+    private func lifecycleIsCurrent(_ lease: LifecycleLease) -> Bool {
+        !shutdownFenced
+            && !Task.isCancelled
+            && lifecycleGeneration == lease.generation
+            && activeLifecycleLease == lease
+    }
+
+    private func requireCurrentLifecycle(_ lease: LifecycleLease) throws {
+        guard lifecycleIsCurrent(lease) else { throw CancellationError() }
+    }
+
     private static func mergedWorkflowTemplates(
         builtIns: [WorkflowTemplate],
         custom: [WorkflowTemplate]
@@ -756,5 +1345,13 @@ final class CodenessApplicationModel {
             version,
             descriptor: descriptor
         )) != nil
+    }
+}
+
+private struct AppServerActivationCleanupError: LocalizedError {
+    let startupError: String
+
+    var errorDescription: String? {
+        "Codex startup failed: \(startupError) Codeness could not verify that every Codex App Server and MCP process stopped. Restart Codeness before trying again."
     }
 }

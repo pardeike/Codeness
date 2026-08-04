@@ -114,12 +114,13 @@ struct RepositoryWindowGeometryTests {
             commandState: RepositoryWindowCommandState(),
             onClose: { _ in }
         )
+        let restoredVisibleFrame = try #require(window.screen?.visibleFrame)
 
         #expect(!window.isVisible)
-        #expect(window.frame.minX >= visibleFrame.minX - 0.5)
-        #expect(window.frame.minY >= visibleFrame.minY - 0.5)
-        #expect(window.frame.maxX <= visibleFrame.maxX + 0.5)
-        #expect(window.frame.maxY <= visibleFrame.maxY + 0.5)
+        #expect(window.frame.minX >= restoredVisibleFrame.minX - 0.5)
+        #expect(window.frame.minY >= restoredVisibleFrame.minY - 0.5)
+        #expect(window.frame.maxX <= restoredVisibleFrame.maxX + 0.5)
+        #expect(window.frame.maxY <= restoredVisibleFrame.maxY + 0.5)
 
         window.delegate = nil
         withExtendedLifetime(controller) {}

@@ -1,8 +1,29 @@
+import Darwin
 import Dispatch
 import Foundation
 import OSLog
 
+private struct ClaudeStdinWriteTimeoutError: LocalizedError {
+    let timeout: Duration
+
+    var errorDescription: String? {
+        "Claude did not drain its stdin within \(timeout); Codeness stopped the isolated process group."
+    }
+}
+
+struct ClaudeSessionConfigurationSnapshot: Sendable, Equatable {
+    let generation: Int64
+    let name: String
+    let developerInstructions: String
+    let hasStarted: Bool
+}
+
 public actor ClaudeAgentProvider: AgentProviding {
+    private enum StdinWriteRaceResult: Sendable, Equatable {
+        case completed
+        case deadline
+    }
+
     public nonisolated let id = AgentProviderID.claude
     private static let processLogger = Logger(
         subsystem: "ap.codeness",
@@ -10,6 +31,7 @@ public actor ClaudeAgentProvider: AgentProviding {
     )
 
     private struct SessionConfiguration {
+        let generation: Int64
         let name: String
         let cwd: String
         let developerInstructions: String
@@ -23,23 +45,27 @@ public actor ClaudeAgentProvider: AgentProviding {
         let toolUseID: String?
         let input: JSONValue
         let questions: [InputQuestion]
+        let retainedByteCount: Int
     }
 
     private struct ActiveRun {
         let sessionID: String
-        let process: Process
-        let input: Pipe
-        let output: Pipe
-        let error: Pipe
-        let continuation: AsyncStream<AgentEvent>.Continuation
+        let process: AppServerProcess
+        let inputWriter: OrderedPipeWriter
+        let outputReader: BoundedPipeReader
+        let errorReader: BoundedPipeReader
+        let events: BoundedAsyncChannel<AgentEvent>
         let startedAt: ContinuousClock.Instant
+        let generation: Int64
+        let sessionGeneration: Int64
         let resumedSession: Bool
         var didStart: Bool
-        var outputReaderTask: Task<Void, Never>?
-        var errorReaderTask: Task<Void, Never>?
         var outputBuffer: Data
-        var stderrTail: String
+        var outputScanOffset: Int
+        var stderrTail: Data
         var interactions: [String: ControlInteraction]
+        var claimedInteractionRetainedByteCounts: [String: Int]
+        var interactionRetainedByteCount: Int
         var latestUsage: RunTokenUsage?
         var latestAssistantText: String?
         var emittedTextHeading: Bool
@@ -49,18 +75,70 @@ public actor ClaudeAgentProvider: AgentProviding {
         var interruptRequested: Bool
         var termination: SubprocessTermination?
         var outputReachedEOF: Bool
+        var errorReachedEOF: Bool
+        var teardownRequested: Bool
+        var teardownFailure: String?
+    }
+
+    private struct InterruptWatchdog {
+        let generation: Int64
+        let token: UUID
+        let task: Task<Void, Never>
     }
 
     private let executableURL: URL
     private let environment: [String: String]
+    private let maximumActiveProcessCount: Int
+    private let eventBufferCapacity: Int
+    private let maximumEventBufferRetainedBytes: Int
+    private let terminalExitGrace: Duration
+    private let outputDrainGrace: Duration
+    private let terminationGrace: Duration
+    private let killVerificationGrace: Duration
+    private let stdinWriteTimeout: Duration
+    private let interruptGrace: Duration
     private var sessions: [String: SessionConfiguration] = [:]
+    private var pendingSessionReleases: [String: Int64] = [:]
     private var activeRuns: [UUID: ActiveRun] = [:]
+    private var sessionRuns: [String: UUID] = [:]
+    private var processWaitTasks: [UUID: Task<Void, Never>] = [:]
+    private var teardownTasks: [UUID: Task<Bool, Never>] = [:]
+    private var interruptWatchdogTasks: [UUID: InterruptWatchdog] = [:]
+    private var cleanupWaiters: [UUID: [CheckedContinuation<Bool, Never>]] = [:]
+    private var nextProcessGeneration: Int64 = 0
+    private var nextSessionGeneration: Int64 = 0
+    private var isShuttingDown = false
+    private var testingTeardownFailure: String?
+
+    private static let maximumOutputBufferByteCount = 32 * 1_024 * 1_024
+    private static let maximumOutputReadLookaheadByteCount = 64 * 1_024
+    private static let maximumMalformedJSONPreviewByteCount = 4 * 1_024
+    private static let maximumPendingInteractionCount = 64
+    private static let maximumPendingInteractionRetainedBytes = 4 * 1_024 * 1_024
 
     public init(
         executableURL: URL,
-        environment: [String: String] = CodexExecutableLocator.processEnvironment()
+        environment: [String: String] = CodexExecutableLocator.processEnvironment(),
+        maximumActiveProcessCount: Int = 24,
+        eventBufferCapacity: Int = 256,
+        maximumEventBufferRetainedBytes: Int = 4 * 1_024 * 1_024,
+        terminalExitGrace: Duration = .milliseconds(250),
+        outputDrainGrace: Duration = .seconds(5),
+        terminationGrace: Duration = .milliseconds(250),
+        killVerificationGrace: Duration = .milliseconds(500),
+        stdinWriteTimeout: Duration = .seconds(5),
+        interruptGrace: Duration = .seconds(5)
     ) {
         self.executableURL = executableURL
+        self.maximumActiveProcessCount = max(1, maximumActiveProcessCount)
+        self.eventBufferCapacity = max(1, eventBufferCapacity)
+        self.maximumEventBufferRetainedBytes = max(1_024, maximumEventBufferRetainedBytes)
+        self.terminalExitGrace = terminalExitGrace
+        self.outputDrainGrace = outputDrainGrace
+        self.terminationGrace = terminationGrace
+        self.killVerificationGrace = killVerificationGrace
+        self.stdinWriteTimeout = stdinWriteTimeout
+        self.interruptGrace = interruptGrace
         var environment = environment
         // Claude disables Fast mode when CLAUDE_CODE_ENTRYPOINT identifies an
         // Agent SDK wrapper. Codeness launches the Claude CLI directly and uses
@@ -74,7 +152,11 @@ public actor ClaudeAgentProvider: AgentProviding {
             throw AgentProviderError.unsupportedProvider(request.target.providerID)
         }
         let sessionID = request.existingSessionID ?? UUID().uuidString.lowercased()
+        nextSessionGeneration &+= 1
+        let generation = nextSessionGeneration
+        pendingSessionReleases.removeValue(forKey: sessionID)
         sessions[sessionID] = SessionConfiguration(
+            generation: generation,
             name: request.name,
             cwd: request.cwd,
             developerInstructions: request.developerInstructions,
@@ -83,7 +165,7 @@ public actor ClaudeAgentProvider: AgentProviding {
         return AgentSession(providerID: id, id: sessionID, target: request.target)
     }
 
-    public func startRun(_ request: AgentRunRequest) throws -> AgentRunHandle {
+    public func startRun(_ request: AgentRunRequest) async throws -> AgentRunHandle {
         guard request.target.providerID == id, request.session.providerID == id else {
             throw AgentProviderError.unsupportedProvider(request.target.providerID)
         }
@@ -92,7 +174,7 @@ public actor ClaudeAgentProvider: AgentProviding {
                 "Claude session \(request.session.id) was not prepared"
             )
         }
-        let handle = try launch(
+        let handle = try await launch(
             runID: request.runID,
             sessionID: request.session.id,
             session: session,
@@ -102,16 +184,18 @@ public actor ClaudeAgentProvider: AgentProviding {
             outputSchema: request.outputSchema,
             utility: false
         )
-        session.hasStarted = true
-        sessions[request.session.id] = session
+        if sessions[request.session.id]?.generation == session.generation {
+            session.hasStarted = true
+            sessions[request.session.id] = session
+        }
         return handle
     }
 
-    public func steer(runID: UUID, message: String) throws {
+    public func steer(runID: UUID, message: String) async throws {
         guard let run = activeRuns[runID] else {
             throw AgentProviderError.missingRun(runID)
         }
-        try write(
+        try await write(
             .object([
                 "type": .string("user"),
                 "session_id": .string(run.sessionID),
@@ -127,13 +211,13 @@ public actor ClaudeAgentProvider: AgentProviding {
         )
     }
 
-    public func interrupt(runID: UUID) throws {
+    public func interrupt(runID: UUID) async throws {
         guard var run = activeRuns[runID] else {
             throw AgentProviderError.missingRun(runID)
         }
         run.interruptRequested = true
         activeRuns[runID] = run
-        try write(
+        try await write(
             .object([
                 "type": .string("control_request"),
                 "request_id": .string("codeness-interrupt-\(UUID().uuidString.lowercased())"),
@@ -144,17 +228,25 @@ public actor ClaudeAgentProvider: AgentProviding {
             ]),
             runID: runID
         )
+        if let currentRun = activeRuns[runID],
+           currentRun.generation == run.generation,
+           !currentRun.terminalDelivered,
+           !currentRun.teardownRequested {
+            armInterruptWatchdog(runID: runID, generation: run.generation)
+        }
     }
 
     public func resolveInteraction(
         runID: UUID,
         interactionID: String,
         resolution: AgentInteractionResolution
-    ) throws {
-        guard let run = activeRuns[runID],
-              let interaction = run.interactions[interactionID] else {
+    ) async throws {
+        guard var run = activeRuns[runID],
+              let interaction = run.interactions.removeValue(forKey: interactionID) else {
             throw AgentProviderError.missingRun(runID)
         }
+        run.claimedInteractionRetainedByteCounts[interactionID] = interaction.retainedByteCount
+        activeRuns[runID] = run
 
         var response: JSONValue
         switch resolution {
@@ -179,7 +271,7 @@ public actor ClaudeAgentProvider: AgentProviding {
             for: interaction.subtype
         )
 
-        try write(
+        try await write(
             .object([
                 "type": .string("control_response"),
                 "response": .object([
@@ -190,8 +282,10 @@ public actor ClaudeAgentProvider: AgentProviding {
             ]),
             runID: runID
         )
-        if var updatedRun = activeRuns[runID] {
-            updatedRun.interactions.removeValue(forKey: interactionID)
+        if var updatedRun = activeRuns[runID],
+           let retainedByteCount = updatedRun.claimedInteractionRetainedByteCounts
+            .removeValue(forKey: interactionID) {
+            updatedRun.interactionRetainedByteCount -= retainedByteCount
             activeRuns[runID] = updatedRun
         }
     }
@@ -203,12 +297,13 @@ public actor ClaudeAgentProvider: AgentProviding {
         let runID = UUID()
         let sessionID = UUID().uuidString.lowercased()
         let session = SessionConfiguration(
+            generation: 0,
             name: "Codeness coordinator",
             cwd: request.cwd,
             developerInstructions: request.developerInstructions,
             hasStarted: false
         )
-        let handle = try launch(
+        let handle = try await launch(
             runID: runID,
             sessionID: sessionID,
             session: session,
@@ -218,37 +313,110 @@ public actor ClaudeAgentProvider: AgentProviding {
             outputSchema: request.outputSchema,
             utility: true
         )
-        for await event in handle.events {
-            switch event {
-            case .completed(let output, _, let usage):
-                return AgentUtilityResult(output: output, tokenUsage: usage)
-            case .failed(let detail):
-                throw AgentProviderError.invalidResponse(detail)
-            case .sessionUnavailable(let detail):
-                throw AgentProviderError.invalidResponse(detail)
-            case .interrupted(let detail):
+        do {
+            let result = try await withTaskCancellationHandler {
+                for await event in handle.events {
+                    try Task.checkCancellation()
+                    switch event {
+                    case .completed(let output, _, let usage):
+                        return AgentUtilityResult(output: output, tokenUsage: usage)
+                    case .failed(let detail):
+                        throw AgentProviderError.invalidResponse(detail)
+                    case .sessionUnavailable(let detail):
+                        throw AgentProviderError.invalidResponse(detail)
+                    case .interrupted(let detail):
+                        throw AgentProviderError.invalidResponse(
+                            detail ?? "The Claude coordinator run was interrupted."
+                        )
+                    case .started, .transcript, .diagnostic, .tokenUsage, .interaction,
+                         .interactionResolved:
+                        continue
+                    }
+                }
+                try Task.checkCancellation()
                 throw AgentProviderError.invalidResponse(
-                    detail ?? "The Claude coordinator run was interrupted."
+                    "the Claude coordinator run ended without a result"
                 )
-            case .started, .transcript, .diagnostic, .tokenUsage, .interaction,
-                 .interactionResolved:
-                continue
+            } onCancel: {
+                Task {
+                    _ = await self.terminateRunAndWait(
+                        runID: runID,
+                        terminalEvent: nil,
+                        allowNaturalExitFirst: false
+                    )
+                }
             }
+            guard await waitForRunCleanup(runID: runID) else {
+                throw AgentProviderError.resourceLimit(
+                    "Claude returned a utility result, but Codeness could not verify that its isolated process group exited."
+                )
+            }
+            try Task.checkCancellation()
+            return result
+        } catch {
+            if Task.isCancelled {
+                _ = await terminateRunAndWait(
+                    runID: runID,
+                    terminalEvent: nil,
+                    allowNaturalExitFirst: false
+                )
+                throw CancellationError()
+            }
+            _ = await waitForRunCleanup(runID: runID)
+            throw error
         }
-        throw AgentProviderError.invalidResponse("the Claude coordinator run ended without a result")
     }
 
-    public func shutdown() {
-        for runID in Array(activeRuns.keys) {
-            guard let run = activeRuns[runID] else { continue }
-            if run.process.isRunning {
-                run.process.terminate()
+    @discardableResult
+    public func releaseSession(id sessionID: String) async -> Bool {
+        if let activeRun = activeRuns.first(where: { $0.value.sessionID == sessionID }) {
+            guard activeRun.value.terminalDelivered || activeRun.value.teardownRequested else {
+                return false
             }
-            if !run.terminalDelivered {
-                run.continuation.yield(.failed("Claude stopped."))
+            let releaseGeneration = activeRun.value.sessionGeneration
+            pendingSessionReleases[sessionID] = releaseGeneration
+            guard await waitForRunCleanup(runID: activeRun.key) else { return false }
+            guard pendingSessionReleases[sessionID] == releaseGeneration else {
+                return true
             }
-            cleanup(runID: runID)
+            if sessions[sessionID]?.generation == releaseGeneration {
+                sessions.removeValue(forKey: sessionID)
+            }
+            pendingSessionReleases.removeValue(forKey: sessionID)
+            return true
         }
+        sessions.removeValue(forKey: sessionID)
+        pendingSessionReleases.removeValue(forKey: sessionID)
+        // A missing local session is equivalent to Claude already being
+        // detached: there is no remote subscription to clean up for the CLI.
+        return true
+    }
+
+    public func shutdown() async {
+        _ = await shutdownAndVerify()
+    }
+
+    @discardableResult
+    public func shutdownAndVerify() async -> Bool {
+        isShuttingDown = true
+        let runIDs = Array(activeRuns.keys)
+        for runID in runIDs {
+            var attempt = 0
+            while activeRuns[runID] != nil, attempt < 3 {
+                await beginTeardown(
+                    runID: runID,
+                    terminalEvent: attempt == 0 ? .failed("Claude stopped.") : nil,
+                    allowNaturalExitFirst: false
+                )
+                attempt += 1
+                if await waitForRunCleanup(runID: runID) { break }
+            }
+        }
+        return activeRuns.isEmpty
+    }
+
+    func forceTeardownFailureForTesting(_ detail: String?) {
+        testingTeardownFailure = detail
     }
 
     private func launch(
@@ -260,48 +428,104 @@ public actor ClaudeAgentProvider: AgentProviding {
         target: AgentTarget,
         outputSchema: JSONValue?,
         utility: Bool
-    ) throws -> AgentRunHandle {
+    ) async throws -> AgentRunHandle {
+        guard !isShuttingDown else {
+            throw AgentProviderError.resourceLimit("Claude is shutting down.")
+        }
         guard activeRuns[runID] == nil else {
             throw AgentProviderError.invalidSession("run \(runID.uuidString) is already active")
+        }
+        if let existingRunID = sessionRuns[sessionID],
+           let existingRun = activeRuns[existingRunID],
+           existingRun.terminalDelivered || existingRun.teardownRequested {
+            guard await waitForRunCleanup(runID: existingRunID) else {
+                throw AgentProviderError.resourceLimit(
+                    "Claude session \(sessionID) finished its turn, but Codeness could not verify that its isolated process group exited. Reuse is blocked to prevent overlapping processes."
+                )
+            }
+        }
+        if !utility, sessions[sessionID]?.generation != session.generation {
+            throw AgentProviderError.invalidSession(
+                "Claude session \(sessionID) was reconfigured while its next run was waiting to launch. Retry with the current session configuration."
+            )
+        }
+        guard !isShuttingDown else {
+            throw AgentProviderError.resourceLimit("Claude is shutting down.")
+        }
+        guard sessionRuns[sessionID] == nil else {
+            throw AgentProviderError.invalidSession(
+                "Claude session \(sessionID) already has an active run."
+            )
+        }
+        if let debt = activeRuns.values.first(where: { $0.teardownFailure != nil }) {
+            throw AgentProviderError.resourceLimit(
+                debt.teardownFailure
+                    ?? "A Claude process group could not be verified as stopped."
+            )
+        }
+        guard activeRuns.count < maximumActiveProcessCount else {
+            throw AgentProviderError.resourceLimit(
+                "Claude already has \(activeRuns.count) active Codeness process(es); the safety limit is \(maximumActiveProcessCount). Wait for an active step to finish or stop it before starting more work."
+            )
         }
         guard !target.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AgentProviderError.invalidResponse("the Claude model is empty")
         }
 
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let error = Pipe()
-        process.executableURL = executableURL
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
-        process.environment = environment
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
-        process.arguments = arguments(
-            sessionID: sessionID,
-            session: session,
-            target: target,
-            outputSchema: outputSchema,
-            utility: utility
+        let process = try AppServerProcess.launch(configuration:
+            SupervisedProcessLaunchConfiguration(
+                executableURL: executableURL,
+                arguments: arguments(
+                    sessionID: sessionID,
+                    session: session,
+                    target: target,
+                    outputSchema: outputSchema,
+                    utility: utility
+                ),
+                environment: environment,
+                currentDirectoryURL: URL(fileURLWithPath: cwd, isDirectory: true)
+            )
+        )
+        nextProcessGeneration &+= 1
+        let generation = nextProcessGeneration
+        let inputWriter = OrderedPipeWriter(
+            fileDescriptor: process.inputFileDescriptor,
+            generation: generation
+        )
+        let outputReader = BoundedPipeReader(
+            fileDescriptor: process.outputFileDescriptor,
+            label: "ap.codeness.claude.stdout.\(runID.uuidString)",
+            qos: .userInitiated
+        )
+        let errorReader = BoundedPipeReader(
+            fileDescriptor: process.errorFileDescriptor,
+            label: "ap.codeness.claude.stderr.\(runID.uuidString)",
+            qos: .utility
+        )
+        let events = BoundedAsyncChannel<AgentEvent>(
+            capacity: eventBufferCapacity,
+            maximumRetainedCost: maximumEventBufferRetainedBytes,
+            retainedCost: Self.retainedCost(of:)
         )
 
-        let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
         activeRuns[runID] = ActiveRun(
             sessionID: sessionID,
             process: process,
-            input: input,
-            output: output,
-            error: error,
-            continuation: pair.continuation,
+            inputWriter: inputWriter,
+            outputReader: outputReader,
+            errorReader: errorReader,
+            events: events,
             startedAt: ContinuousClock().now,
+            generation: generation,
+            sessionGeneration: session.generation,
             resumedSession: session.hasStarted,
             didStart: false,
-            outputReaderTask: nil,
-            errorReaderTask: nil,
             outputBuffer: Data(),
-            stderrTail: "",
+            outputScanOffset: 0,
+            stderrTail: Data(),
             interactions: [:],
+            claimedInteractionRetainedByteCounts: [:],
+            interactionRetainedByteCount: 0,
             latestUsage: nil,
             latestAssistantText: nil,
             emittedTextHeading: false,
@@ -310,41 +534,30 @@ public actor ClaudeAgentProvider: AgentProviding {
             terminalDelivered: false,
             interruptRequested: false,
             termination: nil,
-            outputReachedEOF: false
+            outputReachedEOF: false,
+            errorReachedEOF: false,
+            teardownRequested: false,
+            teardownFailure: nil
         )
-        process.terminationHandler = { [weak self] process in
-            let termination = SubprocessTermination(process: process)
-            Task {
-                await self?.processTerminated(
-                    runID: runID,
-                    termination: termination
-                )
-            }
+        sessionRuns[sessionID] = runID
+        outputReader.start { [weak self] data in
+            await self?.consumeOutput(data, runID: runID)
+        } reachedEOF: { [weak self] in
+            await self?.outputEOF(runID: runID)
         }
+        errorReader.start { [weak self] data in
+            await self?.emitStandardError(data, runID: runID)
+        } reachedEOF: { [weak self] in
+            await self?.standardErrorEOF(runID: runID)
+        }
+        processWaitTasks[runID] = Self.makeProcessWaiter(
+            process: process,
+            runID: runID,
+            provider: self
+        )
 
         do {
-            try process.run()
-            try? input.fileHandleForReading.close()
-            try? output.fileHandleForWriting.close()
-            try? error.fileHandleForWriting.close()
-
-            let outputTask = Self.makeOutputReader(
-                handle: output.fileHandleForReading,
-                runID: runID,
-                provider: self
-            )
-            let errorTask = Self.makeErrorReader(
-                handle: error.fileHandleForReading,
-                runID: runID,
-                provider: self
-            )
-            if var run = activeRuns[runID] {
-                run.outputReaderTask = outputTask
-                run.errorReaderTask = errorTask
-                activeRuns[runID] = run
-            }
-
-            try write(
+            try await write(
                 .object([
                     "type": .string("control_request"),
                     "request_id": .string("codeness-initialize-\(UUID().uuidString.lowercased())"),
@@ -357,7 +570,14 @@ public actor ClaudeAgentProvider: AgentProviding {
                 ]),
                 runID: runID
             )
-            try write(
+            guard let currentRun = activeRuns[runID],
+                  currentRun.generation == generation,
+                  !currentRun.interruptRequested,
+                  !currentRun.teardownRequested,
+                  !currentRun.terminalDelivered else {
+                throw CancellationError()
+            }
+            try await write(
                 .object([
                     "type": .string("user"),
                     "session_id": .string(sessionID),
@@ -372,10 +592,11 @@ public actor ClaudeAgentProvider: AgentProviding {
                 runID: runID
             )
         } catch {
-            if process.isRunning {
-                process.terminate()
-            }
-            cleanup(runID: runID)
+            _ = await terminateRunAndWait(
+                runID: runID,
+                terminalEvent: nil,
+                allowNaturalExitFirst: false
+            )
             throw error
         }
 
@@ -384,7 +605,12 @@ public actor ClaudeAgentProvider: AgentProviding {
             providerID: id,
             sessionID: sessionID,
             executionID: nil,
-            events: pair.stream
+            events: events.stream(
+                cancelChannelOnConsumerCancellation: true,
+                onConsumerCancellation: { [weak self] in
+                    await self?.runEventConsumerCancelled(runID: runID)
+                }
+            )
         )
     }
 
@@ -441,42 +667,115 @@ public actor ClaudeAgentProvider: AgentProviding {
         return result
     }
 
-    private func write(_ message: JSONValue, runID: UUID) throws {
-        guard let run = activeRuns[runID], run.process.isRunning else {
+    private func write(_ message: JSONValue, runID: UUID) async throws {
+        guard let run = activeRuns[runID], !run.teardownRequested else {
             throw AgentProviderError.missingRun(runID)
         }
         var data = try message.encodedData()
         data.append(0x0A)
-        try run.input.fileHandleForWriting.write(contentsOf: data)
+        let token = UUID()
+        defer { run.inputWriter.forget(token: token) }
+        do {
+            let result = try await Self.raceStdinWrite(
+                data: data,
+                writer: run.inputWriter,
+                token: token,
+                timeout: stdinWriteTimeout
+            )
+            if result == .deadline {
+                throw ClaudeStdinWriteTimeoutError(timeout: stdinWriteTimeout)
+            }
+        } catch {
+            scheduleTeardown(
+                runID: runID,
+                terminalEvent: .failed(
+                    "Codeness could not write to Claude: \(error.localizedDescription)"
+                ),
+                allowNaturalExitFirst: false
+            )
+            throw error
+        }
     }
 
-    private func consumeOutput(_ data: Data, runID: UUID) {
+    private func consumeOutput(_ data: Data, runID: UUID) async {
         guard var run = activeRuns[runID] else { return }
+        let maximumTransientByteCount = Self.maximumOutputBufferByteCount
+            + Self.maximumOutputReadLookaheadByteCount
+        guard data.count <= Self.maximumOutputReadLookaheadByteCount,
+              run.outputBuffer.count
+                <= maximumTransientByteCount - data.count else {
+            let retainedByteCount = run.outputBuffer.count + data.count
+            run.outputBuffer.removeAll(keepingCapacity: false)
+            run.outputScanOffset = 0
+            activeRuns[runID] = run
+            await failRunForOutputLimit(
+                runID: runID,
+                retainedByteCount: retainedByteCount
+            )
+            return
+        }
         run.outputBuffer.append(data)
-        while let newline = run.outputBuffer.firstIndex(of: 0x0A) {
+        while run.outputScanOffset < run.outputBuffer.count {
+            let searchStart = run.outputBuffer.index(
+                run.outputBuffer.startIndex,
+                offsetBy: run.outputScanOffset
+            )
+            guard let newline = run.outputBuffer[searchStart...].firstIndex(of: 0x0A) else {
+                run.outputScanOffset = run.outputBuffer.count
+                break
+            }
+            let lineByteCount = run.outputBuffer.distance(
+                from: run.outputBuffer.startIndex,
+                to: newline
+            )
+            guard lineByteCount <= Self.maximumOutputBufferByteCount else {
+                run.outputBuffer.removeAll(keepingCapacity: false)
+                run.outputScanOffset = 0
+                activeRuns[runID] = run
+                await failRunForOutputLimit(
+                    runID: runID,
+                    retainedByteCount: lineByteCount
+                )
+                return
+            }
             let line = Data(run.outputBuffer[..<newline])
             run.outputBuffer.removeSubrange(...newline)
+            run.outputScanOffset = 0
             guard !line.isEmpty else { continue }
             activeRuns[runID] = run
-            handleLine(line, runID: runID)
+            await handleLine(line, runID: runID)
             guard let updatedRun = activeRuns[runID] else { return }
             run = updatedRun
+        }
+        guard run.outputBuffer.count <= Self.maximumOutputBufferByteCount else {
+            let retainedByteCount = run.outputBuffer.count
+            run.outputBuffer.removeAll(keepingCapacity: false)
+            run.outputScanOffset = 0
+            activeRuns[runID] = run
+            await failRunForOutputLimit(
+                runID: runID,
+                retainedByteCount: retainedByteCount
+            )
+            return
         }
         activeRuns[runID] = run
     }
 
-    private func handleLine(_ data: Data, runID: UUID) {
+    private func handleLine(_ data: Data, runID: UUID) async {
         guard var run = activeRuns[runID] else { return }
         guard let message = try? JSONDecoder().decode(JSONValue.self, from: data) else {
-            let line = String(decoding: data, as: UTF8.self)
-            run.continuation.yield(
-                .diagnostic(transcriptText(
-                    "Invalid Claude JSON: \(line)",
-                    section: .diagnostic,
-                    run: &run
-                ))
+            let previewData = data.prefix(Self.maximumMalformedJSONPreviewByteCount)
+            let preview = String(decoding: previewData, as: UTF8.self)
+            let suffix = data.count > previewData.count
+                ? "\n[preview truncated; malformed line was \(data.count) UTF-8 bytes]"
+                : ""
+            let diagnostic = transcriptText(
+                "Invalid Claude JSON: \(preview)\(suffix)",
+                section: .diagnostic,
+                run: &run
             )
             activeRuns[runID] = run
+            _ = await admit(.diagnostic(diagnostic), runID: runID)
             return
         }
 
@@ -485,33 +784,91 @@ public actor ClaudeAgentProvider: AgentProviding {
             if message["subtype"]?.stringValue == "init" {
                 let executionID = message["session_id"]?.stringValue ?? run.sessionID
                 run.didStart = true
-                run.continuation.yield(.started(executionID: executionID))
+                activeRuns[runID] = run
+                guard await admit(.started(executionID: executionID), runID: runID) else {
+                    return
+                }
+                guard let updatedRun = activeRuns[runID] else { return }
+                run = updatedRun
             }
             // Claude emits transient status messages (currently "requesting")
             // around virtually every tool call. They are transport state, not
             // transcript content, and can arrive without line boundaries.
         case "stream_event":
-            consumeStreamEvent(message["event"] ?? .null, run: &run)
+            activeRuns[runID] = run
+            await consumeStreamEvent(message["event"] ?? .null, runID: runID)
+            guard let updatedRun = activeRuns[runID] else { return }
+            run = updatedRun
         case "assistant":
             if let text = Self.assistantText(message["message"] ?? .null), !text.isEmpty {
                 run.latestAssistantText = text
             }
             if let usage = Self.usage(message["message"]?["usage"]) {
                 run.latestUsage = usage
-                run.continuation.yield(.tokenUsage(usage))
+                activeRuns[runID] = run
+                guard await admit(.tokenUsage(usage), runID: runID) else { return }
+                guard let updatedRun = activeRuns[runID] else { return }
+                run = updatedRun
             }
         case "control_request":
-            if let interaction = Self.controlInteraction(message) {
+            if let interaction = Self.controlInteraction(
+                message,
+                retainedByteCount: data.count
+            ) {
+                guard run.interactions[interaction.control.requestID] == nil,
+                      run.claimedInteractionRetainedByteCounts[
+                        interaction.control.requestID
+                      ] == nil else {
+                    activeRuns[runID] = run
+                    await beginTeardown(
+                        runID: runID,
+                        terminalEvent: .failed(
+                            "Claude reused an unresolved permission request identifier. Codeness stopped the isolated process group instead of allowing a hidden request to replace the visible request."
+                        ),
+                        allowNaturalExitFirst: false
+                    )
+                    return
+                }
+                let pendingCount = run.interactions.count
+                    + run.claimedInteractionRetainedByteCounts.count
+                    + 1
+                let pendingByteCount = run.interactionRetainedByteCount
+                    + interaction.control.retainedByteCount
+                guard pendingCount <= Self.maximumPendingInteractionCount,
+                      pendingByteCount <= Self.maximumPendingInteractionRetainedBytes else {
+                    activeRuns[runID] = run
+                    await beginTeardown(
+                        runID: runID,
+                        terminalEvent: .failed(
+                            "Claude accumulated too many unresolved permission requests. Codeness stopped the isolated process group to prevent unbounded memory growth."
+                        ),
+                        allowNaturalExitFirst: false
+                    )
+                    return
+                }
                 run.interactions[interaction.control.requestID] = interaction.control
-                run.continuation.yield(.interaction(interaction.presentation))
+                run.interactionRetainedByteCount = pendingByteCount
+                activeRuns[runID] = run
+                guard await admit(.interaction(interaction.presentation), runID: runID) else {
+                    return
+                }
+                guard let updatedRun = activeRuns[runID] else { return }
+                run = updatedRun
             }
         case "control_cancel_request":
             if let requestID = message["request_id"]?.stringValue {
-                run.interactions.removeValue(forKey: requestID)
-                run.continuation.yield(.interactionResolved(requestID))
+                if let removed = run.interactions.removeValue(forKey: requestID) {
+                    run.interactionRetainedByteCount -= removed.retainedByteCount
+                }
+                activeRuns[runID] = run
+                guard await admit(.interactionResolved(requestID), runID: runID) else { return }
+                guard let updatedRun = activeRuns[runID] else { return }
+                run = updatedRun
             }
         case "result":
-            consumeResult(message, runID: runID, run: &run)
+            activeRuns[runID] = run
+            await consumeResult(message, runID: runID)
+            return
         case "user", "control_response", "keep_alive":
             break
         default:
@@ -520,7 +877,8 @@ public actor ClaudeAgentProvider: AgentProviding {
         activeRuns[runID] = run
     }
 
-    private func consumeStreamEvent(_ event: JSONValue, run: inout ActiveRun) {
+    private func consumeStreamEvent(_ event: JSONValue, runID: UUID) async {
+        guard var run = activeRuns[runID] else { return }
         switch event["type"]?.stringValue {
         case "content_block_start":
             let block = event["content_block"] ?? .null
@@ -531,7 +889,9 @@ public actor ClaudeAgentProvider: AgentProviding {
                     section: .action,
                     run: &run
                 )
-                run.continuation.yield(.transcript(text))
+                activeRuns[runID] = run
+                _ = await admit(.transcript(text), runID: runID)
+                return
             }
         case "content_block_delta":
             let delta = event["delta"] ?? .null
@@ -540,51 +900,66 @@ public actor ClaudeAgentProvider: AgentProviding {
                 guard let text = delta["text"]?.stringValue, !text.isEmpty else { return }
                 if !run.emittedTextHeading {
                     run.emittedTextHeading = true
-                    run.continuation.yield(
-                        .transcript(transcriptText(
-                            "\n\nClaude\n",
-                            section: .reasoning,
-                            run: &run
-                        ))
-                    )
-                }
-                run.continuation.yield(
-                    .transcript(transcriptText(
-                        text,
+                    let heading = transcriptText(
+                        "\n\nClaude\n",
                         section: .reasoning,
                         run: &run
-                    ))
+                    )
+                    activeRuns[runID] = run
+                    guard await admit(
+                        .transcript(heading),
+                        runID: runID
+                    ) else { return }
+                    guard let updatedRun = activeRuns[runID] else { return }
+                    run = updatedRun
+                }
+                let transcript = transcriptText(
+                    text,
+                    section: .reasoning,
+                    run: &run
                 )
+                activeRuns[runID] = run
+                _ = await admit(.transcript(transcript), runID: runID)
+                return
             case "thinking_delta":
                 guard let text = delta["thinking"]?.stringValue, !text.isEmpty else { return }
                 if !run.emittedThinkingHeading {
                     run.emittedThinkingHeading = true
-                    run.continuation.yield(
-                        .transcript(transcriptText(
-                            "\n\nReasoning\n",
-                            section: .reasoning,
-                            run: &run
-                        ))
-                    )
-                }
-                run.continuation.yield(
-                    .transcript(transcriptText(
-                        text,
+                    let heading = transcriptText(
+                        "\n\nReasoning\n",
                         section: .reasoning,
                         run: &run
-                    ))
+                    )
+                    activeRuns[runID] = run
+                    guard await admit(
+                        .transcript(heading),
+                        runID: runID
+                    ) else { return }
+                    guard let updatedRun = activeRuns[runID] else { return }
+                    run = updatedRun
+                }
+                let transcript = transcriptText(
+                    text,
+                    section: .reasoning,
+                    run: &run
                 )
+                activeRuns[runID] = run
+                _ = await admit(.transcript(transcript), runID: runID)
+                return
             default:
                 break
             }
         case "message_delta":
             if let usage = Self.usage(event["usage"]) {
                 run.latestUsage = usage
-                run.continuation.yield(.tokenUsage(usage))
+                activeRuns[runID] = run
+                _ = await admit(.tokenUsage(usage), runID: runID)
+                return
             }
         default:
             break
         }
+        activeRuns[runID] = run
     }
 
     private func transcriptText(
@@ -597,11 +972,12 @@ public actor ClaudeAgentProvider: AgentProviding {
         return RunTranscriptPresentation.storedText(text, section: section)
     }
 
-    private func consumeResult(_ message: JSONValue, runID: UUID, run: inout ActiveRun) {
+    private func consumeResult(_ message: JSONValue, runID: UUID) async {
+        guard let run = activeRuns[runID] else { return }
         guard !run.terminalDelivered else { return }
-        run.terminalDelivered = true
         let usage = Self.usage(message["usage"]) ?? run.latestUsage
         let duration = message["duration_ms"]?.integerValue
+        let terminalEvent: AgentEvent
         if message["is_error"]?.boolValue == true {
             let errors = message["errors"]?.arrayValue?.compactMap(\.stringValue)
                 .joined(separator: "\n")
@@ -609,15 +985,15 @@ public actor ClaudeAgentProvider: AgentProviding {
                 ? errors
                 : message["result"]?.stringValue
             if run.interruptRequested {
-                run.continuation.yield(.interrupted(detail))
+                terminalEvent = .interrupted(detail)
             } else if run.resumedSession,
                       !run.didStart,
                       Self.confirmsMissingSession(detail ?? "") {
-                run.continuation.yield(
-                    .sessionUnavailable(detail ?? "The Claude session is unavailable.")
+                terminalEvent = .sessionUnavailable(
+                    detail ?? "The Claude session is unavailable."
                 )
             } else {
-                run.continuation.yield(.failed(detail ?? "Claude returned an error result."))
+                terminalEvent = .failed(detail ?? "Claude returned an error result.")
             }
         } else {
             let output = message["result"]?.stringValue
@@ -625,92 +1001,415 @@ public actor ClaudeAgentProvider: AgentProviding {
                 ?? run.latestAssistantText
                 ?? ""
             if output.isEmpty {
-                run.continuation.yield(.failed("Claude completed without a final result."))
+                terminalEvent = .failed("Claude completed without a final result.")
             } else {
-                run.continuation.yield(
-                    .completed(
-                        output: output,
-                        durationMilliseconds: duration,
-                        tokenUsage: usage
-                    )
+                terminalEvent = .completed(
+                    output: output,
+                    durationMilliseconds: duration,
+                    tokenUsage: usage
                 )
             }
         }
-        run.continuation.finish()
-        try? run.input.fileHandleForWriting.close()
+        activeRuns[runID] = run
+        await deliverTerminal(terminalEvent, runID: runID)
     }
 
-    private func emitStandardError(_ text: String, runID: UUID) {
+    private func emitStandardError(_ data: Data, runID: UUID) async {
         guard var run = activeRuns[runID] else { return }
+        run.stderrTail.append(data)
+        if run.stderrTail.count > 4_000 {
+            run.stderrTail = Data(run.stderrTail.suffix(4_000))
+        }
+        let text = String(decoding: data, as: UTF8.self)
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        run.stderrTail = String((run.stderrTail + clean + "\n").suffix(4_000))
-        run.continuation.yield(
-            .diagnostic(transcriptText(
-                "\n\(clean)\n",
-                section: .diagnostic,
-                run: &run
-            ))
+        guard !clean.isEmpty else {
+            activeRuns[runID] = run
+            return
+        }
+        let diagnostic = transcriptText(
+            "\n\(clean)\n",
+            section: .diagnostic,
+            run: &run
         )
         activeRuns[runID] = run
+        _ = await admit(.diagnostic(diagnostic), runID: runID)
     }
 
-    private func outputEOF(runID: UUID) {
+    private func outputEOF(runID: UUID) async {
         guard var run = activeRuns[runID] else { return }
         if !run.outputBuffer.isEmpty {
             let finalLine = run.outputBuffer
-            run.outputBuffer.removeAll(keepingCapacity: true)
+            run.outputBuffer.removeAll(keepingCapacity: false)
+            run.outputScanOffset = 0
             activeRuns[runID] = run
-            handleLine(finalLine, runID: runID)
+            await handleLine(finalLine, runID: runID)
             guard let updated = activeRuns[runID] else { return }
             run = updated
         }
         run.outputReachedEOF = true
         activeRuns[runID] = run
-        finishIfProcessDrained(runID: runID)
+        if run.termination != nil {
+            await beginTeardown(
+                runID: runID,
+                terminalEvent: nil,
+                allowNaturalExitFirst: false
+            )
+        } else if !run.terminalDelivered, !run.teardownRequested {
+            await beginTeardown(
+                runID: runID,
+                // Defer classification until the leader is reaped and stderr
+                // is fully drained; resumed-session errors often arrive there.
+                terminalEvent: nil,
+                allowNaturalExitFirst: false
+            )
+        }
+    }
+
+    private func standardErrorEOF(runID: UUID) {
+        guard var run = activeRuns[runID] else { return }
+        run.errorReachedEOF = true
+        activeRuns[runID] = run
     }
 
     private func processTerminated(
         runID: UUID,
         termination: SubprocessTermination
-    ) {
+    ) async {
         guard var run = activeRuns[runID] else { return }
         run.termination = termination
         activeRuns[runID] = run
-        finishIfProcessDrained(runID: runID)
+        await beginTeardown(
+            runID: runID,
+            terminalEvent: nil,
+            allowNaturalExitFirst: !run.outputReachedEOF
+        )
     }
 
-    private func finishIfProcessDrained(runID: UUID) {
-        guard let run = activeRuns[runID],
-              run.outputReachedEOF,
-              let termination = run.termination else { return }
-        if !run.terminalDelivered {
-            let detail = run.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
-            if run.interruptRequested {
-                run.continuation.yield(.interrupted(detail.isEmpty ? nil : detail))
-            } else if run.resumedSession,
-                      !run.didStart,
-                      Self.confirmsMissingSession(detail) {
-                run.continuation.yield(
-                    .sessionUnavailable(detail)
-                )
-            } else {
-                Self.processLogger.error(
-                    "\(termination.diagnosticDescription(subject: "Claude"), privacy: .public)"
-                )
-                run.continuation.yield(
-                    .failed(
-                        AgentProviderError.processExited(
-                            provider: id,
-                            termination: termination,
-                            detail: detail
-                        ).localizedDescription
-                    )
-                )
-            }
-            run.continuation.finish()
+    private func admit(_ event: AgentEvent, runID: UUID) async -> Bool {
+        guard let events = activeRuns[runID]?.events else { return false }
+        switch await events.trySend(event) {
+        case .accepted:
+            return true
+        case .full:
+            await beginTeardown(
+                runID: runID,
+                terminalEvent: .failed(
+                    "Claude produced more run output than Codeness could retain because this run's event consumer stopped draining. Codeness stopped the isolated process group to prevent unbounded memory growth."
+                ),
+                allowNaturalExitFirst: false
+            )
+            return false
+        case .terminated:
+            await beginTeardown(
+                runID: runID,
+                terminalEvent: nil,
+                allowNaturalExitFirst: false
+            )
+            return false
         }
-        cleanup(runID: runID)
+    }
+
+    private func deliverTerminal(_ event: AgentEvent, runID: UUID) async {
+        guard var run = activeRuns[runID], !run.terminalDelivered else { return }
+        run.terminalDelivered = true
+        activeRuns[runID] = run
+        if !(await run.events.finish(with: event)) {
+            _ = await run.events.finish(with: .failed(
+                "Claude ended the turn, but its final event exceeded Codeness's bounded event limit."
+            ))
+        }
+        await beginTeardown(
+            runID: runID,
+            terminalEvent: nil,
+            allowNaturalExitFirst: true
+        )
+    }
+
+    private func failRunForOutputLimit(runID: UUID, retainedByteCount: Int) async {
+        await beginTeardown(
+            runID: runID,
+            terminalEvent: .failed(
+                "Claude emitted an unterminated JSON line larger than Codeness's 32 MiB safety limit (at least \(retainedByteCount) bytes). Codeness stopped the isolated process group."
+            ),
+            allowNaturalExitFirst: false
+        )
+    }
+
+    private func beginTeardown(
+        runID: UUID,
+        terminalEvent: AgentEvent?,
+        allowNaturalExitFirst: Bool
+    ) async {
+        guard var run = activeRuns[runID] else { return }
+        interruptWatchdogTasks.removeValue(forKey: runID)?.task.cancel()
+        if let terminalEvent, !run.terminalDelivered {
+            run.terminalDelivered = true
+            activeRuns[runID] = run
+            if !(await run.events.finish(with: terminalEvent)) {
+                _ = await run.events.finish(with: .failed(
+                    "Claude stopped, but Codeness could not retain its final event within the bounded event buffer."
+                ))
+            }
+            guard let updatedRun = activeRuns[runID] else { return }
+            run = updatedRun
+        }
+        guard teardownTasks[runID] == nil else { return }
+        run.teardownRequested = true
+        run.teardownFailure = nil
+        run.interactions.removeAll(keepingCapacity: false)
+        run.claimedInteractionRetainedByteCounts.removeAll(keepingCapacity: false)
+        run.interactionRetainedByteCount = 0
+        activeRuns[runID] = run
+        run.inputWriter.close()
+
+        let task = Task { [weak self] in
+            guard let self else { return false }
+            return await self.performVerifiedTeardown(
+                runID: runID,
+                allowNaturalExitFirst: allowNaturalExitFirst
+            )
+        }
+        teardownTasks[runID] = task
+    }
+
+    private func scheduleTeardown(
+        runID: UUID,
+        terminalEvent: AgentEvent?,
+        allowNaturalExitFirst: Bool
+    ) {
+        Task { [weak self] in
+            await self?.beginTeardown(
+                runID: runID,
+                terminalEvent: terminalEvent,
+                allowNaturalExitFirst: allowNaturalExitFirst
+            )
+        }
+    }
+
+    private func performVerifiedTeardown(
+        runID: UUID,
+        allowNaturalExitFirst: Bool
+    ) async -> Bool {
+        guard let process = activeRuns[runID]?.process else { return true }
+        if let testingTeardownFailure {
+            recordTeardownFailure(runID: runID, detail: testingTeardownFailure)
+            return false
+        }
+        if allowNaturalExitFirst {
+            try? await Task.sleep(for: terminalExitGrace)
+        }
+        if process.groupExists {
+            _ = process.signalGroup(SIGTERM)
+            try? await Task.sleep(for: terminationGrace)
+        }
+        if process.groupExists {
+            _ = process.signalGroup(SIGKILL)
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: killVerificationGrace)
+            while process.groupExists, clock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        guard !process.groupExists else {
+            recordTeardownFailure(
+                runID: runID,
+                detail: "SIGKILL did not remove Claude process group \(process.processGroupIdentifier). New Claude work remains blocked to prevent orphan accumulation."
+            )
+            return false
+        }
+
+        let clock = ContinuousClock()
+        let reapDeadline = clock.now.advanced(by: killVerificationGrace)
+        while activeRuns[runID]?.termination == nil, clock.now < reapDeadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard activeRuns[runID]?.termination != nil else {
+            recordTeardownFailure(
+                runID: runID,
+                detail: "Claude process group \(process.processGroupIdentifier) disappeared, but Codeness could not confirm that its leader was reaped. New Claude work remains blocked."
+            )
+            return false
+        }
+
+        let drainDeadline = clock.now.advanced(by: outputDrainGrace)
+        while activeRuns[runID].map({ !$0.outputReachedEOF || !$0.errorReachedEOF }) == true,
+              clock.now < drainDeadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        if activeRuns[runID].map({ !$0.outputReachedEOF || !$0.errorReachedEOF }) == true {
+            await deliverTerminal(
+                .failed(
+                    "Claude exited, but Codeness could not finish draining its bounded stdout/stderr streams before the safety deadline. The isolated process group was stopped."
+                ),
+                runID: runID
+            )
+        }
+
+        guard let run = activeRuns[runID] else { return true }
+        await run.inputWriter.closeAndWait()
+        await run.outputReader.stop(cancelConsumer: true)
+        await run.errorReader.stop(cancelConsumer: true)
+        await completeVerifiedTeardown(runID: runID)
+        return true
+    }
+
+    private func recordTeardownFailure(runID: UUID, detail: String) {
+        guard var run = activeRuns[runID] else { return }
+        run.teardownFailure = detail
+        activeRuns[runID] = run
+        teardownTasks.removeValue(forKey: runID)
+        resolveCleanupWaiters(runID: runID, confirmed: false)
+    }
+
+    private func completeVerifiedTeardown(runID: UUID) async {
+        guard var run = activeRuns[runID] else { return }
+        if !run.terminalDelivered {
+            let terminalEvent = terminalEventForProcessExit(run)
+            run.terminalDelivered = true
+            activeRuns[runID] = run
+            if !(await run.events.finish(with: terminalEvent)) {
+                _ = await run.events.finish(with: .failed(
+                    "Claude exited, but Codeness could not retain its final event within the bounded event buffer."
+                ))
+            }
+        } else {
+            await run.events.finish()
+        }
+
+        guard let removedRun = activeRuns.removeValue(forKey: runID) else { return }
+        if sessionRuns[removedRun.sessionID] == runID {
+            sessionRuns.removeValue(forKey: removedRun.sessionID)
+        }
+        if pendingSessionReleases[removedRun.sessionID] == removedRun.sessionGeneration,
+           !activeRuns.values.contains(where: { $0.sessionID == removedRun.sessionID }) {
+            if sessions[removedRun.sessionID]?.generation == removedRun.sessionGeneration {
+                sessions.removeValue(forKey: removedRun.sessionID)
+            }
+            pendingSessionReleases.removeValue(forKey: removedRun.sessionID)
+        }
+        processWaitTasks.removeValue(forKey: runID)
+        teardownTasks.removeValue(forKey: runID)
+        interruptWatchdogTasks.removeValue(forKey: runID)?.task.cancel()
+        resolveCleanupWaiters(runID: runID, confirmed: true)
+    }
+
+    private func terminalEventForProcessExit(_ run: ActiveRun) -> AgentEvent {
+        let detail = String(decoding: run.stderrTail, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if run.interruptRequested {
+            return .interrupted(detail.isEmpty ? nil : detail)
+        }
+        if run.resumedSession,
+           !run.didStart,
+           Self.confirmsMissingSession(detail) {
+            return .sessionUnavailable(detail)
+        }
+        let termination = run.termination
+            ?? SubprocessTermination(reason: .exit, status: -1)
+        Self.processLogger.error(
+            "\(termination.diagnosticDescription(subject: "Claude"), privacy: .public)"
+        )
+        return .failed(
+            AgentProviderError.processExited(
+                provider: id,
+                termination: termination,
+                detail: detail
+            ).localizedDescription
+        )
+    }
+
+    private func waitForRunCleanup(runID: UUID) async -> Bool {
+        guard activeRuns[runID] != nil else { return true }
+        if activeRuns[runID]?.teardownFailure != nil,
+           teardownTasks[runID] == nil {
+            return false
+        }
+        return await withCheckedContinuation { continuation in
+            if activeRuns[runID] == nil {
+                continuation.resume(returning: true)
+            } else if activeRuns[runID]?.teardownFailure != nil,
+                      teardownTasks[runID] == nil {
+                continuation.resume(returning: false)
+            } else {
+                cleanupWaiters[runID, default: []].append(continuation)
+            }
+        }
+    }
+
+    private func resolveCleanupWaiters(runID: UUID, confirmed: Bool) {
+        let waiters = cleanupWaiters.removeValue(forKey: runID) ?? []
+        waiters.forEach { $0.resume(returning: confirmed) }
+    }
+
+    private func terminateRunAndWait(
+        runID: UUID,
+        terminalEvent: AgentEvent?,
+        allowNaturalExitFirst: Bool
+    ) async -> Bool {
+        await beginTeardown(
+            runID: runID,
+            terminalEvent: terminalEvent,
+            allowNaturalExitFirst: allowNaturalExitFirst
+        )
+        return await waitForRunCleanup(runID: runID)
+    }
+
+    private func runEventConsumerCancelled(runID: UUID) async {
+        _ = await terminateRunAndWait(
+            runID: runID,
+            terminalEvent: nil,
+            allowNaturalExitFirst: false
+        )
+    }
+
+    private func armInterruptWatchdog(runID: UUID, generation: Int64) {
+        guard let run = activeRuns[runID],
+              run.generation == generation,
+              !run.terminalDelivered,
+              !run.teardownRequested else { return }
+        if let watchdog = interruptWatchdogTasks[runID] {
+            guard watchdog.generation != generation else { return }
+            interruptWatchdogTasks.removeValue(forKey: runID)?.task.cancel()
+        }
+        let grace = interruptGrace
+        let token = UUID()
+        let task = Task { [weak self] in
+            do {
+                try await Task.sleep(for: grace)
+            } catch {
+                return
+            }
+            await self?.interruptWatchdogFired(
+                runID: runID,
+                generation: generation,
+                token: token
+            )
+        }
+        interruptWatchdogTasks[runID] = InterruptWatchdog(
+            generation: generation,
+            token: token,
+            task: task
+        )
+    }
+
+    private func interruptWatchdogFired(
+        runID: UUID,
+        generation: Int64,
+        token: UUID
+    ) async {
+        guard interruptWatchdogTasks[runID]?.token == token else { return }
+        interruptWatchdogTasks.removeValue(forKey: runID)
+        guard let run = activeRuns[runID],
+              run.generation == generation,
+              run.interruptRequested,
+              !run.terminalDelivered else { return }
+        await beginTeardown(
+            runID: runID,
+            terminalEvent: .interrupted(
+                "Claude did not stop after accepting the interrupt request; Codeness stopped its isolated process group."
+            ),
+            allowNaturalExitFirst: false
+        )
     }
 
     private static func confirmsMissingSession(_ detail: String) -> Bool {
@@ -719,14 +1418,36 @@ public actor ClaudeAgentProvider: AgentProviding {
         )
     }
 
-    private func cleanup(runID: UUID) {
-        guard let run = activeRuns.removeValue(forKey: runID) else { return }
-        run.outputReaderTask?.cancel()
-        run.errorReaderTask?.cancel()
-        try? run.input.fileHandleForWriting.close()
-        try? run.output.fileHandleForReading.close()
-        try? run.error.fileHandleForReading.close()
-        run.continuation.finish()
+    func activeRunCount() -> Int {
+        activeRuns.count
+    }
+
+    func interruptWatchdogCount() -> Int {
+        interruptWatchdogTasks.count
+    }
+
+    func preparedSessionCount() -> Int {
+        sessions.count
+    }
+
+    func sessionConfigurationSnapshot(
+        id sessionID: String
+    ) -> ClaudeSessionConfigurationSnapshot? {
+        guard let session = sessions[sessionID] else { return nil }
+        return ClaudeSessionConfigurationSnapshot(
+            generation: session.generation,
+            name: session.name,
+            developerInstructions: session.developerInstructions,
+            hasStarted: session.hasStarted
+        )
+    }
+
+    func stderrTailByteCount(runID: UUID) -> Int? {
+        activeRuns[runID]?.stderrTail.count
+    }
+
+    func pendingInteractionCount(runID: UUID) -> Int? {
+        activeRuns[runID]?.interactions.count
     }
 
     private func questionResponse(
@@ -770,19 +1491,27 @@ public actor ClaudeAgentProvider: AgentProviding {
 
     private nonisolated static func usage(_ value: JSONValue?) -> RunTokenUsage? {
         guard let value else { return nil }
-        let input = value["input_tokens"]?.integerValue ?? 0
-        let cached = value["cache_read_input_tokens"]?.integerValue ?? 0
-        let cacheWrite = value["cache_creation_input_tokens"]?.integerValue ?? 0
-        let output = value["output_tokens"]?.integerValue ?? 0
+        let input = max(0, value["input_tokens"]?.integerValue ?? 0)
+        let cached = max(0, value["cache_read_input_tokens"]?.integerValue ?? 0)
+        let cacheWrite = max(0, value["cache_creation_input_tokens"]?.integerValue ?? 0)
+        let output = max(0, value["output_tokens"]?.integerValue ?? 0)
         guard input > 0 || cached > 0 || cacheWrite > 0 || output > 0 else { return nil }
-        let totalInput = input + cached + cacheWrite
+        let totalInput = saturatingTokenSum(
+            saturatingTokenSum(input, cached),
+            cacheWrite
+        )
         return RunTokenUsage(
-            totalTokens: totalInput + output,
+            totalTokens: saturatingTokenSum(totalInput, output),
             inputTokens: totalInput,
             cachedInputTokens: cached,
             cacheWriteInputTokens: cacheWrite,
             outputTokens: output
         )
+    }
+
+    private nonisolated static func saturatingTokenSum(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int64.max : sum
     }
 
     private nonisolated static func assistantText(_ message: JSONValue) -> String? {
@@ -794,7 +1523,8 @@ public actor ClaudeAgentProvider: AgentProviding {
     }
 
     private nonisolated static func controlInteraction(
-        _ message: JSONValue
+        _ message: JSONValue,
+        retainedByteCount: Int
     ) -> (control: ControlInteraction, presentation: AgentInteraction)? {
         guard let requestID = message["request_id"]?.stringValue,
               let request = message["request"],
@@ -814,7 +1544,8 @@ public actor ClaudeAgentProvider: AgentProviding {
                 toolName: toolName,
                 toolUseID: toolUseID,
                 input: input,
-                questions: questions
+                questions: questions,
+                retainedByteCount: retainedByteCount
             )
             if !questions.isEmpty {
                 return (
@@ -884,7 +1615,8 @@ public actor ClaudeAgentProvider: AgentProviding {
                 toolName: nil,
                 toolUseID: nil,
                 input: request["payload"] ?? .object([:]),
-                questions: []
+                questions: [],
+                retainedByteCount: retainedByteCount
             )
             return (
                 control,
@@ -903,7 +1635,8 @@ public actor ClaudeAgentProvider: AgentProviding {
                 toolName: nil,
                 toolUseID: nil,
                 input: request,
-                questions: []
+                questions: [],
+                retainedByteCount: retainedByteCount
             )
             return (
                 control,
@@ -938,58 +1671,132 @@ public actor ClaudeAgentProvider: AgentProviding {
         }
     }
 
-    private nonisolated static func makeOutputReader(
-        handle: FileHandle,
+    private nonisolated static func makeProcessWaiter(
+        process: AppServerProcess,
         runID: UUID,
         provider: ClaudeAgentProvider
     ) -> Task<Void, Never> {
-        let pair = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
-        DispatchQueue(
-            label: "ap.codeness.claude.stdout.\(runID.uuidString)",
-            qos: .userInitiated
-        ).async {
+        Task.detached(priority: .utility) { [weak provider] in
+            var waitStatus: Int32 = 0
+            var result: pid_t
             while true {
-                let data = handle.availableData
-                guard !data.isEmpty else { break }
-                pair.continuation.yield(data)
+                result = unsafe waitpid(process.processIdentifier, &waitStatus, 0)
+                if result == -1, errno == EINTR { continue }
+                break
             }
-            pair.continuation.finish()
-        }
-        return Task { [weak provider] in
-            for await data in pair.stream {
-                guard !Task.isCancelled else { return }
-                await provider?.consumeOutput(data, runID: runID)
+            let termination: SubprocessTermination
+            if result == process.processIdentifier {
+                let signal = waitStatus & 0x7F
+                termination = signal == 0
+                    ? SubprocessTermination(
+                        reason: .exit,
+                        status: (waitStatus >> 8) & 0xFF
+                    )
+                    : SubprocessTermination(reason: .uncaughtSignal, status: signal)
+            } else {
+                termination = SubprocessTermination(reason: .exit, status: -1)
             }
-            guard !Task.isCancelled else { return }
-            await provider?.outputEOF(runID: runID)
+            await provider?.processTerminated(
+                runID: runID,
+                termination: termination
+            )
         }
     }
 
-    private nonisolated static func makeErrorReader(
-        handle: FileHandle,
-        runID: UUID,
-        provider: ClaudeAgentProvider
-    ) -> Task<Void, Never> {
-        let pair = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
-        DispatchQueue(
-            label: "ap.codeness.claude.stderr.\(runID.uuidString)",
-            qos: .utility
-        ).async {
-            while true {
-                let data = handle.availableData
-                guard !data.isEmpty else { break }
-                pair.continuation.yield(data)
+    private nonisolated static func raceStdinWrite(
+        data: sending Data,
+        writer: OrderedPipeWriter,
+        token: UUID,
+        timeout: Duration
+    ) async throws -> StdinWriteRaceResult {
+        let writeData = data
+        return try await withThrowingTaskGroup(of: StdinWriteRaceResult.self) { group in
+            group.addTask {
+                try await writer.write(writeData, token: token)
+                return .completed
             }
-            pair.continuation.finish()
-        }
-        return Task { [weak provider] in
-            for await data in pair.stream {
-                guard !Task.isCancelled else { return }
-                await provider?.emitStandardError(
-                    String(decoding: data, as: UTF8.self),
-                    runID: runID
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                return stdinWriteCompletedAtDeadline(writer.cancel(token: token))
+                    ? .completed
+                    : .deadline
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw AgentProviderError.invalidResponse(
+                    "Claude stdin write ended without a result."
                 )
             }
+            return first
         }
+    }
+
+    nonisolated static func stdinWriteCompletedAtDeadline(
+        _ disposition: OrderedPipeWriter.CancellationDisposition
+    ) -> Bool {
+        if case .completed = disposition { return true }
+        return false
+    }
+
+    private nonisolated static func retainedCost(of event: AgentEvent) -> Int {
+        let structuralOverhead = 256
+        switch event {
+        case .started(let executionID), .interactionResolved(let executionID):
+            return saturatingSum(structuralOverhead, executionID.utf8.count)
+        case .transcript(let text), .diagnostic(let text), .sessionUnavailable(let text),
+             .failed(let text):
+            return saturatingSum(structuralOverhead, text.utf8.count)
+        case .interrupted(let detail):
+            return saturatingSum(structuralOverhead, detail?.utf8.count ?? 0)
+        case .completed(let output, _, _):
+            return saturatingSum(structuralOverhead, output.utf8.count)
+        case .tokenUsage:
+            return structuralOverhead
+        case .interaction(let interaction):
+            var cost = structuralOverhead
+            cost = saturatingSum(cost, interaction.id.utf8.count)
+            cost = saturatingSum(cost, interaction.title.utf8.count)
+            cost = saturatingSum(cost, interaction.detail.utf8.count)
+            cost = saturatingSum(cost, retainedCost(of: interaction.rawParameters))
+            for question in interaction.questions {
+                cost = saturatingSum(cost, question.id.utf8.count)
+                cost = saturatingSum(cost, question.header.utf8.count)
+                cost = saturatingSum(cost, question.question.utf8.count)
+                for option in question.options {
+                    cost = saturatingSum(cost, option.label.utf8.count)
+                    cost = saturatingSum(cost, option.description.utf8.count)
+                }
+            }
+            for decision in interaction.decisions {
+                cost = saturatingSum(cost, decision.id.utf8.count)
+                cost = saturatingSum(cost, decision.label.utf8.count)
+                cost = saturatingSum(cost, decision.explanation.utf8.count)
+                cost = saturatingSum(cost, retainedCost(of: decision.payload))
+            }
+            return cost
+        }
+    }
+
+    private nonisolated static func retainedCost(of value: JSONValue) -> Int {
+        switch value {
+        case .null, .bool, .integer, .number:
+            return 16
+        case .string(let string):
+            return saturatingSum(16, string.utf8.count)
+        case .array(let values):
+            return values.reduce(16) { partial, value in
+                saturatingSum(partial, retainedCost(of: value))
+            }
+        case .object(let object):
+            return object.reduce(16) { partial, entry in
+                let withKey = saturatingSum(partial, entry.key.utf8.count)
+                return saturatingSum(withKey, retainedCost(of: entry.value))
+            }
+        }
+    }
+
+    private nonisolated static func saturatingSum(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
     }
 }

@@ -3,36 +3,12 @@ import Foundation
 public enum ClaudeExecutableInspector {
     public static func models(
         executableURL: URL,
-        environment: [String: String] = CodexExecutableLocator.processEnvironment()
-    ) throws -> [AgentModelDescriptor] {
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        let error = Pipe()
+        environment: [String: String] = CodexExecutableLocator.processEnvironment(),
+        timeout: Duration = .seconds(5),
+        maximumOutputByteCount: Int = 4 * 1_024 * 1_024
+    ) async throws -> [AgentModelDescriptor] {
         var environment = environment
         environment["CLAUDE_CODE_ENTRYPOINT"] = "cli"
-
-        process.executableURL = executableURL
-        process.currentDirectoryURL = FileManager.default.temporaryDirectory
-        process.environment = environment
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
-        process.arguments = [
-            "--print",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--safe-mode",
-            "--permission-mode", "dontAsk",
-            "--tools", "",
-            "--no-session-persistence"
-        ]
-
-        try process.run()
-        try? input.fileHandleForReading.close()
-        try? output.fileHandleForWriting.close()
-        try? error.fileHandleForWriting.close()
 
         let requestID = "codeness-model-catalog"
         var request = try JSONValue.object([
@@ -44,13 +20,37 @@ public enum ClaudeExecutableInspector {
             ])
         ]).encodedData()
         request.append(0x0A)
-        try input.fileHandleForWriting.write(contentsOf: request)
-        try input.fileHandleForWriting.close()
-
-        let outputData = output.fileHandleForReading.readDataToEndOfFile()
-        let errorData = error.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let messages = String(decoding: outputData, as: UTF8.self)
+        let result: BoundedOwnedProcessResult
+        do {
+            result = try await BoundedOwnedProcessRunner.run(
+                configuration: SupervisedProcessLaunchConfiguration(
+                    executableURL: executableURL,
+                    arguments: [
+                        "--print",
+                        "--input-format", "stream-json",
+                        "--output-format", "stream-json",
+                        "--verbose",
+                        "--safe-mode",
+                        "--permission-mode", "dontAsk",
+                        "--tools", "",
+                        "--no-session-persistence"
+                    ],
+                    environment: environment,
+                    currentDirectoryURL: FileManager.default.temporaryDirectory
+                ),
+                standardInput: request,
+                timeout: timeout,
+                maximumStandardOutputByteCount: maximumOutputByteCount,
+                maximumStandardErrorByteCount: maximumOutputByteCount
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw AgentProviderError.invalidResponse(
+                "Claude model discovery failed: \(error.localizedDescription)"
+            )
+        }
+        let messages = String(decoding: result.standardOutput, as: UTF8.self)
             .split(whereSeparator: \.isNewline)
             .compactMap { line in
                 try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
@@ -61,13 +61,12 @@ public enum ClaudeExecutableInspector {
         }
         let models = response?["response"]?["response"]?["models"]?.arrayValue?
             .compactMap(modelDescriptor) ?? []
-        let detail = String(decoding: errorData, as: UTF8.self)
+        let detail = String(decoding: result.standardError, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let termination = SubprocessTermination(process: process)
-        guard termination.succeeded else {
+        guard result.termination.succeeded else {
             throw AgentProviderError.processExited(
                 provider: .claude,
-                termination: termination,
+                termination: result.termination,
                 detail: detail.isEmpty
                     ? "Codeness could not discover its model catalog."
                     : detail

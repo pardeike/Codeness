@@ -32,11 +32,34 @@ public enum AppServerEvent: Sendable, Equatable {
     }
 }
 
+/// An App Server event tagged at transport admission with the isolated process
+/// generation that produced it. Consumers must retain this envelope through
+/// dispatch so a queued event from a stopped generation cannot mutate state
+/// belonging to a replacement process.
+public struct AppServerTransportEvent: Sendable, Equatable {
+    public let generation: Int64
+    public let event: AppServerEvent
+
+    public init(generation: Int64, event: AppServerEvent) {
+        self.generation = generation
+        self.event = event
+    }
+}
+
+public struct AppServerEventRoutingPause: Sendable, Hashable {
+    let identifier: UUID
+
+    init(identifier: UUID) {
+        self.identifier = identifier
+    }
+}
+
 public enum AppServerClientError: LocalizedError, Sendable {
     case alreadyRunning
     case notRunning
     case invalidResponse(String)
     case requestFailed(code: Int64?, message: String)
+    case requestTimedOut(method: String)
     case processExited(SubprocessTermination)
 
     public var errorDescription: String? {
@@ -46,6 +69,8 @@ public enum AppServerClientError: LocalizedError, Sendable {
         case .invalidResponse(let detail): "Codex App Server returned an invalid response: \(detail)"
         case .requestFailed(let code, let message):
             code.map { "Codex App Server request failed (\($0)): \(message)" } ?? "Codex App Server request failed: \(message)"
+        case .requestTimedOut(let method):
+            "Codex App Server did not respond to \(method) before the request deadline."
         case .processExited(let termination):
             termination.userFacingDescription(subject: "Codex App Server")
         }

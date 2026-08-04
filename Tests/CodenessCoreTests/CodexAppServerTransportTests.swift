@@ -30,7 +30,8 @@ struct CodexAppServerTransportTests {
         let stream = await client.events()
         let collectedEvents = Task { () -> [AppServerEvent] in
             var events: [AppServerEvent] = []
-            for await event in stream {
+            for await transportEvent in stream {
+                let event = transportEvent.event
                 events.append(event)
                 if case .exited = event { break }
             }
@@ -76,7 +77,8 @@ struct CodexAppServerTransportTests {
 
         let stream = await client.events()
         let terminationTask = Task { () -> SubprocessTermination? in
-            for await event in stream {
+            for await transportEvent in stream {
+                let event = transportEvent.event
                 if case .exited(let termination) = event {
                     return termination
                 }
@@ -136,6 +138,132 @@ struct CodexAppServerTransportTests {
 
         #expect(threadID == "thread-plan")
         #expect(turnID == "turn-plan")
+        await client.shutdown()
+    }
+
+    @Test
+    func loadedThreadIDsExhaustsEveryPaginationPage() async throws {
+        let fixture = try TransportFixture(script: Self.paginatedLoadedThreadsServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        let identifiers = try await client.loadedThreadIDs()
+        #expect(identifiers == Set(["thread-a", "thread-b", "thread-c"]))
+        await client.shutdown()
+    }
+
+    @Test
+    func loadedThreadIDsRejectsARepeatedPaginationCursor() async throws {
+        let fixture = try TransportFixture(script: Self.repeatedLoadedThreadsCursorServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            _ = try await client.loadedThreadIDs()
+            Issue.record("Expected repeated pagination cursor rejection")
+        } catch {
+            #expect(error.localizedDescription.contains("repeated a pagination cursor"))
+        }
+        await client.shutdown()
+    }
+
+    @Test
+    func loadedThreadIDsRejectsAnOversizedAccumulatedResult() async throws {
+        let fixture = try TransportFixture(script: Self.oversizedLoadedThreadsServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            _ = try await client.loadedThreadIDs()
+            Issue.record("Expected loaded-thread identifier limit rejection")
+        } catch {
+            #expect(error.localizedDescription.contains("4096-identifier safety limit"))
+        }
+        await client.shutdown()
+    }
+
+    @Test
+    func cleansAndListsBackgroundTerminalIdentifiersUsingTheCurrentProtocol() async throws {
+        let fixture = try TransportFixture(script: Self.backgroundTerminalsServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        try await client.cleanBackgroundTerminals(threadID: "thread-background")
+        let identifiers = try await client.backgroundTerminalIDs(
+            threadID: "thread-background"
+        )
+
+        #expect(identifiers == Set(["process-1", "process-2"]))
+        await client.shutdown()
+    }
+
+    @Test
+    func backgroundTerminalIdentifiersRejectMalformedTerminalObjects() async throws {
+        let fixture = try TransportFixture(
+            script: Self.malformedBackgroundTerminalsServer
+        )
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            _ = try await client.backgroundTerminalIDs(threadID: "thread-background")
+            Issue.record("Expected malformed background-terminal rejection")
+        } catch {
+            #expect(error.localizedDescription.contains("invalid terminal"))
+        }
+        await client.shutdown()
+    }
+
+    @Test
+    func deleteThreadRejectsAMalformedSuccessAcknowledgement() async throws {
+        let fixture = try TransportFixture(script: Self.malformedThreadDeleteServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            try await client.deleteThread(id: "thread-delete")
+            Issue.record("Expected malformed thread/delete acknowledgement rejection")
+        } catch {
+            #expect(error.localizedDescription.contains("empty object"))
+        }
+        await client.shutdown()
+    }
+
+    @Test
+    func listModelsRejectsARepeatedPaginationCursor() async throws {
+        let fixture = try TransportFixture(script: Self.repeatedModelsCursorServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            _ = try await client.listModels()
+            Issue.record("Expected repeated model pagination cursor rejection")
+        } catch {
+            #expect(error.localizedDescription.contains("repeated a pagination cursor"))
+        }
+        await client.shutdown()
+    }
+
+    @Test
+    func listModelsRejectsAnOversizedAccumulatedResult() async throws {
+        let fixture = try TransportFixture(script: Self.oversizedModelsServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            _ = try await client.listModels()
+            Issue.record("Expected model limit rejection")
+        } catch {
+            #expect(error.localizedDescription.contains("4096-model safety limit"))
+        }
         await client.shutdown()
     }
 
@@ -273,6 +401,236 @@ for line in sys.stdin:
                 }
             }
         })
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let paginatedLoadedThreadsServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "pagination-fixture"}})
+    elif method == "thread/loaded/list":
+        cursor = message.get("params", {}).get("cursor")
+        if cursor is None:
+            emit({"id": identifier, "result": {"data": ["thread-a", "thread-b"], "nextCursor": "page-2"}})
+        elif cursor == "page-2":
+            emit({"id": identifier, "result": {"data": ["thread-c"], "nextCursor": None}})
+        else:
+            emit({"id": identifier, "error": {"code": -32000, "message": "unexpected cursor"}})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let backgroundTerminalsServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "background-terminal-fixture"}})
+    elif method == "thread/backgroundTerminals/clean":
+        assert message.get("params") == {"threadId": "thread-background"}
+        emit({"id": identifier, "result": {}})
+    elif method == "thread/backgroundTerminals/list":
+        params = message.get("params")
+        assert params.get("threadId") == "thread-background"
+        assert params.get("limit") == 256
+        cursor = params.get("cursor")
+        if cursor is None:
+            emit({"id": identifier, "result": {"data": [{
+                "processId": "process-1",
+                "itemId": "item-1",
+                "command": "sleep 1",
+                "cwd": "/tmp",
+                "osPid": 123,
+                "rssKb": 456,
+                "cpuPercent": 1.25
+            }], "nextCursor": "terminal-page-2"}})
+        elif cursor == "terminal-page-2":
+            emit({"id": identifier, "result": {"data": [{
+                "processId": "process-2",
+                "itemId": "item-2",
+                "command": "sleep 2",
+                "cwd": "/tmp",
+                "osPid": None,
+                "rssKb": None,
+                "cpuPercent": None
+            }], "nextCursor": None}})
+        else:
+            emit({"id": identifier, "error": {"code": -32000, "message": "unexpected cursor"}})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let malformedBackgroundTerminalsServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "background-terminal-fixture"}})
+    elif method == "thread/backgroundTerminals/list":
+        emit({"id": identifier, "result": {"data": [{
+            "processId": "process-1",
+            "itemId": "item-1",
+            "command": "sleep 1"
+        }]}})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let malformedThreadDeleteServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "thread-delete-fixture"}})
+    elif method == "thread/delete":
+        emit({"id": identifier, "result": None})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let repeatedLoadedThreadsCursorServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "repeated-cursor-fixture"}})
+    elif method == "thread/loaded/list":
+        cursor = message.get("params", {}).get("cursor")
+        data = ["thread-a"] if cursor is None else ["thread-b"]
+        emit({"id": identifier, "result": {"data": data, "nextCursor": "stuck"}})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let oversizedLoadedThreadsServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "oversized-loaded-fixture"}})
+    elif method == "thread/loaded/list":
+        emit({"id": identifier, "result": {"data": ["thread-" + str(index) for index in range(4097)]}})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let repeatedModelsCursorServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+def model(identifier):
+    return {
+        "id": identifier,
+        "model": identifier,
+        "displayName": identifier,
+        "description": "Fixture",
+        "defaultReasoningEffort": "high",
+        "supportedReasoningEfforts": [
+            {"reasoningEffort": "high", "description": "High"}
+        ],
+        "hidden": False,
+        "isDefault": False
+    }
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "repeated-model-cursor-fixture"}})
+    elif method == "model/list":
+        cursor = message.get("params", {}).get("cursor")
+        data = [model("model-a")] if cursor is None else [model("model-b")]
+        emit({"id": identifier, "result": {"data": data, "nextCursor": "stuck"}})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let oversizedModelsServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+def model(identifier):
+    return {
+        "id": identifier,
+        "model": identifier,
+        "displayName": identifier,
+        "description": "Fixture",
+        "defaultReasoningEffort": "high",
+        "supportedReasoningEfforts": [
+            {"reasoningEffort": "high", "description": "High"}
+        ],
+        "hidden": False,
+        "isDefault": False
+    }
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "oversized-models-fixture"}})
+    elif method == "model/list":
+        emit({"id": identifier, "result": {"data": [model("model-" + str(index)) for index in range(4097)]}})
     elif identifier is not None:
         emit({"id": identifier, "result": {}})
 """#

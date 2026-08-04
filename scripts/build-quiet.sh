@@ -10,6 +10,55 @@ staged_path=""
 backup_path=""
 install_verified=false
 
+verify_release_signature() {
+  local app_path="$1"
+  local signature_details
+  local entitlements_file
+  local apple_events
+  local get_task_allow
+
+  signature_details="$(codesign --display --verbose=4 "$app_path" 2>&1)"
+  if [[ "$signature_details" != *"Authority=Developer ID Application:"* ]]; then
+    printf '%s is not signed by a Developer ID Application authority.\n' "$app_path" >&2
+    return 1
+  fi
+  if [[ "$signature_details" != *"Identifier=ap.codeness"* ]]; then
+    printf '%s has an unexpected code-signing identifier.\n' "$app_path" >&2
+    return 1
+  fi
+  if [[ "$signature_details" != *"TeamIdentifier=W65292CD8T"* ]]; then
+    printf '%s has an unexpected code-signing Team ID.\n' "$app_path" >&2
+    return 1
+  fi
+
+  entitlements_file="$(mktemp "${TMPDIR:-/tmp}/codeness-entitlements.XXXXXX")"
+  if ! codesign --display --entitlements :- "$app_path" \
+    >"$entitlements_file" 2>/dev/null; then
+    rm -f "$entitlements_file"
+    printf 'Could not inspect entitlements for %s.\n' "$app_path" >&2
+    return 1
+  fi
+  apple_events="$(
+    /usr/libexec/PlistBuddy \
+      -c 'Print :com.apple.security.automation.apple-events' \
+      "$entitlements_file" 2>/dev/null || true
+  )"
+  get_task_allow="$(
+    /usr/libexec/PlistBuddy \
+      -c 'Print :com.apple.security.get-task-allow' \
+      "$entitlements_file" 2>/dev/null || true
+  )"
+  rm -f "$entitlements_file"
+  if [[ "$apple_events" != "true" ]]; then
+    printf '%s is missing the Apple Events automation entitlement.\n' "$app_path" >&2
+    return 1
+  fi
+  if [[ "$get_task_allow" == "true" ]]; then
+    printf '%s unexpectedly allows debugger attachment in Release.\n' "$app_path" >&2
+    return 1
+  fi
+}
+
 cleanup() {
   if [[ "$install_verified" != true && -n "$staging_root" && -d "$staging_root" ]]; then
     if [[ -n "$backup_path" && -e "$backup_path" ]]; then
@@ -44,6 +93,7 @@ if [[ ! -d "$product_path" ]]; then
   exit 1
 fi
 codesign --verify --deep --strict "$product_path"
+verify_release_signature "$product_path"
 
 staging_root="$(mktemp -d /Applications/.Codeness-install.XXXXXX)"
 staged_path="$staging_root/Codeness.app"
@@ -64,6 +114,7 @@ if ! codesign --verify --deep --strict "$install_path"; then
   printf 'Installed Codeness failed code-signature verification.\n' >&2
   exit 1
 fi
+verify_release_signature "$install_path"
 
 bundle_identifier="$(plutil -extract CFBundleIdentifier raw "$install_path/Contents/Info.plist")"
 if [[ "$bundle_identifier" != "ap.codeness" ]]; then

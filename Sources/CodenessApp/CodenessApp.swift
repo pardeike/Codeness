@@ -31,6 +31,13 @@ private struct RepositoryWindowCommands: Commands {
             Button("About Codeness") {
                 appDelegate.showAbout()
             }
+
+            Divider()
+
+            Button("Check Permissions…") {
+                appDelegate.showPermissionPreflight()
+            }
+            .help("Review Codeness permission status without requesting access")
         }
 
         CommandGroup(replacing: .newItem) {

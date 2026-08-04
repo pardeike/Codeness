@@ -60,9 +60,11 @@ public enum JSONValue: Codable, Sendable, Equatable {
 
     public var integerValue: Int64? {
         switch self {
-        case .integer(let value): value
-        case .number(let value): Int64(value)
-        default: nil
+        case .integer(let value): return value
+        case .number(let value):
+            guard value.isFinite else { return nil }
+            return Int64(exactly: value)
+        default: return nil
         }
     }
 

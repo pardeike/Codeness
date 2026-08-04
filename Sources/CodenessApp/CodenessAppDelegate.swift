@@ -4,6 +4,8 @@ import SwiftUI
 
 @MainActor
 final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
+    private static let systemTerminationGracePeriod: Duration = .seconds(5)
+
     private static var isRunningUnitTests: Bool {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
@@ -17,6 +19,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
     private var terminationPanel: NSPanel?
     private weak var terminationParentWindow: NSWindow?
     private var aboutWindowController: AboutWindowController?
+    private var permissionPreflightWindowController: PermissionPreflightWindowController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         windowManager = RepositoryWindowManager(
@@ -41,6 +44,10 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        permissionPreflightWindowController?.refreshIfVisible()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -108,6 +115,13 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
         }
         aboutWindow.makeKeyAndOrderFront(nil)
         NSApp.activate()
+    }
+
+    func showPermissionPreflight() {
+        if permissionPreflightWindowController == nil {
+            permissionPreflightWindowController = PermissionPreflightWindowController()
+        }
+        permissionPreflightWindowController?.present()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -210,7 +224,16 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
 
             let pauseTasks = coordinatorsToPause.map { coordinator in
                 Task { @MainActor in
-                    await coordinator.prepareForClose(strategy: .graceful)
+                    await Self.prepareForTermination(
+                        systemInitiated: resumeAfterSystemTermination,
+                        gracePeriod: Self.systemTerminationGracePeriod,
+                        graceful: {
+                            await coordinator.prepareForClose(strategy: .graceful)
+                        },
+                        immediate: {
+                            await coordinator.interruptCloseWait()
+                        }
+                    )
                 }
             }
             var failureMessages: [String] = []
@@ -227,7 +250,8 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
             guard await applicationModel.shutdown() else {
                 cancelTermination(
                     sender,
-                    message: "Could not save every repository before shutting down the agent providers."
+                    message: applicationModel.applicationError
+                        ?? "Could not save every repository before shutting down the agent providers."
                 )
                 return
             }
@@ -247,6 +271,35 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
                 sender.terminate(nil)
             }
         }
+    }
+
+    /// System logout/restart does not present the progress panel's manual
+    /// "Stop Remaining Now" control. Give a coherent pause a bounded head
+    /// start, then invoke that same immediate interruption path. The original
+    /// close preparation remains the single waiter and completes after the
+    /// provider's bounded terminal confirmation.
+    static func prepareForTermination(
+        systemInitiated: Bool,
+        gracePeriod: Duration,
+        graceful: @escaping @MainActor () async -> DocumentClosePreparationResult,
+        immediate: @escaping @MainActor () async -> Void
+    ) async -> DocumentClosePreparationResult {
+        guard systemInitiated else { return await graceful() }
+        let gracefulTask = Task { @MainActor in
+            await graceful()
+        }
+        let escalationTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: gracePeriod)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await immediate()
+        }
+        let result = await gracefulTask.value
+        escalationTask.cancel()
+        return result
     }
 
     private func cancelTermination(_ sender: NSApplication, message: String) {

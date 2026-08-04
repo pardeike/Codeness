@@ -102,24 +102,56 @@ public struct RunTokenUsage: Codable, Sendable, Equatable {
 
     public func adding(_ other: RunTokenUsage) -> RunTokenUsage {
         RunTokenUsage(
-            totalTokens: totalTokens + other.totalTokens,
-            inputTokens: inputTokens + other.inputTokens,
-            cachedInputTokens: cachedInputTokens + other.cachedInputTokens,
-            cacheWriteInputTokens: cacheWriteInputTokens + other.cacheWriteInputTokens,
-            outputTokens: outputTokens + other.outputTokens,
-            reasoningOutputTokens: reasoningOutputTokens + other.reasoningOutputTokens
+            totalTokens: Self.saturatingAdd(totalTokens, other.totalTokens),
+            inputTokens: Self.saturatingAdd(inputTokens, other.inputTokens),
+            cachedInputTokens: Self.saturatingAdd(
+                cachedInputTokens,
+                other.cachedInputTokens
+            ),
+            cacheWriteInputTokens: Self.saturatingAdd(
+                cacheWriteInputTokens,
+                other.cacheWriteInputTokens
+            ),
+            outputTokens: Self.saturatingAdd(outputTokens, other.outputTokens),
+            reasoningOutputTokens: Self.saturatingAdd(
+                reasoningOutputTokens,
+                other.reasoningOutputTokens
+            )
         )
     }
 
     func subtracting(_ other: RunTokenUsage) -> RunTokenUsage {
         RunTokenUsage(
-            totalTokens: totalTokens - other.totalTokens,
-            inputTokens: inputTokens - other.inputTokens,
-            cachedInputTokens: cachedInputTokens - other.cachedInputTokens,
-            cacheWriteInputTokens: cacheWriteInputTokens - other.cacheWriteInputTokens,
-            outputTokens: outputTokens - other.outputTokens,
-            reasoningOutputTokens: reasoningOutputTokens - other.reasoningOutputTokens
+            totalTokens: Self.clampedSubtract(totalTokens, other.totalTokens),
+            inputTokens: Self.clampedSubtract(inputTokens, other.inputTokens),
+            cachedInputTokens: Self.clampedSubtract(
+                cachedInputTokens,
+                other.cachedInputTokens
+            ),
+            cacheWriteInputTokens: Self.clampedSubtract(
+                cacheWriteInputTokens,
+                other.cacheWriteInputTokens
+            ),
+            outputTokens: Self.clampedSubtract(outputTokens, other.outputTokens),
+            reasoningOutputTokens: Self.clampedSubtract(
+                reasoningOutputTokens,
+                other.reasoningOutputTokens
+            )
         )
+    }
+
+    private static func saturatingAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let normalizedLHS = max(lhs, 0)
+        let normalizedRHS = max(rhs, 0)
+        let (sum, overflow) = normalizedLHS.addingReportingOverflow(normalizedRHS)
+        return overflow ? Int64.max : sum
+    }
+
+    private static func clampedSubtract(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+        let normalizedLHS = max(lhs, 0)
+        let normalizedRHS = max(rhs, 0)
+        guard normalizedLHS >= normalizedRHS else { return 0 }
+        return normalizedLHS - normalizedRHS
     }
 
     init?(appServerValue value: JSONValue?) {
@@ -708,6 +740,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
     public var stepSessions: [String: WorkflowSessionState]
     public let createdAt: Date
     public var completedAt: Date?
+    public var providerSessionsDetachedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -725,7 +758,8 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         workflowResumeCheckpoint: WorkflowResumeCheckpoint? = nil,
         stepSessions: [String: WorkflowSessionState] = [:],
         createdAt: Date = .now,
-        completedAt: Date? = nil
+        completedAt: Date? = nil,
+        providerSessionsDetachedAt: Date? = nil
     ) {
         self.id = id
         self.goal = goal
@@ -743,6 +777,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         self.stepSessions = stepSessions
         self.createdAt = createdAt
         self.completedAt = completedAt
+        self.providerSessionsDetachedAt = providerSessionsDetachedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -762,6 +797,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         case stepSessions
         case createdAt
         case completedAt
+        case providerSessionsDetachedAt
     }
 
     public init(from decoder: any Decoder) throws {
@@ -797,6 +833,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         ) ?? [:]
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
         completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+        providerSessionsDetachedAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .providerSessionsDetachedAt
+        )
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -821,6 +861,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         }
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        try container.encodeIfPresent(
+            providerSessionsDetachedAt,
+            forKey: .providerSessionsDetachedAt
+        )
     }
 }
 
