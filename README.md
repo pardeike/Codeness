@@ -51,7 +51,7 @@ To run Codeness:
   - `codex` 0.145.0 or newer, with App Server support
   - Claude Code 2.1.220 or newer
 
-To build Codeness from source, you also need Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer. The canonical Release install additionally requires a Developer ID Application certificate for team `W65292CD8T`.
+To build Codeness from source, you also need Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer. The canonical Release install additionally requires a Developer ID Application certificate for team `W65292CD8T` and a `notarytool` Keychain profile. The default profile is `brrainz-notary`.
 
 Codeness uses the existing authentication of each CLI. New configurable workflows do not require separate OpenAI API credentials.
 
@@ -80,7 +80,9 @@ cd Codeness
 open /Applications/Codeness.app
 ```
 
-The build script generates the Xcode project, creates and verifies a Developer ID-signed Release build with its Apple Events entitlement, and installs it at `/Applications/Codeness.app`. Debug builds continue to use development signing. The generated `.xcodeproj` is intentionally ignored; project settings live in `project.yml`.
+The build script generates the Xcode project, creates a hardened Release build with its Apple Events entitlement, re-signs it with the Keychain's Developer ID and a trusted timestamp, submits it to Apple's notary service, staples the accepted ticket, verifies it with Gatekeeper, and then installs it at `/Applications/Codeness.app`. The installed app is replaced only after all pre-installation checks pass. Debug builds continue to use development signing. The generated `.xcodeproj` is intentionally ignored; project settings live in `project.yml`.
+
+Use `CODENESS_CODESIGN_IDENTITY` to select a different Developer ID identity and `CODENESS_NOTARY_PROFILE` to select a different saved `notarytool` profile. If either item lives outside the user's Keychain search list, provide its Keychain path through `CODENESS_CODESIGN_KEYCHAIN` or `CODENESS_NOTARY_KEYCHAIN`. Credentials and Keychain passwords are never stored in the repository or passed on the command line.
 
 ### Run your first workflow
 
