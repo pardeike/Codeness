@@ -251,6 +251,61 @@ struct AppServerIntegrationTests {
         await client.shutdown()
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func codexUtilityFailsAndCancelsWhenItRequestsUserInteraction() async throws {
+        let fixture = try LifecycleAppServerFixture()
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        let provider = CodexAgentProvider(appServer: client)
+        let stream = await client.events()
+        let consumer = Task {
+            for await transportEvent in stream {
+                await provider.receive(transportEvent.event)
+            }
+        }
+        defer { consumer.cancel() }
+        try await client.start(configuration: fixture.configuration)
+        let utility = Task {
+            try await provider.runUtility(AgentUtilityRequest(
+                cwd: "/tmp/repository",
+                prompt: "hold",
+                target: AgentTarget(
+                    providerID: .codex,
+                    model: "gpt-5.6-sol",
+                    options: AgentExecutionOptions(effort: "high")
+                ),
+                developerInstructions: "Coordinate.",
+                outputSchema: .object(["type": .string("object")])
+            ))
+        }
+        for _ in 0..<100 {
+            if fixture.loggedMethods().contains("turn/start") { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        await provider.receive(.request(
+            id: .integer(41),
+            method: "item/tool/requestUserInput",
+            params: .object([
+                "threadId": .string("utility-1"),
+                "turnId": .string("turn-1"),
+                "questions": .array([])
+            ]),
+            rawLine: "utility interaction"
+        ))
+
+        do {
+            _ = try await utility.value
+            Issue.record("Expected the unattended utility interaction to fail")
+        } catch {
+            #expect(error.localizedDescription.contains("unattended coordinator run"))
+        }
+        let methods = fixture.loggedMethods()
+        #expect(methods.filter { $0 == "turn/interrupt" }.count == 1)
+        #expect(methods.filter { $0 == "thread/delete" }.count == 1)
+        await client.shutdown()
+    }
+
     @Test
     func codexProviderDeletesTemporaryUtilityThreadWhenRunSetupFails() async throws {
         let fixture = try LifecycleAppServerFixture()

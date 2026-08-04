@@ -59,6 +59,7 @@ public actor ClaudeAgentProvider: AgentProviding {
         let generation: Int64
         let sessionGeneration: Int64
         let resumedSession: Bool
+        let utility: Bool
         var didStart: Bool
         var outputBuffer: Data
         var outputScanOffset: Int
@@ -519,6 +520,7 @@ public actor ClaudeAgentProvider: AgentProviding {
             generation: generation,
             sessionGeneration: session.generation,
             resumedSession: session.hasStarted,
+            utility: utility,
             didStart: false,
             outputBuffer: Data(),
             outputScanOffset: 0,
@@ -815,6 +817,17 @@ public actor ClaudeAgentProvider: AgentProviding {
                 message,
                 retainedByteCount: data.count
             ) {
+                if run.utility {
+                    activeRuns[runID] = run
+                    await beginTeardown(
+                        runID: runID,
+                        terminalEvent: .failed(
+                            "Claude requested user interaction during an unattended coordinator run. Codeness stopped the isolated process group instead of waiting for a dialog that cannot be presented."
+                        ),
+                        allowNaturalExitFirst: false
+                    )
+                    return
+                }
                 guard run.interactions[interaction.control.requestID] == nil,
                       run.claimedInteractionRetainedByteCounts[
                         interaction.control.requestID

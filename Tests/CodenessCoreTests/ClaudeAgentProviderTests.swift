@@ -1350,6 +1350,35 @@ struct ClaudeAgentProviderTests {
     }
 
     @Test(.timeLimit(.minutes(1)))
+    func utilityInteractionFailsInsteadOfWaitingWithoutAConsumer() async throws {
+        let fixture = try ClaudeCLIFixture(unresolvedInteractionCount: 1)
+        defer { fixture.remove() }
+        let provider = ClaudeAgentProvider(
+            executableURL: fixture.executableURL,
+            environment: fixture.environment,
+            outputDrainGrace: .seconds(2),
+            terminationGrace: .milliseconds(60),
+            killVerificationGrace: .seconds(2),
+            stdinWriteTimeout: .seconds(1)
+        )
+
+        do {
+            _ = try await provider.runUtility(AgentUtilityRequest(
+                cwd: fixture.directory.path,
+                prompt: "Request input that an unattended utility cannot answer.",
+                target: AgentTarget(providerID: .claude, model: "sonnet"),
+                developerInstructions: "Coordinate without edits.",
+                outputSchema: .object(["type": .string("object")])
+            ))
+            Issue.record("Expected the unattended utility interaction to fail")
+        } catch {
+            #expect(error.localizedDescription.contains("unattended coordinator run"))
+        }
+        #expect(await provider.activeRunCount() == 0)
+        await provider.shutdown()
+    }
+
+    @Test(.timeLimit(.minutes(1)))
     func stderrTailIsBoundedByUTF8BytesForPathologicalCombiningMarks() async throws {
         let fixture = try ClaudeCLIFixture(stderrCombiningChunkCount: 100)
         defer { fixture.remove() }

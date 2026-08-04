@@ -1041,6 +1041,14 @@ public actor CodexAgentProvider: AgentProviding {
                 }
                 return
             }
+            if utilityRunSessions[runID] != nil {
+                await failRunAndCancel(
+                    runID: runID,
+                    run: run,
+                    detail: "Codex requested user interaction during an unattended coordinator run. Codeness cancelled the temporary turn instead of waiting for a dialog that cannot be presented."
+                )
+                return
+            }
             let interactionID = requestID.encodedString()
             guard run.interactionRequests[interactionID] == nil,
                   run.claimedInteractionRequests[interactionID] == nil,
