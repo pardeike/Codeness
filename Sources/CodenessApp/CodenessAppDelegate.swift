@@ -132,20 +132,12 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
         let activeCoordinators = applicationModel.activeCoordinators
         let isSystemTermination = ApplicationTerminationPolicy.isCurrentTerminationSystemInitiated
         guard !activeCoordinators.isEmpty else {
-            finishTermination(
-                sender,
-                coordinatorsToPause: [],
-                resumeAfterSystemTermination: false
-            )
+            finishTermination(sender)
             return .terminateLater
         }
 
         if isSystemTermination {
-            finishTermination(
-                sender,
-                coordinatorsToPause: activeCoordinators,
-                resumeAfterSystemTermination: true
-            )
+            finishTermination(sender, systemInitiated: true)
             return .terminateLater
         }
 
@@ -207,13 +199,12 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
             panel.center()
             panel.makeKeyAndOrderFront(nil)
         }
-        finishTermination(sender, coordinatorsToPause: coordinators)
+        finishTermination(sender)
     }
 
     private func finishTermination(
         _ sender: NSApplication,
-        coordinatorsToPause: [RepositoryCoordinator],
-        resumeAfterSystemTermination: Bool = false
+        systemInitiated: Bool = false
     ) {
         Task { [weak self] in
             guard let self else { return }
@@ -229,7 +220,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
             let pauseTasks = coordinatorsToPrepare.map { coordinator in
                 Task { @MainActor in
                     await Self.prepareForTermination(
-                        systemInitiated: resumeAfterSystemTermination,
+                        systemInitiated: systemInitiated,
                         gracePeriod: Self.systemTerminationGracePeriod,
                         graceful: {
                             await coordinator.prepareForClose(strategy: .graceful)
@@ -258,11 +249,6 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
                         ?? "Could not shut down every agent provider."
                 )
                 return
-            }
-            if resumeAfterSystemTermination {
-                for coordinator in coordinatorsToPause {
-                    _ = await coordinator.armResumeAfterSystemTerminationIfSafe()
-                }
             }
             dismissTerminationPanel()
             terminationWasApproved = true

@@ -512,18 +512,6 @@ final class CodenessApplicationModel {
         try await store.saveRecentRepositoryPaths(paths)
     }
 
-    func resumeAfterSystemTerminationIfNeeded(_ coordinator: RepositoryCoordinator) async {
-        guard coordinator.isLoaded else { return }
-        let shouldResume = await coordinator.consumeResumeAfterSystemTerminationRequest()
-        guard shouldResume else { return }
-        if let workflow = coordinator.record.activity?.workflow {
-            guard canRun(workflow) else { return }
-        } else {
-            guard isReady else { return }
-        }
-        await coordinator.resume()
-    }
-
     @discardableResult
     func restartServer(configuredPath: String) async -> Bool {
         if let pending = providerRestartTasks[.codex] {

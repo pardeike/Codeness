@@ -169,11 +169,10 @@ extension WorkspaceStore {
         let importedViewStateURL = extracted.workspaceDirectory
             .appendingPathComponent("view-state.json")
         if FileManager.default.fileExists(atPath: importedViewStateURL.path) {
-            var viewState = try decoder.decode(
+            let viewState = try decoder.decode(
                 RepositoryViewState.self,
                 from: Data(contentsOf: importedViewStateURL)
             )
-            viewState.resumeAfterSystemTermination = nil
             try encoder.encode(viewState).write(to: importedViewStateURL, options: .atomic)
         }
 

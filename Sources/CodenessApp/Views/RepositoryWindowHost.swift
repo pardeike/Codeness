@@ -3,7 +3,6 @@ import SwiftUI
 
 struct RepositoryWindowHost: View {
     let coordinator: RepositoryCoordinator
-    @Environment(CodenessApplicationModel.self) private var applicationModel
 
     var body: some View {
         Group {
@@ -35,6 +34,5 @@ struct RepositoryWindowHost: View {
 
     private func loadRepository() async {
         await coordinator.load()
-        await applicationModel.resumeAfterSystemTerminationIfNeeded(coordinator)
     }
 }

@@ -1052,33 +1052,6 @@ public final class RepositoryCoordinator {
         }
     }
 
-    /// Persists a one-shot launch request only for checkpoints that can continue
-    /// without inspecting or replaying a possibly interrupted repository change.
-    @discardableResult
-    public func armResumeAfterSystemTerminationIfSafe() async -> Bool {
-        guard hasSafeAutomaticResumeCheckpoint else { return false }
-        viewState.resumeAfterSystemTermination = true
-        guard await flushDocumentState() else {
-            viewState.resumeAfterSystemTermination = nil
-            return false
-        }
-        return true
-    }
-
-    /// Clears the persisted request before returning it so a launch failure cannot
-    /// create an automatic-resume loop. A changed or interrupted checkpoint consumes
-    /// the stale request but remains paused for manual inspection.
-    public func consumeResumeAfterSystemTerminationRequest() async -> Bool {
-        guard viewState.resumeAfterSystemTermination == true else { return false }
-        let shouldResume = hasSafeAutomaticResumeCheckpoint
-        viewState.resumeAfterSystemTermination = nil
-        guard await flushDocumentState() else {
-            viewState.resumeAfterSystemTermination = true
-            return false
-        }
-        return shouldResume
-    }
-
     public func resume() async {
         guard record.activity?.status == .paused,
               !hasUnconfirmedSafetyStop else { return }
@@ -5719,27 +5692,6 @@ public final class RepositoryCoordinator {
         workOverviewSummaryTask = nil
         workOverviewSummaryTaskSignature = nil
         isGeneratingWorkOverviewSummary = false
-    }
-
-    private var hasSafeAutomaticResumeCheckpoint: Bool {
-        guard isLoaded,
-              let activity = record.activity,
-              activity.status == .paused else { return false }
-        if let checkpoint = activity.workflowResumeCheckpoint {
-            switch checkpoint {
-            case .routeCompletedRun, .perform:
-                return true
-            case .recoverRun:
-                return false
-            }
-        }
-        guard let checkpoint = activity.resumeCheckpoint else { return false }
-        switch checkpoint {
-        case .routeCompletedRun, .perform:
-            return true
-        case .recoverRun:
-            return false
-        }
     }
 
     private func cancelRoutingTasks() async {

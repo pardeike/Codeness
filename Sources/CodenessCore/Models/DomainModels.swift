@@ -552,7 +552,6 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
     public var detailPresentation: RunDetailPresentation?
     public var detailSplitFraction: Double?
     public var workOverviewSummary: WorkOverviewSummaryCache?
-    public var resumeAfterSystemTermination: Bool?
 
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -565,8 +564,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         pauseAfterCurrent: Bool = false,
         detailPresentation: RunDetailPresentation? = nil,
         detailSplitFraction: Double? = nil,
-        workOverviewSummary: WorkOverviewSummaryCache? = nil,
-        resumeAfterSystemTermination: Bool? = nil
+        workOverviewSummary: WorkOverviewSummaryCache? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.selectedRunID = selectedRunID
@@ -579,7 +577,6 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         self.detailPresentation = detailPresentation
         self.detailSplitFraction = detailSplitFraction
         self.workOverviewSummary = workOverviewSummary
-        self.resumeAfterSystemTermination = resumeAfterSystemTermination
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -594,7 +591,6 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         case detailPresentation
         case detailSplitFraction
         case workOverviewSummary
-        case resumeAfterSystemTermination
     }
 
     public init(from decoder: any Decoder) throws {
@@ -630,10 +626,6 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         workOverviewSummary = try container.decodeIfPresent(
             WorkOverviewSummaryCache.self,
             forKey: .workOverviewSummary
-        )
-        resumeAfterSystemTermination = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .resumeAfterSystemTermination
         )
     }
 }

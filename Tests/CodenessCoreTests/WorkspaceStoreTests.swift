@@ -1708,7 +1708,8 @@ struct WorkspaceStoreTests {
           "selectedRunID": null,
           "transcriptViewports": [],
           "sidebarVisible": true,
-          "pauseAfterCurrent": false
+          "pauseAfterCurrent": false,
+          "resumeAfterSystemTermination": true
         }
         """
         let viewState = try JSONDecoder().decode(
@@ -1722,8 +1723,9 @@ struct WorkspaceStoreTests {
         #expect(viewState.detailPresentation == nil)
         #expect(viewState.detailSplitFraction == nil)
         #expect(viewState.workOverviewSummary == nil)
-        #expect(viewState.resumeAfterSystemTermination == nil)
         #expect(viewState.runSelectionWasSaved)
+        #expect(!String(decoding: try JSONEncoder().encode(viewState), as: UTF8.self)
+            .contains("resumeAfterSystemTermination"))
     }
 
     @Test
@@ -1892,8 +1894,7 @@ struct WorkspaceStoreTests {
             selectedRunID: run.id,
             windowFrame: StoredWindowFrame(x: 40, y: 50, width: 1_100, height: 720),
             sidebarWidth: 340,
-            pauseAfterCurrent: true,
-            resumeAfterSystemTermination: true
+            pauseAfterCurrent: true
         )
 
         try await store.save(record)
@@ -1956,7 +1957,6 @@ struct WorkspaceStoreTests {
         #expect(loaded.activity?.stepSessions["implement"]?.providerSessionID == nil)
         #expect(loaded.activity?.stepSessions["implement"]?.lineage == 4)
         #expect(importedViewState.windowFrame == viewState.windowFrame)
-        #expect(importedViewState.resumeAfterSystemTermination == nil)
         #expect(transcript == "portable transcript\n")
         #expect(runPayload == RunPayload(prompt: "Implement", finalOutput: nil))
         #expect(FileManager.default.fileExists(

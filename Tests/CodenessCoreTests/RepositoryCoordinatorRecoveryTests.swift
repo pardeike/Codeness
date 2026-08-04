@@ -95,64 +95,18 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
-    func systemTerminationArmsAndConsumesOnlySafeAutomaticResumeCheckpoints() async throws {
+    func safeResumeCheckpointRemainsPausedUntilUserResumes() async throws {
         let completedRun = run(status: .routing, finalOutput: "Completed repository edits")
-        let safeHarness = try await CoordinatorHarness(record: repositoryRecord(
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
             activityStatus: .paused,
             run: completedRun,
             resumeCheckpoint: .routeCompletedRun(completedRun.id)
         ))
-        defer { safeHarness.remove() }
-
-        #expect(await safeHarness.coordinator.armResumeAfterSystemTerminationIfSafe())
-        #expect(safeHarness.coordinator.viewState.resumeAfterSystemTermination == true)
-        let persistedArmedState = try await WorkspaceStore(rootURL: safeHarness.root)
-            .loadViewState(canonicalPath: safeHarness.coordinator.record.canonicalPath)
-        #expect(persistedArmedState.resumeAfterSystemTermination == true)
-        #expect(await safeHarness.coordinator.consumeResumeAfterSystemTerminationRequest())
-        #expect(safeHarness.coordinator.viewState.resumeAfterSystemTermination == nil)
-        let persistedConsumedState = try await WorkspaceStore(rootURL: safeHarness.root)
-            .loadViewState(canonicalPath: safeHarness.coordinator.record.canonicalPath)
-        #expect(persistedConsumedState.resumeAfterSystemTermination == nil)
-        #expect(!(await safeHarness.coordinator.consumeResumeAfterSystemTerminationRequest()))
-
-        let queuedRun = run(status: .completed, finalOutput: "Ready for review")
-        let performHarness = try await CoordinatorHarness(record: repositoryRecord(
-            activityStatus: .paused,
-            run: queuedRun,
-            resumeCheckpoint: .perform(.review)
-        ))
-        defer { performHarness.remove() }
-
-        #expect(await performHarness.coordinator.armResumeAfterSystemTerminationIfSafe())
-
-        let interruptedRun = run(status: .interrupted)
-        let recoveryHarness = try await CoordinatorHarness(record: repositoryRecord(
-            activityStatus: .paused,
-            run: interruptedRun,
-            resumeCheckpoint: .recoverRun(interruptedRun.id)
-        ))
-        defer { recoveryHarness.remove() }
-
-        #expect(!(await recoveryHarness.coordinator.armResumeAfterSystemTerminationIfSafe()))
-        #expect(recoveryHarness.coordinator.viewState.resumeAfterSystemTermination == nil)
-    }
-
-    @Test
-    func staleSystemTerminationRequestIsConsumedWithoutResumingRecovery() async throws {
-        let interruptedRun = run(status: .interrupted)
-        let harness = try await CoordinatorHarness(
-            record: repositoryRecord(
-                activityStatus: .paused,
-                run: interruptedRun,
-                resumeCheckpoint: .recoverRun(interruptedRun.id)
-            ),
-            viewState: RepositoryViewState(resumeAfterSystemTermination: true)
-        )
         defer { harness.remove() }
 
-        #expect(!(await harness.coordinator.consumeResumeAfterSystemTerminationRequest()))
-        #expect(harness.coordinator.viewState.resumeAfterSystemTermination == nil)
+        #expect(harness.coordinator.record.activity?.status == .paused)
+        #expect(harness.coordinator.record.activity?.resumeCheckpoint == .routeCompletedRun(completedRun.id))
+        #expect(harness.coordinator.canResume)
     }
 
     @Test
