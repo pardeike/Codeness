@@ -492,7 +492,8 @@ struct AppServerIntegrationTests {
             canonicalPath: "/tmp/repository",
             appServer: client,
             router: router,
-            store: store
+            store: store,
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         let stream = await client.events()
         let consumer = Task {
@@ -550,7 +551,8 @@ struct AppServerIntegrationTests {
             canonicalPath: "/tmp/repository-goal-change-\(UUID().uuidString)",
             appServer: client,
             router: SequencedTestRouter(),
-            store: WorkspaceStore(rootURL: root)
+            store: WorkspaceStore(rootURL: root),
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         let stream = await client.events()
         let consumer = Task {
@@ -605,7 +607,8 @@ struct AppServerIntegrationTests {
             canonicalPath: "/tmp/repository",
             appServer: client,
             router: SequencedTestRouter(),
-            store: WorkspaceStore(rootURL: root)
+            store: WorkspaceStore(rootURL: root),
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         let stream = await client.events()
         let consumer = Task {
@@ -647,7 +650,8 @@ struct AppServerIntegrationTests {
             canonicalPath: "/tmp/repository",
             appServer: client,
             router: SequencedTestRouter(),
-            store: WorkspaceStore(rootURL: root)
+            store: WorkspaceStore(rootURL: root),
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         let stream = await client.events()
         let consumer = Task {
@@ -692,7 +696,8 @@ struct AppServerIntegrationTests {
             canonicalPath: "/tmp/repository-pre-save-\(UUID().uuidString)",
             appServer: client,
             router: SequencedTestRouter(),
-            store: store
+            store: store,
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         let stream = await client.events()
         let consumer = Task {
@@ -740,7 +745,8 @@ struct AppServerIntegrationTests {
             canonicalPath: "/tmp/repository-initial-save-\(UUID().uuidString)",
             appServer: client,
             router: SequencedTestRouter(),
-            store: store
+            store: store,
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         let stream = await client.events()
         let consumer = Task {
@@ -955,7 +961,8 @@ struct AppServerIntegrationTests {
             canonicalPath: "/tmp/repository-post-save-\(UUID().uuidString)",
             appServer: client,
             router: SequencedTestRouter(),
-            store: store
+            store: store,
+            handoffConfigurationValidator: AcceptingHandoffConfigurationValidator()
         )
         let stream = await client.events()
         let consumer = Task {
