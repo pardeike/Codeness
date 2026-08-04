@@ -107,14 +107,14 @@ struct LegacyCoordinatorLifecycleTests {
         await startTask.value
         #expect(await harness.gate.count(for: "thread/resume") == 1)
         #expect(await harness.gate.count(for: "thread/start") == 0)
-        #expect(await harness.gate.count(for: "thread/unsubscribe") == 2)
+        #expect(await harness.gate.count(for: "thread/unsubscribe") == 0)
         #expect(harness.coordinator.record.implementerThreadID == "saved-implementer")
         #expect(harness.coordinator.record.reviewerThreadID == "saved-reviewer")
         await finishHarness(harness)
     }
 
     @Test
-    func rejectedLegacyResumesPersistFreshIDsBeforeReleasingSupersededSessions() async throws {
+    func rejectedLegacyResumesReplaceIDsWithoutDetachingUnattachedHistory() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let canonicalPath = "/tmp/legacy-resume-replacement-\(UUID().uuidString)"
@@ -142,7 +142,7 @@ struct LegacyCoordinatorLifecycleTests {
 
         #expect(await harness.gate.count(for: "thread/resume") == 2)
         #expect(await harness.gate.count(for: "thread/start") == 2)
-        #expect(await harness.gate.count(for: "thread/unsubscribe") == 2)
+        #expect(await harness.gate.count(for: "thread/unsubscribe") == 0)
         #expect(harness.coordinator.record.implementerThreadID == "thread-1")
         #expect(harness.coordinator.record.reviewerThreadID == "thread-2")
         let persisted = try await store.load(canonicalPath: canonicalPath)
