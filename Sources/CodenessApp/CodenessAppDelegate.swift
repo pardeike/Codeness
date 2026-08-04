@@ -222,7 +222,11 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let pauseTasks = coordinatorsToPause.map { coordinator in
+            // Prepare every open document exactly once. The confirmation UI is
+            // scoped to active work, but paused documents still need their final
+            // save before providers shut down.
+            let coordinatorsToPrepare = applicationModel.allCoordinators
+            let pauseTasks = coordinatorsToPrepare.map { coordinator in
                 Task { @MainActor in
                     await Self.prepareForTermination(
                         systemInitiated: resumeAfterSystemTermination,
@@ -239,7 +243,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
             var failureMessages: [String] = []
             for (index, task) in pauseTasks.enumerated() {
                 if case .failed(let message) = await task.value {
-                    failureMessages.append("\(coordinatorsToPause[index].repositoryName): \(message)")
+                    failureMessages.append("\(coordinatorsToPrepare[index].repositoryName): \(message)")
                 }
             }
             guard failureMessages.isEmpty else {
@@ -247,11 +251,11 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            guard await applicationModel.shutdown() else {
+            guard await applicationModel.shutdown(prepareDocuments: false) else {
                 cancelTermination(
                     sender,
                     message: applicationModel.applicationError
-                        ?? "Could not save every repository before shutting down the agent providers."
+                        ?? "Could not shut down every agent provider."
                 )
                 return
             }

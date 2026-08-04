@@ -167,6 +167,19 @@ struct CodenessApplicationShutdownTests {
         #expect(await OwnedSubprocessSupervisor.resumeLaunching())
     }
 
+    @Test
+    func preparationFailureReportsTheSpecificQuitStage() async {
+        let application = CodenessApplicationModel(
+            testingDocumentPreparationResult: false
+        )
+
+        #expect(!(await application.shutdown()))
+        #expect(
+            application.applicationError
+                == "Could not prepare every repository for Quit."
+        )
+    }
+
     private static func createProbeCleanupDebt(
         fixture: VersionedCodexFixture,
         cleanup: ProbeCleanupResultSwitch

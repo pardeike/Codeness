@@ -948,12 +948,20 @@ final class CodenessApplicationModel {
         intentionalShutdown = true
         if prepareDocuments {
             if testingDocumentPreparationResult == false {
-                return await cancelShutdownAfterPreparationFailure()
+                return await cancelShutdownAfterPreparationFailure(
+                    "Could not prepare every repository for Quit."
+                )
             }
             for coordinator in coordinators.values {
                 let result = await coordinator.prepareForClose(strategy: .immediate)
-                guard result == .ready else {
-                    return await cancelShutdownAfterPreparationFailure()
+                guard case .ready = result else {
+                    let detail: String
+                    if case .failed(let message) = result {
+                        detail = "\(coordinator.repositoryName): \(message)"
+                    } else {
+                        detail = "\(coordinator.repositoryName): Could not prepare this repository for Quit."
+                    }
+                    return await cancelShutdownAfterPreparationFailure(detail)
                 }
             }
         }
@@ -1293,7 +1301,8 @@ final class CodenessApplicationModel {
         }
     }
 
-    private func cancelShutdownAfterPreparationFailure() async -> Bool {
+    private func cancelShutdownAfterPreparationFailure(_ detail: String) async -> Bool {
+        applicationError = detail
         let probesStopped = await OwnedSubprocessSupervisor.shutdownAll()
         await waitForLifecycleOperationToFinish()
         var resumedProbeLaunching = false
@@ -1303,7 +1312,7 @@ final class CodenessApplicationModel {
         if resumedProbeLaunching {
             shutdownFenced = false
         } else {
-            applicationError = Self.probeQuitCleanupFailure
+            applicationError = "\(detail)\n\(Self.probeQuitCleanupFailure)"
         }
         intentionalShutdown = false
         return false
