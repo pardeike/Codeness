@@ -276,6 +276,10 @@ public final class RepositoryCoordinator {
         itemsWithDeltas[runID]?.count ?? 0
     }
 
+    func hasTokenUsageBaseline(for runID: UUID) -> Bool {
+        tokenUsageBaselines[runID] != nil
+    }
+
     var interactionSafetyTerminationCount: Int {
         interactionSafetyTerminatingRunIDs.count
     }
@@ -2328,6 +2332,7 @@ public final class RepositoryCoordinator {
             interactionSafetyTerminatingRunIDs.remove(runID)
             itemsWithDeltas.removeValue(forKey: runID)
             deltaItemRetainedByteCounts.removeValue(forKey: runID)
+            tokenUsageBaselines.removeValue(forKey: runID)
             let turn = params["turn"] ?? .null
             let finalOutput = TranscriptFormatter.finalOutput(from: turn) ?? run(withID: runID)?.finalOutput
             let status = turn["status"]?.stringValue ?? "failed"

@@ -1347,6 +1347,22 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(usage.cachedInputTokens == 480)
         #expect(usage.outputTokens == 30)
         #expect(usage.reasoningOutputTokens == 7)
+        #expect(harness.coordinator.hasTokenUsageBaseline(for: savedRun.id))
+
+        await harness.coordinator.handle(.notification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turn": .object([
+                    "id": .string("turn-1"),
+                    "items": .array([]),
+                    "status": .string("interrupted")
+                ])
+            ]),
+            rawLine: "interrupted"
+        ))
+
+        #expect(!harness.coordinator.hasTokenUsageBaseline(for: savedRun.id))
     }
 
     @Test
