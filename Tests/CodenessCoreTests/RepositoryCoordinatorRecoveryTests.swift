@@ -1683,6 +1683,45 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(harness.coordinator.record.activity?.runs.last?.status == .routing)
     }
 
+    @Test
+    func legacyTerminalClearsAnInteractionTheServerDidNotResolve() async throws {
+        let savedRun = run(status: .running)
+        let harness = try await CoordinatorHarness(record: repositoryRecord(
+            activityStatus: .paused,
+            run: savedRun
+        ))
+        defer { harness.remove() }
+        let requestID = JSONValue.integer(54)
+        await harness.coordinator.handle(.request(
+            id: requestID,
+            method: "item/tool/requestUserInput",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turnId": .string("turn-1"),
+                "questions": .array([])
+            ]),
+            rawLine: "request"
+        ))
+        #expect(harness.coordinator.pendingInteraction?.id == requestID)
+
+        await harness.coordinator.handle(.notification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string("implementer-thread"),
+                "turn": .object([
+                    "id": .string("turn-1"),
+                    "items": .array([]),
+                    "status": .string("interrupted")
+                ])
+            ]),
+            rawLine: "interrupted"
+        ))
+
+        #expect(harness.coordinator.pendingInteraction == nil)
+        #expect(harness.coordinator.pendingInteractionCount == 0)
+        #expect(harness.coordinator.record.activity?.runs.last?.status == .interrupted)
+    }
+
     private func repositoryRecord(
         activityStatus: ActivityStatus,
         run: RunRecord,

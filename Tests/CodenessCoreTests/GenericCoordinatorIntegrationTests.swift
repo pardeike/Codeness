@@ -1320,6 +1320,51 @@ struct GenericCoordinatorIntegrationTests {
     }
 
     @Test
+    func genericTerminalClearsAnInteractionTheProviderDidNotResolve() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = ControllableTerminalProvider()
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-terminal-interaction-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [provider]),
+            workflowRouter: BlockingOnceWorkflowRouter()
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Clear stale interaction state at the provider terminal",
+            workflow: singleStepWorkflow()
+        )
+        try await waitUntil {
+            coordinator.record.activity?.runs.last?.status == .running
+        }
+        await provider.emit(.interaction(AgentInteraction(
+            id: "unresolved-at-terminal",
+            kind: .questions,
+            title: "Question",
+            detail: "This request will be superseded by the terminal.",
+            rawParameters: .object([:])
+        )))
+        try await waitUntil {
+            coordinator.pendingInteractionCount == 1
+                && coordinator.record.activity?.runs.last?.status == .awaitingApproval
+        }
+
+        await provider.emit(.interrupted("Provider stopped"), finish: true)
+        try await waitUntil {
+            coordinator.record.activity?.runs.last?.status == .interrupted
+        }
+
+        #expect(coordinator.pendingInteraction == nil)
+        #expect(coordinator.pendingInteractionCount == 0)
+        #expect(coordinator.record.activity?.status == .paused)
+    }
+
+    @Test
     func closePreparationPreventsFreshFallbackAfterResumedStartFailure() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

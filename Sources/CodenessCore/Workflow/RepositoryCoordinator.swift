@@ -2240,6 +2240,7 @@ public final class RepositoryCoordinator {
                 await finishBackpressuredRunAfterTerminalEvent(runID: runID)
                 return
             }
+            clearPendingInteractions()
         }
 
         if method == "thread/closed" {
@@ -3172,6 +3173,9 @@ public final class RepositoryCoordinator {
                 || (isTerminalEvent && interactionSafetyTerminatingRunIDs.contains(runID))
                 || (isTerminalEvent && transcriptBackpressureRunIDs.contains(runID)) else {
             return
+        }
+        if isTerminalEvent {
+            clearPendingInteractions()
         }
         switch event {
         case .started(let executionID):
