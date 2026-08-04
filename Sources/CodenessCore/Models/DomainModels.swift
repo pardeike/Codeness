@@ -740,7 +740,6 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
     public var stepSessions: [String: WorkflowSessionState]
     public let createdAt: Date
     public var completedAt: Date?
-    public var providerSessionsDetachedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -758,8 +757,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         workflowResumeCheckpoint: WorkflowResumeCheckpoint? = nil,
         stepSessions: [String: WorkflowSessionState] = [:],
         createdAt: Date = .now,
-        completedAt: Date? = nil,
-        providerSessionsDetachedAt: Date? = nil
+        completedAt: Date? = nil
     ) {
         self.id = id
         self.goal = goal
@@ -777,7 +775,6 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         self.stepSessions = stepSessions
         self.createdAt = createdAt
         self.completedAt = completedAt
-        self.providerSessionsDetachedAt = providerSessionsDetachedAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -797,7 +794,6 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         case stepSessions
         case createdAt
         case completedAt
-        case providerSessionsDetachedAt
     }
 
     public init(from decoder: any Decoder) throws {
@@ -833,10 +829,6 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         ) ?? [:]
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
         completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
-        providerSessionsDetachedAt = try container.decodeIfPresent(
-            Date.self,
-            forKey: .providerSessionsDetachedAt
-        )
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -861,10 +853,6 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         }
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
-        try container.encodeIfPresent(
-            providerSessionsDetachedAt,
-            forKey: .providerSessionsDetachedAt
-        )
     }
 }
 

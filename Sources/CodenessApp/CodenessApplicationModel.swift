@@ -852,6 +852,9 @@ final class CodenessApplicationModel {
             return .failedClosed
         }
         guard lifecycleIsCurrent(lease) else { return .failedClosed }
+        for coordinator in coordinators.values {
+            coordinator.providerRestarted(.claude)
+        }
         await agentProviders.unregister(.claude)
         guard lifecycleIsCurrent(lease) else { return .failedClosed }
         claudeProvider = nil

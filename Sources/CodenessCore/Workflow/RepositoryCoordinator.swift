@@ -387,12 +387,12 @@ public final class RepositoryCoordinator {
     private var genericSessionFallbacks: [UUID: GenericSessionFallback] = [:]
     private var providerLaunchLeases: [UUID: UUID] = [:]
     private var providerLaunchWaiters: [CheckedContinuation<Void, Never>] = []
-    private var releasedProviderSessions: Set<ProviderSessionReference> = []
+    /// Sessions attached by this coordinator in the current app process.
+    /// Persisted session IDs are resume handles, not proof of a live attachment.
+    private var attachedProviderSessions: Set<ProviderSessionReference> = []
     private var providerSessionReleaseWaiters: [
         ProviderSessionReference: [CheckedContinuation<Bool, Never>]
     ] = [:]
-    private var completionSessionDetachmentDebt: Set<ProviderSessionReference> = []
-    private var isSavingCompletionSessionDetachmentAcknowledgement = false
 
     public init(
         canonicalPath: String,
@@ -651,10 +651,6 @@ public final class RepositoryCoordinator {
             guard isCurrentLoad(generation) else { return }
             evictTranscripts(except: selectedRunID)
             isLoaded = true
-            if record.activity?.status == .completed,
-               record.activity?.providerSessionsDetachedAt == nil {
-                completionSessionDetachmentDebt.formUnion(providerSessions(in: record))
-            }
             switch record.activity?.status {
             case nil: statusMessage = "Configure this activity"
             case .completed: statusMessage = "Activity complete"
@@ -1908,7 +1904,7 @@ public final class RepositoryCoordinator {
         await cancelRoutingTasks()
 
         let archivedRecord = record
-        let abandonedSessions = providerSessions(in: archivedRecord)
+        let abandonedSessions = attachedProviderSessions
         let restartGoal = previousActivity.pendingGoalAmendment?.revisedGoal
             ?? previousActivity.goal
         let resetRecord = RepositoryRecord(
@@ -2012,58 +2008,27 @@ public final class RepositoryCoordinator {
         }
     }
 
-    private func providerSessions(
-        in record: RepositoryRecord
-    ) -> Set<ProviderSessionReference> {
-        var sessions: Set<ProviderSessionReference> = []
-        if let sessionID = record.implementerThreadID {
-            sessions.insert(ProviderSessionReference(providerID: .codex, sessionID: sessionID))
-        }
-        if let sessionID = record.reviewerThreadID {
-            sessions.insert(ProviderSessionReference(providerID: .codex, sessionID: sessionID))
-        }
-        guard let activity = record.activity else { return sessions }
-        for session in activity.stepSessions.values {
-            if let sessionID = session.providerSessionID {
-                sessions.insert(ProviderSessionReference(
-                    providerID: session.target.providerID,
-                    sessionID: sessionID
-                ))
-            }
-        }
-        for run in activity.runs {
-            guard let sessionID = run.threadID,
-                  let providerID = run.agentTarget?.providerID else { continue }
-            sessions.insert(ProviderSessionReference(
-                providerID: providerID,
-                sessionID: sessionID
-            ))
-        }
-        return sessions
-    }
-
     @discardableResult
     private func releaseProviderSessions(
         _ sessions: some Sequence<ProviderSessionReference>
     ) async -> Set<ProviderSessionReference> {
-        let sessions = Set(sessions).subtracting(releasedProviderSessions)
+        let sessions = Set(sessions).intersection(attachedProviderSessions)
         var released: Set<ProviderSessionReference> = []
         for session in sessions {
             if await releaseProviderSession(session) {
                 released.insert(session)
             }
         }
-        completionSessionDetachmentDebt.subtract(released)
         return released
     }
 
     private func releaseProviderSession(_ session: ProviderSessionReference) async -> Bool {
-        if releasedProviderSessions.contains(session) {
+        if !attachedProviderSessions.contains(session) {
             return true
         }
         if providerSessionReleaseWaiters[session] != nil {
             return await withCheckedContinuation { continuation in
-                if releasedProviderSessions.contains(session) {
+                if !attachedProviderSessions.contains(session) {
                     continuation.resume(returning: true)
                 } else if providerSessionReleaseWaiters[session] != nil {
                     providerSessionReleaseWaiters[session, default: []].append(continuation)
@@ -2094,9 +2059,9 @@ public final class RepositoryCoordinator {
         // An App Server generation boundary can confirm Codex detachment while
         // the unsubscribe request above is suspended. Honor that stronger proof
         // even if the now-defunct request itself resumes with notRunning.
-        let succeeded = attemptSucceeded || releasedProviderSessions.contains(session)
+        let succeeded = attemptSucceeded || !attachedProviderSessions.contains(session)
         if succeeded {
-            releasedProviderSessions.insert(session)
+            attachedProviderSessions.remove(session)
         }
         let waiters = providerSessionReleaseWaiters.removeValue(forKey: session) ?? []
         waiters.forEach { $0.resume(returning: succeeded) }
@@ -2104,7 +2069,7 @@ public final class RepositoryCoordinator {
     }
 
     private func markProviderSessionAttached(_ session: ProviderSessionReference) {
-        releasedProviderSessions.remove(session)
+        attachedProviderSessions.insert(session)
     }
 
     private func unreleasedProviderSessions(
@@ -2112,12 +2077,12 @@ public final class RepositoryCoordinator {
     ) async -> Set<ProviderSessionReference> {
         let requested = Set(sessions)
         _ = await releaseProviderSessions(requested)
-        return requested.subtracting(releasedProviderSessions)
+        return requested.intersection(attachedProviderSessions)
     }
 
     private func detachProviderSessionsForCurrentDocument() async -> Set<ProviderSessionReference> {
         let unreleased = await unreleasedProviderSessions(
-            afterReleasing: providerSessions(in: record)
+            afterReleasing: attachedProviderSessions
         )
         sessionsPrepared = false
         return unreleased
@@ -2184,7 +2149,7 @@ public final class RepositoryCoordinator {
         // bounded termination wait returned without observing cleanup.
         protocolContainment = nil
         clearAllLegacyInterruptionDebts(advanceGeneration: true)
-        markCodexProviderSessionsDetachedByAppServerBoundary()
+        markProviderSessionsDetachedByProcessBoundary(.codex)
         if record.activity?.workflow != nil,
            activeRun?.agentTarget?.providerID != .codex {
             return
@@ -2223,12 +2188,20 @@ public final class RepositoryCoordinator {
         transcriptBackpressureRunIDs.removeAll(keepingCapacity: false)
     }
 
-    private func markCodexProviderSessionsDetachedByAppServerBoundary() {
-        let detached = providerSessions(in: record).filter {
-            $0.providerID == .codex
+    /// A confirmed provider process boundary is stronger proof of detachment
+    /// than an individual release request. Resume IDs remain persisted so the
+    /// replacement provider can reattach them later.
+    public func providerRestarted(_ providerID: AgentProviderID) {
+        markProviderSessionsDetachedByProcessBoundary(providerID)
+    }
+
+    private func markProviderSessionsDetachedByProcessBoundary(
+        _ providerID: AgentProviderID
+    ) {
+        let detached = attachedProviderSessions.filter {
+            $0.providerID == providerID
         }
-        releasedProviderSessions.formUnion(detached)
-        completionSessionDetachmentDebt.subtract(detached)
+        attachedProviderSessions.subtract(detached)
         for session in detached {
             let waiters = providerSessionReleaseWaiters.removeValue(forKey: session) ?? []
             waiters.forEach { $0.resume(returning: true) }
@@ -3577,42 +3550,17 @@ public final class RepositoryCoordinator {
     }
 
     private func persistCompletedActivityAndDetachSessions() async {
-        completionSessionDetachmentDebt.formUnion(providerSessions(in: record))
         do {
             try await persist()
         } catch {
             errorMessage = "The activity completed, but its final state could not be saved: \(error.localizedDescription)"
         }
-    }
-
-    private func retryCompletionSessionDetachmentDebt() async {
-        guard record.activity?.status == .completed,
-              record.activity?.providerSessionsDetachedAt == nil else { return }
-        if !completionSessionDetachmentDebt.isEmpty {
-            _ = await releaseProviderSessions(completionSessionDetachmentDebt)
-        }
-        guard completionSessionDetachmentDebt.isEmpty else { return }
-        guard !isSavingCompletionSessionDetachmentAcknowledgement else { return }
-
+        let unreleasedSessions = await unreleasedProviderSessions(
+            afterReleasing: attachedProviderSessions
+        )
         sessionsPrepared = false
-        let activityID = record.activity?.id
-        let detachedAt = Date.now
-        var acknowledgedRecord = record
-        acknowledgedRecord.activity?.providerSessionsDetachedAt = detachedAt
-        acknowledgedRecord.updatedAt = detachedAt
-        isSavingCompletionSessionDetachmentAcknowledgement = true
-        defer { isSavingCompletionSessionDetachmentAcknowledgement = false }
-        do {
-            // This small acknowledgement is deliberately written without calling
-            // `persist()` again: the provider side effect has already succeeded,
-            // and recursively retrying cleanup would reopen the same operation.
-            try await store.save(workspaceMetadataSnapshot(acknowledgedRecord))
-            if record.activity?.id == activityID {
-                record.activity?.providerSessionsDetachedAt = detachedAt
-                record.updatedAt = detachedAt
-            }
-        } catch {
-            errorMessage = "Provider sessions were detached, but that cleanup acknowledgement could not be saved: \(error.localizedDescription)"
+        if !unreleasedSessions.isEmpty {
+            errorMessage = "The activity completed, but Codeness could not confirm provider-session detachment for \(providerSessionDescription(unreleasedSessions))."
         }
     }
 
@@ -5139,7 +5087,7 @@ public final class RepositoryCoordinator {
         } else {
             protocolContainment = nil
             clearAllLegacyInterruptionDebts(advanceGeneration: true)
-            markCodexProviderSessionsDetachedByAppServerBoundary()
+            markProviderSessionsDetachedByProcessBoundary(.codex)
             clearSafetyStopStateAfterAppServerBoundary()
         }
         if isClosing, containmentConfirmed {
@@ -5582,7 +5530,6 @@ public final class RepositoryCoordinator {
         try await flushPendingTranscripts()
         record.updatedAt = .now
         try await store.save(workspaceMetadataSnapshot(record))
-        await retryCompletionSessionDetachmentDebt()
     }
 
     private func workspaceMetadataSnapshot(_ source: RepositoryRecord) -> RepositoryRecord {

@@ -29,9 +29,6 @@ struct GenericCoordinatorIntegrationTests {
             coordinator.record.activity?.status == .completed
         }
         try await waitUntilReleasedSessions(from: codex, count: 2)
-        try await waitUntil {
-            coordinator.record.activity?.providerSessionsDetachedAt != nil
-        }
 
         let activity = try #require(coordinator.record.activity)
         #expect(activity.runs.map { $0.workflowStep?.name } == [
@@ -104,7 +101,7 @@ struct GenericCoordinatorIntegrationTests {
     }
 
     @Test
-    func completionDetachDebtRetriesAfterALaterSaveWithoutDoubleReleasing() async throws {
+    func completionDetachesRuntimeSessionEvenWhenFinalSaveFails() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -130,7 +127,7 @@ struct GenericCoordinatorIntegrationTests {
                 && coordinator.errorMessage?.contains("final state could not be saved") == true
         }
 
-        #expect((await codex.releasedSessionIDs()).isEmpty)
+        try await waitUntilReleasedSessions(from: codex, count: 1)
         #expect(await coordinator.flushDocumentState())
         #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
 
@@ -173,13 +170,13 @@ struct GenericCoordinatorIntegrationTests {
         await releaseGate.release()
         #expect(await concurrentSave.value)
         try await waitUntil {
-            coordinator.record.activity?.providerSessionsDetachedAt != nil
+            coordinator.record.activity?.status == .completed
         }
         #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
     }
 
     @Test
-    func completedSessionDetachAcknowledgementPreventsReleaseAfterReopen() async throws {
+    func completedSessionIDRemainsResumeMetadataAndIsNotReleasedAfterReopen() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -197,12 +194,10 @@ struct GenericCoordinatorIntegrationTests {
 
         await firstCoordinator.load()
         await firstCoordinator.startActivity(
-            goal: "Persist successful cleanup",
+            goal: "Preserve the completed session identifier",
             workflow: singleStepWorkflow()
         )
-        try await waitUntil {
-            firstCoordinator.record.activity?.providerSessionsDetachedAt != nil
-        }
+        try await waitUntilReleasedSessions(from: firstProvider, count: 1)
         #expect(await firstProvider.releasedSessionIDs() == ["codex-session-1"])
 
         let secondProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
@@ -216,102 +211,101 @@ struct GenericCoordinatorIntegrationTests {
         )
         await reopened.load()
 
-        #expect(reopened.record.activity?.providerSessionsDetachedAt != nil)
+        #expect(
+            reopened.record.activity?.stepSessions["work"]?.providerSessionID
+                == "codex-session-1"
+        )
+        #expect(await reopened.prepareForClose(strategy: .immediate) == .ready)
         #expect((await secondProvider.releasedSessionIDs()).isEmpty)
     }
 
     @Test
-    func failedDetachAcknowledgementRetriesReleaseAfterReopen() async throws {
+    func coldOpenIgnoresHistoricalSessionsFromAnUnavailableProvider() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let canonicalPath = "/tmp/generic-retry-unacknowledged-detach-\(UUID().uuidString)"
-        let baseStore = WorkspaceStore(rootURL: root)
-        let firstProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
-        let firstCoordinator = RepositoryCoordinator(
-            canonicalPath: canonicalPath,
-            appServer: CodexAppServerClient(),
-            router: NoopLegacyRouter(),
-            store: FailingDetachAcknowledgementStore(base: baseStore),
-            agentProviders: AgentProviderRegistry(providers: [firstProvider]),
-            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        let canonicalPath = "/tmp/generic-cold-close-\(UUID().uuidString)"
+        let target = AgentTarget(providerID: .claude, model: "sonnet")
+        let workflow = WorkflowTemplate(
+            id: "historical-claude",
+            name: "Historical Claude",
+            summary: "Cold-close fixture",
+            steps: [step("work", "Work", .loop, target)],
+            coordinator: WorkflowCoordinatorConfiguration(
+                target: target,
+                instructions: "Route results."
+            )
         )
-
-        await firstCoordinator.load()
-        await firstCoordinator.startActivity(
-            goal: "Retry cleanup after an acknowledgement failure",
-            workflow: singleStepWorkflow()
+        let historicalSessionID = "0a9d100a-c721-4c70-b6e8-bbb896753769"
+        let historicalRun = RunRecord(
+            sequence: 1,
+            role: .implementer,
+            kind: .implementation,
+            status: .completed,
+            threadID: historicalSessionID,
+            turnID: "completed-execution",
+            model: target.model,
+            effort: "high",
+            prompt: "Historical work",
+            completedAt: .now,
+            workflowStep: WorkflowStepSnapshot(
+                step: workflow.steps[0],
+                loopIteration: 1
+            ),
+            agentTarget: target,
+            sessionLineage: 1,
+            workflowHandoff: WorkflowHandoff(
+                text: "Continue later.",
+                outcome: .continueWorkflow,
+                runLabel: "Work 1"
+            )
         )
-        try await waitUntil {
-            firstCoordinator.errorMessage?.contains("acknowledgement could not be saved") == true
-        }
-        #expect(await firstProvider.releasedSessionIDs() == ["codex-session-1"])
-        #expect(firstCoordinator.record.activity?.providerSessionsDetachedAt == nil)
-        let unacknowledged = try await baseStore.load(canonicalPath: canonicalPath)
-        #expect(unacknowledged.activity?.providerSessionsDetachedAt == nil)
-
-        let secondProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
-        let reopened = RepositoryCoordinator(
-            canonicalPath: canonicalPath,
-            appServer: CodexAppServerClient(),
-            router: NoopLegacyRouter(),
-            store: baseStore,
-            agentProviders: AgentProviderRegistry(providers: [secondProvider]),
-            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        let activity = ActivityRecord(
+            goal: "Resume the historical workflow later",
+            prompts: .builtInDefaults,
+            status: .paused,
+            runs: [historicalRun],
+            workflow: workflow,
+            workflowCursor: WorkflowCursor(
+                section: .loop,
+                stepIndex: 0,
+                loopIteration: 2
+            ),
+            workflowResumeCheckpoint: .perform(WorkflowCursor(
+                section: .loop,
+                stepIndex: 0,
+                loopIteration: 2
+            )),
+            stepSessions: [
+                "work": WorkflowSessionState(
+                    stepID: "work",
+                    target: target,
+                    providerSessionID: historicalSessionID
+                )
+            ]
         )
-        await reopened.load()
-
-        #expect(await secondProvider.releasedSessionIDs() == ["codex-session-1"])
-        #expect(reopened.record.activity?.providerSessionsDetachedAt != nil)
-    }
-
-    @Test
-    func failedProviderReleaseRemainsDurableAndRetriesAfterReopen() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let canonicalPath = "/tmp/generic-retry-failed-release-\(UUID().uuidString)"
         let store = WorkspaceStore(rootURL: root)
-        let firstProvider = ScriptedAgentProvider(
-            id: .codex,
-            delay: .zero,
-            sessionReleaseResults: [false]
-        )
-        let firstCoordinator = RepositoryCoordinator(
+        try await store.save(RepositoryRecord(
+            canonicalPath: canonicalPath,
+            activity: activity
+        ))
+        let coordinator = RepositoryCoordinator(
             canonicalPath: canonicalPath,
             appServer: CodexAppServerClient(),
             router: NoopLegacyRouter(),
             store: store,
-            agentProviders: AgentProviderRegistry(providers: [firstProvider]),
+            agentProviders: AgentProviderRegistry(),
             workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
         )
 
-        await firstCoordinator.load()
-        await firstCoordinator.startActivity(
-            goal: "Retry a provider release that was not confirmed",
-            workflow: singleStepWorkflow()
-        )
-        try await waitUntilReleasedSessions(from: firstProvider, count: 1)
-        try await waitUntil {
-            firstCoordinator.record.activity?.status == .completed
-        }
-        #expect(firstCoordinator.record.activity?.providerSessionsDetachedAt == nil)
-        let persistedDebt = try await store.load(canonicalPath: canonicalPath)
-        #expect(persistedDebt.activity?.providerSessionsDetachedAt == nil)
+        await coordinator.load()
 
-        let secondProvider = ScriptedAgentProvider(id: .codex, delay: .zero)
-        let reopened = RepositoryCoordinator(
-            canonicalPath: canonicalPath,
-            appServer: CodexAppServerClient(),
-            router: NoopLegacyRouter(),
-            store: store,
-            agentProviders: AgentProviderRegistry(providers: [secondProvider]),
-            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 1)
+        #expect(await coordinator.prepareForClose(strategy: .immediate) == .ready)
+        #expect(
+            coordinator.record.activity?.stepSessions["work"]?.providerSessionID
+                == historicalSessionID
         )
-        await reopened.load()
-
-        #expect(await secondProvider.releasedSessionIDs() == ["codex-session-1"])
-        #expect(reopened.record.activity?.providerSessionsDetachedAt != nil)
+        #expect(coordinator.record.activity?.runs.first?.threadID == historicalSessionID)
     }
 
     @Test
@@ -2121,97 +2115,6 @@ private actor FailingCompletedGenericStore: RepositoryWorkspaceStoring {
 
     func save(_ record: RepositoryRecord) async throws {
         if !hasFailed, record.activity?.status == .completed {
-            hasFailed = true
-            throw GenericStoreFailure()
-        }
-        try await base.save(record)
-    }
-
-    func archiveActivity(_ record: RepositoryRecord) async throws {
-        try await base.archiveActivity(record)
-    }
-
-    func loadViewState(canonicalPath: String) async throws -> RepositoryViewState {
-        try await base.loadViewState(canonicalPath: canonicalPath)
-    }
-
-    func saveViewState(
-        _ state: RepositoryViewState,
-        canonicalPath: String
-    ) async throws {
-        try await base.saveViewState(state, canonicalPath: canonicalPath)
-    }
-
-    func appendRawLine(
-        _ line: String,
-        repositoryPath: String,
-        activityID: UUID,
-        runID: UUID
-    ) async throws {
-        try await base.appendRawLine(
-            line,
-            repositoryPath: repositoryPath,
-            activityID: activityID,
-            runID: runID
-        )
-    }
-
-    func appendTranscript(
-        _ text: String,
-        repositoryPath: String,
-        activityID: UUID,
-        runID: UUID
-    ) async throws {
-        try await base.appendTranscript(
-            text,
-            repositoryPath: repositoryPath,
-            activityID: activityID,
-            runID: runID
-        )
-    }
-
-    func recoveredTranscript(
-        repositoryPath: String,
-        activityID: UUID,
-        runID: UUID
-    ) async throws -> String {
-        try await base.recoveredTranscript(
-            repositoryPath: repositoryPath,
-            activityID: activityID,
-            runID: runID
-        )
-    }
-
-    func recoveredTokenUsage(
-        repositoryPath: String,
-        activityID: UUID,
-        runID: UUID
-    ) async throws -> RunTokenUsage? {
-        try await base.recoveredTokenUsage(
-            repositoryPath: repositoryPath,
-            activityID: activityID,
-            runID: runID
-        )
-    }
-}
-
-private actor FailingDetachAcknowledgementStore: RepositoryWorkspaceStoring {
-    private let base: WorkspaceStore
-    private var hasFailed = false
-
-    init(base: WorkspaceStore) {
-        self.base = base
-    }
-
-    func load(
-        canonicalPath: String,
-        defaultSettings: RepositorySettings
-    ) async throws -> RepositoryRecord {
-        try await base.load(canonicalPath: canonicalPath, defaultSettings: defaultSettings)
-    }
-
-    func save(_ record: RepositoryRecord) async throws {
-        if !hasFailed, record.activity?.providerSessionsDetachedAt != nil {
             hasFailed = true
             throw GenericStoreFailure()
         }
