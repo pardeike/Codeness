@@ -113,6 +113,9 @@ struct RunDetailView: View {
             onViewportChange: { viewport in
                 isAtBottom = viewport.followsOutput
                 coordinator.updateTranscriptViewport(for: run.id, state: viewport)
+            },
+            onUserStoppedFollowing: {
+                coordinator.stopFollowingActiveProgress(for: run.id)
             }
         )
         .accessibilityLabel("Run transcript")

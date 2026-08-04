@@ -4,6 +4,7 @@ import SwiftUI
 
 struct RepositoryWindowView: View {
     @Bindable var coordinator: RepositoryCoordinator
+    let appearanceState: RepositoryWindowAppearanceState
     @Environment(CodenessApplicationModel.self) private var application
     @Environment(RepositoryWindowCommandState.self) private var commandState
     @State private var showsSettings = false
@@ -14,8 +15,12 @@ struct RepositoryWindowView: View {
     @State private var isSendingSteer = false
     @FocusState private var isSteerFieldFocused: Bool
 
-    init(coordinator: RepositoryCoordinator) {
+    init(
+        coordinator: RepositoryCoordinator,
+        appearanceState: RepositoryWindowAppearanceState
+    ) {
         self.coordinator = coordinator
+        self.appearanceState = appearanceState
         _columnVisibility = State(
             initialValue: coordinator.activity == nil
                 ? .detailOnly
@@ -184,7 +189,7 @@ struct RepositoryWindowView: View {
     private var runList: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                List(selection: $coordinator.selectedRunID) {
+                List(selection: runSelectionBinding) {
                     if let activity = coordinator.activity {
                         ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
                             Section {
@@ -216,7 +221,7 @@ struct RepositoryWindowView: View {
                 }
                 .background {
                     ListBackgroundDeselectionBridge {
-                        coordinator.selectedRunID = nil
+                        coordinator.selectRun(nil)
                     }
                 }
                 .modifier(RunListTopEdgeProtection())
@@ -226,15 +231,14 @@ struct RepositoryWindowView: View {
                 }
                 .onChange(of: followedRunID) { _, runID in
                     guard runID != nil else { return }
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(RunListScrollAnchor.bottom, anchor: .bottom)
-                    }
+                    scrollRunListToBottom(using: proxy)
+                }
+                .onChange(of: coordinator.transcriptFollowRequestRevision) {
+                    scrollRunListToBottom(using: proxy)
                 }
                 .onChange(of: workflowControls) {
                     guard followedRunID != nil else { return }
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(RunListScrollAnchor.bottom, anchor: .bottom)
-                    }
+                    scrollRunListToBottom(using: proxy)
                 }
             }
 
@@ -257,20 +261,26 @@ struct RepositoryWindowView: View {
         )
     }
 
+    private var runSelectionBinding: Binding<UUID?> {
+        Binding(
+            get: { coordinator.selectedRunID },
+            set: { coordinator.selectRun($0) }
+        )
+    }
+
+    private func scrollRunListToBottom(using proxy: ScrollViewProxy) {
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(RunListScrollAnchor.bottom, anchor: .bottom)
+            }
+        }
+    }
+
     private var workflowControlBar: some View {
         HStack(spacing: 10) {
             if let transport = workflowControls.transport {
-                Button {
-                    perform(transport)
-                } label: {
-                    Text(transport.buttonTitle)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(transportTint(for: transport))
-                .accessibilityLabel(transport.title)
-                .accessibilityHint(transport.help)
-                .help(transport.help)
+                workflowTransportButton(transport)
             }
 
             if let immediateControl = workflowControls.immediateControl {
@@ -440,11 +450,56 @@ struct RepositoryWindowView: View {
         }
     }
 
+    @ViewBuilder
+    private func workflowTransportButton(_ transport: WorkflowTransportControl) -> some View {
+        if appearanceState.appearsActive {
+            workflowTransportButtonContent(transport)
+                .buttonStyle(
+                    ActiveWorkflowTransportButtonStyle(
+                        tint: transportTint(for: transport)
+                    )
+                )
+        } else {
+            workflowTransportButtonContent(transport)
+                .buttonStyle(.borderedProminent)
+                .tint(transportTint(for: transport))
+        }
+    }
+
+    private func workflowTransportButtonContent(
+        _ transport: WorkflowTransportControl
+    ) -> some View {
+        Button {
+            perform(transport)
+        } label: {
+            Text(transport.buttonTitle)
+                .frame(maxWidth: .infinity)
+        }
+        .accessibilityLabel(transport.title)
+        .accessibilityHint(transport.help)
+        .help(transport.help)
+    }
+
     private func transportTint(for transport: WorkflowTransportControl) -> Color {
         switch transport.emphasis {
         case .caution: .orange
         case .proceed: .green
         }
+    }
+}
+
+private struct ActiveWorkflowTransportButtonStyle: ButtonStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(height: 24)
+            .foregroundStyle(.white)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(tint.opacity(configuration.isPressed ? 0.78 : 1))
+            }
+            .contentShape(Rectangle())
     }
 }
 

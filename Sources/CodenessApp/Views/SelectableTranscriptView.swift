@@ -7,12 +7,14 @@ struct SelectableTranscriptView: NSViewRepresentable {
     let initialViewport: TranscriptViewportState
     let scrollToEndRequest: Int
     let onViewportChange: (TranscriptViewportState) -> Void
+    let onUserStoppedFollowing: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             initialViewport: initialViewport,
             scrollToEndRequest: scrollToEndRequest,
-            onViewportChange: onViewportChange
+            onViewportChange: onViewportChange,
+            onUserStoppedFollowing: onUserStoppedFollowing
         )
     }
 
@@ -50,6 +52,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.onViewportChange = onViewportChange
+        context.coordinator.onUserStoppedFollowing = onUserStoppedFollowing
         context.coordinator.update(
             text: text,
             scrollToEndRequest: scrollToEndRequest,
@@ -62,6 +65,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
         weak var textView: NSTextView?
         weak var scrollView: NSScrollView?
         var onViewportChange: (TranscriptViewportState) -> Void
+        var onUserStoppedFollowing: () -> Void
 
         private var isFollowingOutput = true
         private let initialViewport: TranscriptViewportState
@@ -77,12 +81,14 @@ struct SelectableTranscriptView: NSViewRepresentable {
         init(
             initialViewport: TranscriptViewportState,
             scrollToEndRequest: Int,
-            onViewportChange: @escaping (TranscriptViewportState) -> Void
+            onViewportChange: @escaping (TranscriptViewportState) -> Void,
+            onUserStoppedFollowing: @escaping () -> Void
         ) {
             self.initialViewport = initialViewport
             isFollowingOutput = initialViewport.followsOutput
             lastScrollToEndRequest = scrollToEndRequest
             self.onViewportChange = onViewportChange
+            self.onUserStoppedFollowing = onUserStoppedFollowing
         }
 
         deinit {
@@ -143,6 +149,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
             settleTask?.cancel()
             followRevision &+= 1
             isFollowingOutput = false
+            onUserStoppedFollowing()
             reportViewportState()
         }
 

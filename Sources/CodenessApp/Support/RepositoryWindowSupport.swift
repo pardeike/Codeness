@@ -34,6 +34,24 @@ final class RepositoryWindowCommandState {
 }
 
 @MainActor
+@Observable
+final class RepositoryWindowAppearanceState {
+    private(set) var appearsActive = false
+
+    func update(applicationIsActive: Bool, windowIsKey: Bool) {
+        appearsActive = applicationIsActive && windowIsKey
+    }
+
+    func update(for window: NSWindow?) {
+        update(
+            applicationIsActive: NSApplication.shared.isActive,
+            windowIsKey: window?.isKeyWindow == true
+        )
+    }
+
+}
+
+@MainActor
 final class RepositoryWindowManager {
     private let applicationModel: CodenessApplicationModel
     private let commandState: RepositoryWindowCommandState
@@ -457,8 +475,7 @@ final class RepositoryWindowManager {
         let path = workspaceURL.path
         if let existing = windowControllers[path] {
             if display {
-                existing.showWindow(nil)
-                existing.window?.makeKeyAndOrderFront(nil)
+                existing.present()
             }
             await rememberRecentRepository(workspaceURL)
             return (existing, true)
@@ -469,8 +486,7 @@ final class RepositoryWindowManager {
         // concurrent open requests cannot create duplicate windows for one path.
         if let existing = windowControllers[path] {
             if display {
-                existing.showWindow(nil)
-                existing.window?.makeKeyAndOrderFront(nil)
+                existing.present()
             }
             await rememberRecentRepository(workspaceURL)
             return (existing, true)
@@ -482,8 +498,7 @@ final class RepositoryWindowManager {
         )
         windowControllers[path] = windowController
         if display {
-            windowController.showWindow(nil)
-            windowController.window?.makeKeyAndOrderFront(nil)
+            windowController.present()
         }
         await rememberRecentRepository(workspaceURL)
         persistOpenRepositories()
@@ -609,7 +624,11 @@ final class RepositoryWindowManager {
     ) -> RepositoryWindowController {
         let canonicalPath = repositoryURL.path
         let coordinator = applicationModel.coordinator(for: canonicalPath)
-        let rootView = RepositoryWindowHost(coordinator: coordinator)
+        let appearanceState = RepositoryWindowAppearanceState()
+        let rootView = RepositoryWindowHost(
+            coordinator: coordinator,
+            appearanceState: appearanceState
+        )
             .environment(applicationModel)
             .environment(commandState)
         let hostingController = NSHostingController(rootView: rootView)
@@ -649,6 +668,7 @@ final class RepositoryWindowManager {
             coordinator: coordinator,
             initialWindowFrame: initialWindowFrame,
             commandState: commandState,
+            appearanceState: appearanceState,
             onClose: { [weak self] closedController in
                 self?.repositoryWindowDidClose(closedController)
             }
@@ -728,6 +748,7 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
 
     let coordinator: RepositoryCoordinator
     private let commandState: RepositoryWindowCommandState
+    private let appearanceState: RepositoryWindowAppearanceState
     private let onClose: @MainActor (RepositoryWindowController) -> Void
     private var bypassCloseGuard = false
     private var didClose = false
@@ -742,14 +763,29 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         coordinator: RepositoryCoordinator,
         initialWindowFrame: StoredWindowFrame? = nil,
         commandState: RepositoryWindowCommandState,
+        appearanceState: RepositoryWindowAppearanceState = RepositoryWindowAppearanceState(),
         onClose: @escaping @MainActor (RepositoryWindowController) -> Void
     ) {
         self.coordinator = coordinator
         self.commandState = commandState
+        self.appearanceState = appearanceState
         self.onClose = onClose
         super.init(window: window)
         restoreWindowFrame(initialWindowFrame, display: false)
         window.delegate = self
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationActivationDidChange),
+            name: NSApplication.didBecomeActiveNotification,
+            object: NSApplication.shared
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationActivationDidChange),
+            name: NSApplication.didResignActiveNotification,
+            object: NSApplication.shared
+        )
+        appearanceState.update(for: window)
         loadCompletionTask = Task { @MainActor [weak self] in
             while !coordinator.isLoaded, !Task.isCancelled {
                 if coordinator.errorMessage != nil {
@@ -772,11 +808,22 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
 
     deinit {
         loadCompletionTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
     }
 
     func closeAfterWorkspaceTransferPreparation() {
         bypassCloseGuard = true
         window?.close()
+    }
+
+    func present() {
+        // The hosting controller is created before its window becomes key. Seed
+        // the appearance from the presentation we are about to perform so the
+        // first visible frame does not inherit SwiftUI's inactive startup tint.
+        NSApplication.shared.activate()
+        appearanceState.update(applicationIsActive: true, windowIsKey: true)
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -839,7 +886,16 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         enforceMinimumWindowSize()
         commandState.currentCoordinator = coordinator
+        appearanceState.update(applicationIsActive: true, windowIsKey: true)
         hideDefaultSidebarToolbarItem()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        appearanceState.update(for: window)
+    }
+
+    @objc private func applicationActivationDidChange(_ notification: Notification) {
+        appearanceState.update(for: window)
     }
 
     func windowWillClose(_ notification: Notification) {

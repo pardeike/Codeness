@@ -429,6 +429,84 @@ struct GenericCoordinatorIntegrationTests {
     }
 
     @Test
+    func resumeKeepsFollowingAutomaticStepsAcrossTransientViewportUpdates() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = ScriptedAgentProvider(id: .codex, delay: .milliseconds(120))
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: "/tmp/generic-resume-follow-\(UUID().uuidString)",
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [codex]),
+            workflowRouter: IterationCompletingWorkflowRouter(completionIteration: 3)
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(
+            goal: "Follow the workflow after resuming",
+            workflow: loopWorkflow()
+        )
+        try await waitUntil {
+            coordinator.activeRun?.workflowStep?.id == "review"
+                && coordinator.activeRun?.workflowStep?.loopIteration == 1
+                && coordinator.activeRun?.status == .running
+        }
+        coordinator.setPauseAfterCurrent(true)
+        try await waitUntil {
+            coordinator.record.activity?.status == .paused
+                && coordinator.record.activity?.workflowCursor?.loopIteration == 2
+        }
+
+        let historicalRunID = try #require(coordinator.record.activity?.runs.first?.id)
+        coordinator.selectRun(historicalRunID)
+        coordinator.updateTranscriptViewport(
+            for: historicalRunID,
+            state: TranscriptViewportState(followsOutput: false)
+        )
+
+        await coordinator.resume()
+        try await waitUntil {
+            coordinator.activeRun?.workflowStep?.id == "code"
+                && coordinator.activeRun?.workflowStep?.loopIteration == 2
+                && coordinator.activeRun?.status == .running
+        }
+        let resumedCodeID = try #require(coordinator.activeRun?.id)
+        #expect(coordinator.selectedRunID == resumedCodeID)
+
+        // AppKit can report a transient viewport during the selected-run swap.
+        // That layout callback must not cancel the explicit follow-flow intent
+        // established by Resume; only a real user scroll or history selection does.
+        coordinator.updateTranscriptViewport(
+            for: resumedCodeID,
+            state: TranscriptViewportState(followsOutput: false)
+        )
+        try await waitUntil {
+            coordinator.activeRun?.workflowStep?.id == "review"
+                && coordinator.activeRun?.workflowStep?.loopIteration == 2
+                && coordinator.activeRun?.status == .running
+        }
+
+        let reviewID = try #require(coordinator.activeRun?.id)
+        #expect(coordinator.selectedRunID == reviewID)
+        #expect(coordinator.transcriptViewport(for: reviewID).followsOutput)
+        #expect(coordinator.transcriptFollowRequestRunID == reviewID)
+
+        coordinator.stopFollowingActiveProgress(for: reviewID)
+        try await waitUntil {
+            coordinator.activeRun?.workflowStep?.id == "code"
+                && coordinator.activeRun?.workflowStep?.loopIteration == 3
+                && coordinator.activeRun?.status == .running
+        }
+        #expect(coordinator.selectedRunID == reviewID)
+
+        try await waitUntil {
+            coordinator.record.activity?.status == .completed
+        }
+    }
+
+    @Test
     func changingInstructionsEffortAndSpeedWhilePausedPreservesTheStepLineage() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

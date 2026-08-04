@@ -341,6 +341,7 @@ public final class RepositoryCoordinator {
     private var deltaItemRetainedByteCounts: [UUID: Int] = [:]
     private var tokenUsageBaselines: [UUID: RunTokenUsage] = [:]
     private var runIsAtBottom: [UUID: Bool] = [:]
+    private var followsActiveProgress = false
     private var completingRunIDs: Set<UUID> = []
     private var routingTasks: [UUID: Task<Void, Never>] = [:]
     private var viewStateSaveTask: Task<Void, Never>?
@@ -904,11 +905,27 @@ public final class RepositoryCoordinator {
         focusActiveProgress(on: liveRunID)
     }
 
+    public func selectRun(_ runID: UUID?) {
+        followsActiveProgress = false
+        selectedRunID = runID
+    }
+
+    public func stopFollowingActiveProgress(for runID: UUID) {
+        guard selectedRunID == runID else { return }
+        followsActiveProgress = false
+        runIsAtBottom[runID] = false
+        var viewport = viewState.transcriptViewports[runID] ?? TranscriptViewportState()
+        viewport.followsOutput = false
+        viewState.transcriptViewports[runID] = viewport
+        scheduleViewStateSave()
+    }
+
     private func focusActiveProgress(on requestedRunID: UUID? = nil) {
         guard let runID = requestedRunID
             ?? liveRunID
             ?? record.activity?.runs.last?.id else { return }
 
+        followsActiveProgress = true
         runIsAtBottom[runID] = true
         var viewport = viewState.transcriptViewports[runID] ?? TranscriptViewportState()
         viewport.followsOutput = true
@@ -2594,11 +2611,12 @@ public final class RepositoryCoordinator {
             return
         }
         let previousRunID = record.activity?.runs.last?.id
-        let followsLiveRun = RunSelectionPolicy.shouldSelectNextRun(
-            selectedRunID: selectedRunID,
-            activeRunID: previousRunID,
-            activeRunIsAtBottom: previousRunID.flatMap { runIsAtBottom[$0] }
-        )
+        let followsLiveRun = followsActiveProgress
+            || RunSelectionPolicy.shouldSelectNextRun(
+                selectedRunID: selectedRunID,
+                activeRunID: previousRunID,
+                activeRunIsAtBottom: previousRunID.flatMap { runIsAtBottom[$0] }
+            )
 
         let run = RunRecord(
             sequence: (record.activity?.runs.count ?? 0) + 1,
@@ -2615,7 +2633,7 @@ public final class RepositoryCoordinator {
         record.activity?.runs.append(run)
         runIsAtBottom[run.id] = true
         if followsLiveRun {
-            selectedRunID = run.id
+            focusActiveProgress(on: run.id)
         }
         itemsWithDeltas[run.id] = []
         deltaItemRetainedByteCounts[run.id] = 0
@@ -2842,11 +2860,12 @@ public final class RepositoryCoordinator {
             return
         }
         let previousRunID = record.activity?.runs.last?.id
-        let followsLiveRun = RunSelectionPolicy.shouldSelectNextRun(
-            selectedRunID: selectedRunID,
-            activeRunID: previousRunID,
-            activeRunIsAtBottom: previousRunID.flatMap { runIsAtBottom[$0] }
-        )
+        let followsLiveRun = followsActiveProgress
+            || RunSelectionPolicy.shouldSelectNextRun(
+                selectedRunID: selectedRunID,
+                activeRunID: previousRunID,
+                activeRunIsAtBottom: previousRunID.flatMap { runIsAtBottom[$0] }
+            )
         let compatibility = Self.compatibilityRoleAndKind(for: step)
         var sessionState = record.activity?.stepSessions[step.id]
             ?? WorkflowSessionState(stepID: step.id, target: step.target)
@@ -2873,7 +2892,7 @@ public final class RepositoryCoordinator {
         record.activity?.runs.append(run)
         runIsAtBottom[run.id] = true
         if followsLiveRun {
-            selectedRunID = run.id
+            focusActiveProgress(on: run.id)
         }
         statusMessage = "Starting \(step.name.lowercased())…"
         let launchLeaseID = beginProviderLaunchLease(runID: run.id)

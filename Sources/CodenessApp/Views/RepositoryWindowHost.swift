@@ -3,11 +3,15 @@ import SwiftUI
 
 struct RepositoryWindowHost: View {
     let coordinator: RepositoryCoordinator
+    let appearanceState: RepositoryWindowAppearanceState
 
     var body: some View {
         Group {
             if coordinator.isLoaded {
-                RepositoryWindowView(coordinator: coordinator)
+                RepositoryWindowView(
+                    coordinator: coordinator,
+                    appearanceState: appearanceState
+                )
             } else if let error = coordinator.errorMessage {
                 ContentUnavailableView {
                     Label("Could Not Load Repository", systemImage: "exclamationmark.triangle")
@@ -27,6 +31,7 @@ struct RepositoryWindowHost: View {
                     .help("Codeness is loading this repository's saved activity and transcripts")
             }
         }
+        .environment(\.appearsActive, appearanceState.appearsActive)
         .task(id: coordinator.record.canonicalPath) {
             await loadRepository()
         }

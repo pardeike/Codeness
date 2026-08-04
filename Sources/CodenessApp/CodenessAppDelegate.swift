@@ -53,7 +53,7 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard !Self.isRunningUnitTests else { return true }
         if let windowManager, !windowManager.isEmpty {
-            windowManager.repositoryWindows.forEach { $0.showWindow(nil) }
+            windowManager.repositoryWindows.forEach { $0.present() }
         } else {
             openRepository()
         }
