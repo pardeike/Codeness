@@ -47,7 +47,11 @@ private struct SupervisedProcessSnapshot: Sendable {
 private final class AppServerProcessScope: @unchecked Sendable {
     private static let maximumTrackedProcessCount = 4_096
     private static let maximumEnumeratedProcessCount = 32_768
-    private static let monitorInterval = Duration.milliseconds(25)
+    // A 25 ms loop made every long-lived provider walk its process tree forty
+    // times per second and enumerate every system process four times per second.
+    // A 100 ms ancestry pass still catches fast process-tree changes while the
+    // inherited marker supplies the durable ownership proof between passes.
+    private static let monitorInterval = Duration.milliseconds(100)
     private static let markerSweepInterval = 10
 
     let markerFileDescriptor: Int32
