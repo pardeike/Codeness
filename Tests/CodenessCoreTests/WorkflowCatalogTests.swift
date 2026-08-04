@@ -16,6 +16,8 @@ struct WorkflowCatalogTests {
         #expect(providers.providers.map(\.id) == [.codex, .claude])
         #expect(providers.provider(.codex)?.supportsPlanMode == true)
         #expect(providers.provider(.codex)?.supportsFastMode == true)
+        #expect(providers.provider(.codex)?.minimumVersion == "0.145.0")
+        #expect(providers.provider(.claude)?.minimumVersion == nil)
         #expect(providers.provider(.claude)?.knownModels.contains {
             $0.id == "opus[1m]" && $0.supportsFastMode
         } == true)

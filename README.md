@@ -49,7 +49,7 @@ To run Codeness:
 - macOS 15 or newer on Apple silicon
 - At least one supported, authenticated agent CLI:
   - `codex` 0.145.0 or newer, with App Server support
-  - Claude Code 2.1.220 or newer
+  - Claude Code with the stream-JSON initialization protocol used by Codeness
 
 To build Codeness from source, you also need Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer. The canonical Release install additionally requires a Developer ID Application certificate for team `W65292CD8T` and a `notarytool` Keychain profile. The default profile is `brrainz-notary`.
 

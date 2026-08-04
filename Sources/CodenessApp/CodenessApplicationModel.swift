@@ -1166,7 +1166,7 @@ final class CodenessApplicationModel {
         lease: LifecycleLease
     ) async throws {
         try requireCurrentLifecycle(lease)
-        let discoveredModels = try? await ClaudeExecutableInspector.models(
+        let discoveredModels = try await ClaudeExecutableInspector.models(
             executableURL: executable
         )
         try requireCurrentLifecycle(lease)
@@ -1174,11 +1174,7 @@ final class CodenessApplicationModel {
         await agentProviders.register(provider)
         try requireCurrentLifecycle(lease)
         claudeProvider = provider
-        if let discoveredModels, !discoveredModels.isEmpty {
-            claudeModels = discoveredModels
-        } else {
-            claudeModels = providerCatalog.provider(.claude)?.knownModels ?? []
-        }
+        claudeModels = discoveredModels
         currentClaudeExecutablePath = executable.path
         claudeState = .ready(version)
     }
