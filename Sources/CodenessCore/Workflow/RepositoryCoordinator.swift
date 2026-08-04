@@ -5381,11 +5381,8 @@ public final class RepositoryCoordinator {
         guard !chunks.isEmpty else { return }
         let appended = chunks.map(\.text).joined()
         let current = run(withID: runID)?.transcript ?? ""
-        let currentTail = current.hasPrefix(Self.truncatedTranscriptMarker)
-            ? String(current.dropFirst(Self.truncatedTranscriptMarker.count))
-            : current
         setRunTranscript(
-            Self.boundedTranscriptForPresentation(currentTail + appended),
+            Self.boundedTranscriptForPresentation(current + appended),
             runID: runID
         )
     }

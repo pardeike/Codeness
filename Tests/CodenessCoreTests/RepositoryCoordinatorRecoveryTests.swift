@@ -848,6 +848,49 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func liveAppendPreservesTheTruncationMarkerOnALargeSelectedTranscript() async throws {
+        let maximumBytes = RepositoryCoordinator.maximumPresentedTranscriptUTF8Bytes
+        let fullTranscript = String(repeating: "a", count: maximumBytes + 256 * 1_024)
+            + "loaded-tail\n"
+        var savedRun = run(status: .running)
+        savedRun.transcript = fullTranscript
+        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let root = temporaryRoot()
+        let store = WorkspaceStore(rootURL: root)
+        try await store.save(record)
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: record.canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: DelayedBlockedRouter(),
+            store: store
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        await coordinator.load()
+        #expect(
+            coordinator.record.activity?.runs.last?.transcript.hasPrefix(
+                RepositoryCoordinator.truncatedTranscriptMarker
+            ) == true
+        )
+
+        await coordinator.handle(transcriptDelta(
+            "live-suffix\n",
+            itemID: "live-after-truncated-load",
+            run: savedRun
+        ))
+        await waitUntil {
+            coordinator.record.activity?.runs.last?.transcript.hasSuffix("live-suffix\n")
+                == true
+        }
+
+        let presented = try #require(coordinator.record.activity?.runs.last?.transcript)
+        #expect(presented.hasPrefix(RepositoryCoordinator.truncatedTranscriptMarker))
+        #expect(presented.hasSuffix("live-suffix\n"))
+        #expect(presented.utf8.count <= maximumBytes)
+        #expect(await coordinator.flushDocumentState())
+    }
+
+    @Test
     func loadRestoresSelectionViewportAndWorkflowControls() async throws {
         let firstRun = run(status: .completed)
         var secondRun = run(status: .interrupted)
