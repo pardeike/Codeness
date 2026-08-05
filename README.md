@@ -1,17 +1,17 @@
 <div align="center">
   <img src="Sources/CodenessApp/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" width="112" height="112" alt="Codeness app icon">
   <h1>Codeness</h1>
-  <p><strong>Supervise repeatable Codex and Claude workflows from one native macOS window.</strong></p>
+  <p><strong>Supervise repeatable Codex, Claude, and OpenAI-compatible workflows from one native macOS window.</strong></p>
   <p>Give Codeness a goal, choose a workflow, and let specialized agent sessions implement, review, and refine the work until the whole goal is complete.</p>
 </div>
 
 ![A completed Implement, Review, and Fix workflow in Codeness](Documentation/codeness-workflow.png)
 
-Codeness is a workflow supervisor—not another coding agent. It coordinates your locally installed Codex and Claude Code CLIs inside the work folder you choose, keeps each step's session alive across cycles, and gives you one place to follow, pause, steer, and resume the work.
+Codeness is a workflow supervisor—not another coding agent. It coordinates your locally installed Codex and Claude Code CLIs and can also call any configured OpenAI-compatible Chat Completions endpoint inside the work folder you choose. Each step's session stays alive across cycles, with one place to follow, pause, steer, and resume the work.
 
 ## Why Codeness?
 
-- **Use the right agent for each step.** Mix Codex and Claude, models, reasoning effort, native read-only Plan mode, and Fast mode within one workflow.
+- **Use the right agent for each step.** Mix Codex, Claude, and an OpenAI-compatible endpoint, models, reasoning effort, native read-only Plan mode, and Fast mode within one workflow.
 - **Build review into the process.** Run an implementation/review/fix loop until a coordinator determines that the complete goal—not merely the latest task—is finished.
 - **Keep the work observable.** Inspect reasoning, actions, diagnostics, final answers, handoffs, timing, and token usage for every run.
 - **Pause without losing the thread.** Persistent step sessions, saved checkpoints, and crash recovery make long-running work practical.
@@ -47,13 +47,14 @@ Every bundled workflow can be edited, duplicated, or used as the starting point 
 To run Codeness:
 
 - macOS 15 or newer on Apple silicon
-- At least one supported, authenticated agent CLI:
+- At least one supported agent:
   - `codex` 0.145.0 or newer, with App Server support
   - Claude Code with the stream-JSON initialization protocol used by Codeness
+  - An OpenAI-compatible Chat Completions endpoint and model. Configure its endpoint and optional JSON API-key source in Settings. Codeness supplies the OpenCode-style core tools `bash`, `read`, `glob`, `grep`, `edit`, and `write`; Plan mode advertises only the read-only subset.
 
 To build Codeness from source, you also need Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer. The canonical Release install additionally requires a Developer ID Application certificate for team `W65292CD8T` and a `notarytool` Keychain profile. The default profile is `brrainz-notary`.
 
-Codeness uses the existing authentication of each CLI. New configurable workflows do not require separate OpenAI API credentials.
+Codeness uses the existing authentication of each CLI. OpenAI-compatible credentials are read from the configured JSON key file and property, or can be omitted for an unauthenticated local endpoint; Codeness does not store the key itself.
 
 ### Permission preflight
 
@@ -110,23 +111,23 @@ Changing only effort or speed preserves a step's session lineage. Changing its p
 
 ## Customize workflows
 
-Open **Codeness → Settings** to manage reusable workflows and agent executable paths. Automatic CLI discovery is used when an executable path is empty; a configured path is authoritative after Codeness verifies it and restarts that provider.
+Open **Codeness → Settings** to manage reusable workflows, agent executable paths, and the OpenAI-compatible endpoint. You can also set its display name—for example, `Koala`—so it is shown in provider labels throughout the app. Automatic CLI discovery is used when an executable path is empty; a configured path is authoritative after Codeness verifies it and restarts that provider. API keys are read from the configured JSON key file and property, or authentication can be omitted for local endpoints. OpenAI-compatible tool loops are stopped only after the same command and output repeat 16 times without new activity; any new activity resets that detector.
 
 Every step and coordinator target can independently configure:
 
 | Setting | Options |
 | --- | --- |
-| Provider | Codex or Claude |
+| Provider | Codex, Claude, or OpenAI-compatible |
 | Model | A discovered model or an explicit model identifier |
 | Effort | Any effort level supported by that model |
 | Mode | Standard or native read-only Plan mode |
 | Speed | Standard or provider-supported Fast mode |
 
-Codex models and service tiers come from the running App Server's model catalog. Claude aliases, resolved models, effort levels, and Fast eligibility are discovered through Claude Code's initialization handshake.
+Codex models and service tiers come from the running App Server's model catalog. Claude aliases, resolved models, effort levels, and Fast eligibility are discovered through Claude Code's initialization handshake. OpenAI-compatible model identifiers are entered directly because model catalogs and capabilities vary by server.
 
 ## Repository and data boundaries
 
-Codeness itself does not create worktrees, stash changes, commit, reset, or write orchestration files into the selected repository. Agent steps can, of course, edit the repository when their configured mode and instructions allow it.
+Codeness itself does not create worktrees, stash changes, commit, reset, or write orchestration files into the selected repository. Agent processes and compatible-provider tools are not sandboxed: the selected repository is their initial working directory, but Standard-mode agents can run commands and access absolute paths with the same account-level access as Codeness. Plan mode removes mutating compatible-provider tools.
 
 Workflow state, transcripts, recovery logs, and window state are stored under:
 
@@ -158,7 +159,7 @@ Repository windows, sidebar geometry, selected runs, transcript reading position
 <details>
 <summary><strong>Coordinator and handoff details</strong></summary>
 
-The coordinator can use either Codex or Claude with its own model, effort, mode, and speed. It receives the completed step's final answer together with the full goal and next-step context, then returns a structured result containing:
+The coordinator can use Codex, Claude, or an OpenAI-compatible provider with its own model, effort, mode, and speed. It receives the completed step's final answer together with the full goal and next-step context, then returns a structured result containing:
 
 - a conservatively filtered handoff;
 - the workflow outcome; and
@@ -171,7 +172,7 @@ A completion result is honored only after the final repeating step. Coordination
 <details>
 <summary><strong>Provider and transcript details</strong></summary>
 
-Codex communicates through its shared App Server. Claude uses its streaming JSON CLI protocol, including session resume, partial output, usage, approvals, questions, steering, and interruption.
+Codex communicates through its shared App Server. Claude uses its streaming JSON CLI protocol, including session resume, partial output, usage, approvals, questions, steering, and interruption. OpenAI-compatible providers use Chat Completions, keep session history locally, and expose the OpenCode-style core tool vocabulary, including unrestricted Standard-mode shell execution for builds and tests.
 
 Successful tool chatter is suppressed by default while failures remain visible. Append-only transcripts and token-usage checkpoints are retained for crash recovery. Selecting an older run or scrolling away from the bottom disables automatic following until you return to the live transcript.
 

@@ -5,6 +5,10 @@ struct ApplicationSettingsView: View {
     let application: CodenessApplicationModel
     @State private var executablePath: String
     @State private var claudeExecutablePath: String
+    @State private var openAICompatibleEndpoint: String
+    @State private var openAICompatibleAPIKeyFile: String
+    @State private var openAICompatibleAPIKeyName: String
+    @State private var openAICompatibleDisplayName: String
     @State private var workflowCatalog: WorkflowCatalog
     @State private var selectedWorkflowID: String
     @State private var workflowEditor: WorkflowEditorPresentation?
@@ -18,6 +22,18 @@ struct ApplicationSettingsView: View {
         _claudeExecutablePath = State(
             initialValue: application.configuredClaudeExecutablePath
         )
+        _openAICompatibleEndpoint = State(
+            initialValue: application.openAICompatibleConfiguration.endpoint
+        )
+        _openAICompatibleAPIKeyFile = State(
+            initialValue: application.openAICompatibleConfiguration.apiKeyFile
+        )
+        _openAICompatibleAPIKeyName = State(
+            initialValue: application.openAICompatibleConfiguration.apiKeyName
+        )
+        _openAICompatibleDisplayName = State(
+            initialValue: application.openAICompatibleConfiguration.displayName
+        )
         _workflowCatalog = State(initialValue: application.workflowCatalog)
         _selectedWorkflowID = State(
             initialValue: application.workflowCatalog.defaultTemplateID
@@ -29,7 +45,7 @@ struct ApplicationSettingsView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Agent CLIs")
+                    Text("Agent Providers")
                         .font(.title2.weight(.semibold))
                     VStack(alignment: .leading, spacing: 7) {
                         LabeledContent("Codex executable") {
@@ -87,8 +103,43 @@ struct ApplicationSettingsView: View {
                             }
                         }
                     }
-                    Text("Executable paths are shared by every repository window. Leave either field empty for automatic discovery. A changed CLI is restarted only when it has no active turn.")
+                    VStack(alignment: .leading, spacing: 7) {
+                        LabeledContent("Display name") {
+                            TextField(
+                                "OpenAI-compatible",
+                                text: $openAICompatibleDisplayName
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        LabeledContent("Endpoint") {
+                            TextField(
+                                "https://api.openai.com/v1",
+                                text: $openAICompatibleEndpoint
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        LabeledContent("API-key file") {
+                            TextField("Optional JSON key file", text: $openAICompatibleAPIKeyFile)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        LabeledContent("API-key name") {
+                            TextField("OPENAI_API_KEY", text: $openAICompatibleAPIKeyName)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        LabeledContent("\(application.openAICompatibleConfiguration.displayName) status") {
+                            Text(application.openAICompatibleState.label)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("The endpoint may be a server root such as https://example.test/v1 or a complete /chat/completions URL. Leave the key file and name empty for endpoints without authentication. Settings changes take effect when no active turn uses this provider.")
                         .foregroundStyle(.secondary)
+                    if let openAICompatibleValidationMessage {
+                        Label(
+                            openAICompatibleValidationMessage,
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.red)
+                    }
 
                     Divider()
 
@@ -133,11 +184,12 @@ struct ApplicationSettingsView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .help("Save agent executables, workflows, and transcript preferences")
+                .help("Save agent provider settings, workflows, and transcript preferences")
                 .disabled(
                     isSaving
                         || serverIsStarting
                         || workflowValidationMessage != nil
+                        || openAICompatibleValidationMessage != nil
                         || !hasSavableChanges
                 )
             }
@@ -153,18 +205,29 @@ struct ApplicationSettingsView: View {
             )
             .frame(width: 0, height: 0)
         }
-        .sheet(item: $workflowEditor) { presentation in
-            WorkflowEditorSheet(
-                title: presentation.title,
-                confirmationTitle: presentation.confirmationTitle,
-                workflow: presentation.workflow
-            ) { updatedWorkflow in
-                applyWorkflowEdit(
-                    updatedWorkflow,
-                    replacing: presentation.replacingWorkflowID
-                )
+        .sheet(
+            isPresented: Binding(
+                get: { workflowEditor != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        workflowEditor = nil
+                    }
+                }
+            )
+        ) {
+            if let presentation = workflowEditor {
+                WorkflowEditorSheet(
+                    title: presentation.title,
+                    confirmationTitle: presentation.confirmationTitle,
+                    workflow: presentation.workflow
+                ) { updatedWorkflow in
+                    applyWorkflowEdit(
+                        updatedWorkflow,
+                        replacing: presentation.replacingWorkflowID
+                    )
+                }
+                .environment(application)
             }
-            .environment(application)
         }
         .alert(
             "Codeness",
@@ -297,6 +360,15 @@ struct ApplicationSettingsView: View {
         claudeExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var cleanOpenAICompatibleConfiguration: OpenAICompatibleProviderConfiguration {
+        OpenAICompatibleProviderConfiguration(
+            endpoint: openAICompatibleEndpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKeyFile: openAICompatibleAPIKeyFile.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKeyName: openAICompatibleAPIKeyName.trimmingCharacters(in: .whitespacesAndNewlines),
+            displayName: openAICompatibleDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
     private var needsCodexRestart: Bool {
         if cleanExecutablePath != application.configuredExecutablePath {
             return true
@@ -327,11 +399,31 @@ struct ApplicationSettingsView: View {
         }
     }
 
+    private var needsOpenAICompatibleRestart: Bool {
+        if cleanOpenAICompatibleConfiguration != application.openAICompatibleConfiguration {
+            return true
+        }
+        switch application.openAICompatibleState {
+        case .ready:
+            return false
+        case .failed, .stopped:
+            return true
+        case .starting:
+            return false
+        }
+    }
+
+    private var openAICompatibleValidationMessage: String? {
+        cleanOpenAICompatibleConfiguration.validationMessage
+    }
+
     private var serverIsStarting: Bool {
         application.serverState == .starting
             || application.claudeState == .starting
+            || application.openAICompatibleState == .starting
             || application.isProviderRestartPending(.codex)
             || application.isProviderRestartPending(.claude)
+            || application.isProviderRestartPending(.openAICompatible)
     }
 
     private var codexCanRetry: Bool {
@@ -353,15 +445,20 @@ struct ApplicationSettingsView: View {
             || separatesRunTranscripts != application.separatesRunTranscripts
             || cleanExecutablePath != application.configuredExecutablePath
             || cleanClaudeExecutablePath != application.configuredClaudeExecutablePath
+            || cleanOpenAICompatibleConfiguration != application.openAICompatibleConfiguration
     }
 
     private var hasSavableChanges: Bool {
-        isDirty || needsCodexRestart || needsClaudeRestart
+        isDirty || needsCodexRestart || needsClaudeRestart || needsOpenAICompatibleRestart
     }
 
     private func revert() {
         executablePath = application.configuredExecutablePath
         claudeExecutablePath = application.configuredClaudeExecutablePath
+        openAICompatibleEndpoint = application.openAICompatibleConfiguration.endpoint
+        openAICompatibleAPIKeyFile = application.openAICompatibleConfiguration.apiKeyFile
+        openAICompatibleAPIKeyName = application.openAICompatibleConfiguration.apiKeyName
+        openAICompatibleDisplayName = application.openAICompatibleConfiguration.displayName
         workflowCatalog = application.workflowCatalog
         selectedWorkflowID = workflowCatalog.defaultTemplateID
         separatesRunTranscripts = application.separatesRunTranscripts
@@ -371,6 +468,7 @@ struct ApplicationSettingsView: View {
     private func saveSettings() async -> Bool {
         guard !isSaving,
               workflowValidationMessage == nil,
+              openAICompatibleValidationMessage == nil,
               !serverIsStarting else { return false }
         isSaving = true
         defer { isSaving = false }
@@ -385,8 +483,18 @@ struct ApplicationSettingsView: View {
             )
             guard restarted else { return false }
         }
+        if needsOpenAICompatibleRestart {
+            let restarted = await application.restartOpenAICompatible(
+                configuration: cleanOpenAICompatibleConfiguration
+            )
+            guard restarted else { return false }
+        }
         executablePath = cleanExecutablePath
         claudeExecutablePath = cleanClaudeExecutablePath
+        openAICompatibleEndpoint = cleanOpenAICompatibleConfiguration.endpoint
+        openAICompatibleAPIKeyFile = cleanOpenAICompatibleConfiguration.apiKeyFile
+        openAICompatibleAPIKeyName = cleanOpenAICompatibleConfiguration.apiKeyName
+        openAICompatibleDisplayName = cleanOpenAICompatibleConfiguration.displayName
         application.updateWorkflowCatalog(workflowCatalog)
         application.setSeparatesRunTranscripts(separatesRunTranscripts)
         return true
@@ -594,8 +702,7 @@ struct ApplicationSettingsView: View {
     }
 }
 
-private struct WorkflowEditorPresentation: Identifiable {
-    let id = UUID()
+private struct WorkflowEditorPresentation {
     let title: String
     let confirmationTitle: String
     let workflow: WorkflowTemplate

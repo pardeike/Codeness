@@ -341,7 +341,9 @@ struct RepositoryWindowView: View {
         }
         return RepositoryWindowMetrics.optimalSidebarWidth(
             rowTitles: runs.map(\.displayName),
-            rowMetadata: runs.map(runSidebarMetadata),
+            rowMetadata: runs.map {
+                runSidebarMetadata($0, targetName: application.targetDisplayName)
+            },
             sectionTitles: groups.map(\.title),
             controlTitles: controlTitles
         )
@@ -526,9 +528,12 @@ private struct RunGroupHeader: View {
     }
 }
 
-private func runSidebarMetadata(_ run: RunRecord) -> String {
+private func runSidebarMetadata(
+    _ run: RunRecord,
+    targetName: (AgentTarget) -> String
+) -> String {
     let target = run.agentTarget.map {
-        "\($0.providerID.rawValue.capitalized) · \($0.model)"
+        targetName($0)
     } ?? run.kind.displayName
     return "\(target) · \(run.status.displayName)"
 }
@@ -536,6 +541,7 @@ private func runSidebarMetadata(_ run: RunRecord) -> String {
 private struct RunRow: View {
     let run: RunRecord
     let isActive: Bool
+    @Environment(CodenessApplicationModel.self) private var application
 
     var body: some View {
         HStack(spacing: 10) {
@@ -556,7 +562,7 @@ private struct RunRow: View {
                 }
                 HStack(spacing: 5) {
                     Text(run.agentTarget.map {
-                        "\($0.providerID.rawValue.capitalized) · \($0.model)"
+                        application.targetDisplayName($0)
                     } ?? run.kind.displayName)
                     Text("·")
                     Text(run.status.displayName)

@@ -3,6 +3,7 @@ import Foundation
 public struct AgentProviderID: RawRepresentable, Codable, Hashable, Sendable, Identifiable {
     public static let codex = AgentProviderID(rawValue: "codex")
     public static let claude = AgentProviderID(rawValue: "claude")
+    public static let openAICompatible = AgentProviderID(rawValue: "openai-compatible")
 
     public let rawValue: String
 
@@ -20,6 +21,77 @@ public struct AgentProviderID: RawRepresentable, Codable, Hashable, Sendable, Id
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
+    }
+}
+
+public struct OpenAICompatibleProviderConfiguration: Codable, Equatable, Sendable {
+    public static let defaultDisplayName = "OpenAI-compatible"
+
+    public var endpoint: String
+    public var apiKeyFile: String
+    public var apiKeyName: String
+    public var displayName: String
+
+    public init(
+        endpoint: String = "https://api.openai.com/v1",
+        apiKeyFile: String = "~/.api-keys",
+        apiKeyName: String = "OPENAI_API_KEY",
+        displayName: String = Self.defaultDisplayName
+    ) {
+        self.endpoint = endpoint
+        self.apiKeyFile = apiKeyFile
+        self.apiKeyName = apiKeyName
+        let cleanDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.displayName = cleanDisplayName.isEmpty
+            ? Self.defaultDisplayName
+            : cleanDisplayName
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case endpoint
+        case apiKeyFile
+        case apiKeyName
+        case displayName
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            endpoint: try container.decode(String.self, forKey: .endpoint),
+            apiKeyFile: try container.decode(String.self, forKey: .apiKeyFile),
+            apiKeyName: try container.decode(String.self, forKey: .apiKeyName),
+            displayName: try container.decodeIfPresent(
+                String.self,
+                forKey: .displayName
+            ) ?? Self.defaultDisplayName
+        )
+    }
+
+    public var endpointURL: URL? {
+        let value = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              var url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host != nil else {
+            return nil
+        }
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !path.hasSuffix("chat/completions") else { return url }
+        url.appendPathComponent("chat/completions")
+        return url
+    }
+
+    public var validationMessage: String? {
+        guard endpointURL != nil else {
+            return "Enter a valid HTTP or HTTPS \(displayName) endpoint."
+        }
+        let cleanKeyFile = apiKeyFile.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKeyName = apiKeyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanKeyFile.isEmpty == cleanKeyName.isEmpty else {
+            return "Enter both the API-key file and property name, or leave both empty."
+        }
+        return nil
     }
 }
 
@@ -179,6 +251,25 @@ public struct AgentProviderCatalog: Codable, Equatable, Sendable {
 
     public func provider(_ id: AgentProviderID) -> AgentProviderDescriptor? {
         providers.first { $0.id == id }
+    }
+
+    public func displayName(
+        for providerID: AgentProviderID,
+        overrides: [AgentProviderID: String] = [:]
+    ) -> String {
+        if let override = overrides[providerID]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return override
+        }
+        return provider(providerID)?.displayName ?? providerID.rawValue.capitalized
+    }
+
+    public func displayName(
+        for target: AgentTarget,
+        overrides: [AgentProviderID: String] = [:]
+    ) -> String {
+        "\(displayName(for: target.providerID, overrides: overrides)) · \(target.model)"
     }
 }
 

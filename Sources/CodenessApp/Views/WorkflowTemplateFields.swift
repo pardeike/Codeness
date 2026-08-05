@@ -224,7 +224,7 @@ struct WorkflowTargetFields: View {
                     Text("Provider")
                     Picker("Provider", selection: $target.providerID) {
                         ForEach(application.providerCatalog.providers) { provider in
-                            Text(provider.displayName).tag(provider.id)
+                            Text(application.providerName(provider.id)).tag(provider.id)
                         }
                     }
                     .labelsHidden()

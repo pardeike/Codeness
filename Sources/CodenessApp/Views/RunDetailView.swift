@@ -260,10 +260,7 @@ struct RunDetailView: View {
         guard let target = run.agentTarget else {
             return "\(run.kind.displayName) · \(run.effort.capitalized) reasoning\(durationText)"
         }
-        var values = [
-            target.providerID.rawValue.capitalized,
-            target.model
-        ]
+        var values = [application.targetDisplayName(target)]
         if let effort = target.options.effort, !effort.isEmpty {
             values.append("\(effort.capitalized) effort")
         }

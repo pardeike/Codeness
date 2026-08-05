@@ -4,6 +4,7 @@ import SwiftUI
 
 struct WorkOverviewView: View {
     @Bindable var coordinator: RepositoryCoordinator
+    @Environment(CodenessApplicationModel.self) private var application
     @State private var isGoalExpanded = false
 
     private var record: RepositoryRecord { coordinator.record }
@@ -410,10 +411,7 @@ struct WorkOverviewView: View {
     }
 
     private func targetDescription(_ target: AgentTarget) -> String {
-        var values = [
-            target.providerID.rawValue.capitalized,
-            target.model
-        ]
+        var values = [application.targetDisplayName(target)]
         if let effort = target.options.effort, !effort.isEmpty {
             values.append(effort)
         }

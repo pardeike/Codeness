@@ -60,6 +60,47 @@ struct RunTranscriptPresentationTests {
     }
 
     @Test
+    func openAICompatibleToolSummariesFollowActionVisibility() {
+        let transcript = RunTranscriptPresentation.storedText(
+            "Using glob…\n",
+            section: .action
+        )
+        + RunTranscriptPresentation.storedText(
+            "Using read…\n",
+            section: .action
+        )
+        let run = makeRun(prompt: "Inspect the repository.", transcript: transcript)
+
+        let recommended = RunTranscriptPresentation.text(for: run, separatesRuns: true)
+        #expect(!recommended.contains("Using glob"))
+        #expect(!recommended.contains("Using read"))
+
+        let withActions = RunTranscriptPresentation.text(
+            for: run,
+            separatesRuns: true,
+            visibility: .all
+        )
+        #expect(withActions.contains("Using glob…\nUsing read…"))
+    }
+
+    @Test
+    func resultAfterOpenAICompatibleActionsDoesNotInheritActionVisibility() {
+        let transcript = RunTranscriptPresentation.storedText(
+            "Using bash…\n",
+            section: .action
+        )
+        + RunTranscriptPresentation.storedText(
+            "Build and tests passed.",
+            section: .result
+        )
+        let run = makeRun(prompt: "Test the change.", transcript: transcript)
+
+        let recommended = RunTranscriptPresentation.text(for: run, separatesRuns: true)
+        #expect(!recommended.contains("Using bash"))
+        #expect(recommended == "Build and tests passed.")
+    }
+
+    @Test
     func structuredTranscriptRecoversClaudeNarrativeStoredAfterLegacyActionMarkers() {
         let transcript = [
             RunTranscriptPresentation.storedText(

@@ -77,6 +77,16 @@
       ],
       "supportsPlanMode": true,
       "supportsFastMode": true
+    },
+    {
+      "id": "openai-compatible",
+      "displayName": "OpenAI-compatible",
+      "executableName": "",
+      "minimumVersion": null,
+      "executableSearchPaths": [],
+      "knownModels": [],
+      "supportsPlanMode": true,
+      "supportsFastMode": false
     }
   ]
 }

@@ -195,6 +195,8 @@ public enum AgentEvent: Sendable, Equatable {
 
 public enum AgentProviderError: LocalizedError, Sendable {
     case unavailable(AgentProviderID, String)
+    case namedUnavailable(displayName: String, detail: String)
+    case restarting(displayName: String)
     case unsupportedProvider(AgentProviderID)
     case sessionUnavailable(
         provider: AgentProviderID,
@@ -215,6 +217,10 @@ public enum AgentProviderError: LocalizedError, Sendable {
         switch self {
         case .unavailable(let provider, let detail):
             return "\(provider.rawValue.capitalized) is unavailable: \(detail)"
+        case .namedUnavailable(let displayName, let detail):
+            return "\(displayName) is unavailable: \(detail)"
+        case .restarting(let displayName):
+            return "\(displayName) is restarting; new work is temporarily paused."
         case .unsupportedProvider(let provider):
             return "No agent provider is registered for \(provider.rawValue)."
         case .sessionUnavailable(_, _, let detail):
@@ -224,7 +230,7 @@ public enum AgentProviderError: LocalizedError, Sendable {
         case .missingRun(let runID):
             return "The agent run \(runID.uuidString) is no longer active."
         case .invalidResponse(let detail):
-            return "The agent CLI returned an invalid response: \(detail)"
+            return "The agent provider returned an invalid response: \(detail)"
         case .resourceLimit(let detail):
             return detail
         case .processExited(let provider, let termination, let detail):
@@ -238,6 +244,7 @@ public enum AgentProviderError: LocalizedError, Sendable {
 
 public protocol AgentProviding: Actor {
     nonisolated var id: AgentProviderID { get }
+    nonisolated var displayName: String { get }
 
     func prepareSession(_ request: AgentSessionRequest) async throws -> AgentSession
     func startRun(_ request: AgentRunRequest) async throws -> AgentRunHandle
@@ -268,6 +275,8 @@ public protocol AgentProviding: Actor {
 }
 
 public extension AgentProviding {
+    nonisolated var displayName: String { id.rawValue.capitalized }
+
     func releaseSession(id: String) async -> Bool { false }
 
     @discardableResult
@@ -284,17 +293,20 @@ public actor AgentProviderRegistry {
     }
 
     private var providers: [AgentProviderID: any AgentProviding] = [:]
+    private var providerDisplayNames: [AgentProviderID: String] = [:]
     private var launchFences: [AgentProviderID: UUID] = [:]
     private var activeLaunchAdmissions: [AgentProviderID: Int] = [:]
 
     public init(providers: [any AgentProviding] = []) {
         for provider in providers {
             self.providers[provider.id] = provider
+            providerDisplayNames[provider.id] = provider.displayName
         }
     }
 
     public func register(_ provider: any AgentProviding) {
         providers[provider.id] = provider
+        providerDisplayNames[provider.id] = provider.displayName
     }
 
     public func unregister(_ providerID: AgentProviderID) {
@@ -352,9 +364,8 @@ public actor AgentProviderRegistry {
     /// boundary first and holds this token through activation or rollback.
     public func fenceLaunches(for providerID: AgentProviderID) throws -> LaunchFence {
         guard launchFences[providerID] == nil else {
-            throw AgentProviderError.unavailable(
-                providerID,
-                "\(providerID.rawValue.capitalized) is restarting; new work is temporarily paused"
+            throw AgentProviderError.restarting(
+                displayName: displayName(for: providerID)
             )
         }
         let identifier = UUID()
@@ -426,9 +437,8 @@ public actor AgentProviderRegistry {
 
     private func admitLaunch(for providerID: AgentProviderID) throws -> any AgentProviding {
         guard launchFences[providerID] == nil else {
-            throw AgentProviderError.unavailable(
-                providerID,
-                "\(providerID.rawValue.capitalized) is restarting; new work is temporarily paused"
+            throw AgentProviderError.restarting(
+                displayName: displayName(for: providerID)
             )
         }
         let admittedProvider = try provider(providerID)
@@ -443,5 +453,9 @@ public actor AgentProviderRegistry {
         } else {
             activeLaunchAdmissions[providerID] = remaining
         }
+    }
+
+    private func displayName(for providerID: AgentProviderID) -> String {
+        providerDisplayNames[providerID] ?? providerID.rawValue.capitalized
     }
 }

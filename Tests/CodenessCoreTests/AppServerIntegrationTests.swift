@@ -2898,6 +2898,8 @@ struct CodexProviderReliabilityTests {
             )
         ))
         let executionID = try #require(handle.executionID)
+        var iterator = handle.events.makeAsyncIterator()
+        #expect(await iterator.next() == .started(executionID: executionID))
         do {
             try await provider.interrupt(runID: runID)
             Issue.record("Expected the injected interrupt failure")
@@ -2912,8 +2914,6 @@ struct CodexProviderReliabilityTests {
         #expect(fixture.loggedMethods().filter { $0 == "turn/interrupt" }.count == 1)
         #expect(fixture.loggedMethods().filter { $0 == "thread/start" }.count == 1)
         #expect(fixture.loggedMethods().filter { $0 == "thread/unsubscribe" }.isEmpty)
-        var iterator = handle.events.makeAsyncIterator()
-        #expect(await iterator.next() == .started(executionID: executionID))
         guard case .failed(let detail) = await iterator.next() else {
             Issue.record("Expected generation-containment failure")
             return

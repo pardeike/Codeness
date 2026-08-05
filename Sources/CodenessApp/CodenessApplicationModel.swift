@@ -14,13 +14,23 @@ final class CodenessApplicationModel {
     private static let customWorkflowTemplatesKey = "CustomWorkflowTemplates"
     private static let defaultWorkflowTemplateIDKey = "DefaultWorkflowTemplateID"
     private static let claudeExecutablePathKey = "ClaudeExecutablePath"
+    private static let openAICompatibleEndpointKey = "OpenAICompatibleEndpoint"
+    private static let openAICompatibleAPIKeyFileKey = "OpenAICompatibleAPIKeyFile"
+    private static let openAICompatibleAPIKeyNameKey = "OpenAICompatibleAPIKeyName"
+    private static let openAICompatibleDisplayNameKey = "OpenAICompatibleDisplayName"
     private static let appServerLogger = Logger(subsystem: "ap.codeness", category: "CodexAppServer")
     private static let appServerCleanupFailure =
         "Codeness could not verify that every Codex App Server and MCP process stopped. Restart Codeness before starting or restarting Codex."
     private static let claudeRestartCleanupFailure =
         "Codeness could not verify that every Claude and MCP process stopped. Starting a replacement is blocked to prevent overlapping orphan processes. Try restarting Claude again; if it still fails, end the remaining Claude process in Activity Monitor first."
+    private var openAICompatibleRestartCleanupFailure: String {
+        "Codeness could not stop every \(providerName(.openAICompatible)) request. Starting a replacement is blocked until the active request settles."
+    }
     private static let providerQuitCleanupFailure =
         "Codeness could not verify that every Claude and MCP process stopped, so Quit was canceled to avoid leaving an orphan. Try Quit again; if it still fails, end the remaining Claude process in Activity Monitor and quit again."
+    private var openAICompatibleQuitCleanupFailure: String {
+        "Codeness could not verify that every \(providerName(.openAICompatible)) request stopped, so Quit was canceled. Try Quit again after the request settles."
+    }
     private static let probeQuitCleanupFailure =
         "Codeness could not verify that every executable-check process stopped, so Quit was canceled to avoid leaving an orphan. Try Quit again."
     private static let providerLaunchDrainFailure =
@@ -93,6 +103,8 @@ final class CodenessApplicationModel {
     private(set) var claudeState: ProviderState = .starting
     private(set) var currentClaudeExecutablePath = ""
     private(set) var configuredClaudeExecutablePath: String
+    private(set) var openAICompatibleState: ProviderState = .starting
+    private(set) var openAICompatibleConfiguration: OpenAICompatibleProviderConfiguration
     private(set) var providerCatalog: AgentProviderCatalog
     private(set) var claudeModels: [AgentModelDescriptor]
     private(set) var builtInWorkflowCatalog: WorkflowCatalog
@@ -112,6 +124,7 @@ final class CodenessApplicationModel {
     @ObservationIgnored private let handoffConfigurationValidator: any HandoffConfigurationValidating
     @ObservationIgnored private let codexProvider: CodexAgentProvider
     @ObservationIgnored private var claudeProvider: (any AgentProviding)?
+    @ObservationIgnored private var openAICompatibleProvider: (any AgentProviding)?
     @ObservationIgnored private let agentProviders: AgentProviderRegistry
     @ObservationIgnored private let workflowRouter: AgentWorkflowHandoffRouter
     @ObservationIgnored private var eventTask: Task<Void, Never>?
@@ -144,6 +157,7 @@ final class CodenessApplicationModel {
         handoffConfigurationValidator: any HandoffConfigurationValidating = HandoffConfigurationValidator(),
         testingCodexProvider: CodexAgentProvider? = nil,
         initialClaudeProvider: (any AgentProviding)? = nil,
+        initialOpenAICompatibleProvider: (any AgentProviding)? = nil,
         testingAppServerShutdown: (@Sendable () async -> Bool)? = nil,
         testingCodexShutdownAndVerify: (@Sendable () async -> Bool)? = nil,
         testingDocumentPreparationResult: Bool? = nil,
@@ -190,6 +204,39 @@ final class CodenessApplicationModel {
         var providers: [any AgentProviding] = [codexProvider]
         if let initialClaudeProvider {
             providers.append(initialClaudeProvider)
+        }
+        let openAIDefaults = OpenAICompatibleProviderConfiguration()
+        let defaultOpenAIConfiguration = OpenAICompatibleProviderConfiguration(
+            endpoint: UserDefaults.standard.string(
+                forKey: Self.openAICompatibleEndpointKey
+            ) ?? openAIDefaults.endpoint,
+            apiKeyFile: UserDefaults.standard.string(
+                forKey: Self.openAICompatibleAPIKeyFileKey
+            ) ?? openAIDefaults.apiKeyFile,
+            apiKeyName: UserDefaults.standard.string(
+                forKey: Self.openAICompatibleAPIKeyNameKey
+            ) ?? openAIDefaults.apiKeyName,
+            displayName: UserDefaults.standard.string(
+                forKey: Self.openAICompatibleDisplayNameKey
+            ) ?? OpenAICompatibleProviderConfiguration.defaultDisplayName
+        )
+        openAICompatibleConfiguration = defaultOpenAIConfiguration
+        if let initialOpenAICompatibleProvider {
+            providers.append(initialOpenAICompatibleProvider)
+            openAICompatibleProvider = initialOpenAICompatibleProvider
+            openAICompatibleState = .ready("Configured")
+        } else if defaultOpenAIConfiguration.validationMessage == nil {
+            let provider = OpenAICompatibleAgentProvider(
+                configuration: defaultOpenAIConfiguration
+            )
+            providers.append(provider)
+            openAICompatibleProvider = provider
+            openAICompatibleState = .ready("Configured")
+        } else {
+            openAICompatibleProvider = nil
+            openAICompatibleState = .failed(
+                defaultOpenAIConfiguration.validationMessage ?? "Invalid endpoint"
+            )
         }
         let agentProviders = AgentProviderRegistry(providers: providers)
         self.agentProviders = agentProviders
@@ -259,6 +306,8 @@ final class CodenessApplicationModel {
             return isReady
         case .claude:
             return claudeState.isReady
+        case .openAICompatible:
+            return openAICompatibleState.isReady
         default:
             return false
         }
@@ -300,6 +349,7 @@ final class CodenessApplicationModel {
         guard let provider = providerCatalog.provider(target.providerID) else {
             return "The \(target.providerID.rawValue) provider is not supported."
         }
+        let providerDisplayName = providerName(target.providerID)
         let model = models(for: target.providerID).first { $0.id == target.model }
         if let effort = target.options.effort?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -310,7 +360,7 @@ final class CodenessApplicationModel {
         }
         if target.options.mode == .plan,
            !(model?.supportsPlanMode ?? provider.supportsPlanMode) {
-            return "\(provider.displayName) does not advertise Plan mode for \(target.model)."
+            return "\(providerDisplayName) does not advertise Plan mode for \(target.model)."
         }
         if target.options.speed == .fast,
            target.providerID == .codex,
@@ -319,7 +369,7 @@ final class CodenessApplicationModel {
         }
         if target.options.speed == .fast,
            !(model?.supportsFastMode ?? provider.supportsFastMode) {
-            return "\(provider.displayName) does not advertise Fast mode for \(target.model)."
+            return "\(providerDisplayName) does not advertise Fast mode for \(target.model)."
         }
         return nil
     }
@@ -335,8 +385,22 @@ final class CodenessApplicationModel {
         }
     }
 
+    private var providerDisplayNameOverrides: [AgentProviderID: String] {
+        [.openAICompatible: openAICompatibleConfiguration.displayName]
+    }
+
     func providerName(_ providerID: AgentProviderID) -> String {
-        providerCatalog.provider(providerID)?.displayName ?? providerID.rawValue.capitalized
+        providerCatalog.displayName(
+            for: providerID,
+            overrides: providerDisplayNameOverrides
+        )
+    }
+
+    func targetDisplayName(_ target: AgentTarget) -> String {
+        providerCatalog.displayName(
+            for: target,
+            overrides: providerDisplayNameOverrides
+        )
     }
 
     func isExecutableConfigurationActive(_ configuredPath: String) -> Bool {
@@ -400,11 +464,12 @@ final class CodenessApplicationModel {
         guard lifecycleIsCurrent(lease) else { return }
         await startClaude(configuredPath: configuredClaudeExecutablePath, lease: lease)
         guard lifecycleIsCurrent(lease) else { return }
-        if catalogError == nil, !isReady, !claudeState.isReady {
+        if catalogError == nil, !isReady, !claudeState.isReady, !openAICompatibleState.isReady {
             applicationError = [
-                "No supported agent CLI is currently available.",
+                "No supported agent is currently available.",
                 "Codex: \(serverState.label)",
-                "Claude: \(claudeState.label)"
+                "Claude: \(claudeState.label)",
+                "\(providerName(.openAICompatible)): \(openAICompatibleState.label)"
             ].joined(separator: "\n")
         }
     }
@@ -896,6 +961,160 @@ final class CodenessApplicationModel {
         }
     }
 
+    @discardableResult
+    func restartOpenAICompatible(
+        configuration requestedConfiguration: OpenAICompatibleProviderConfiguration
+    ) async -> Bool {
+        if let pending = providerRestartTasks[.openAICompatible] {
+            return await pending.task.value
+        }
+
+        let identifier = UUID()
+        pendingProviderRestarts.insert(.openAICompatible)
+        let task = Task { @MainActor [weak self] in
+            await self?.executeRestartOpenAICompatible(
+                configuration: requestedConfiguration
+            ) ?? false
+        }
+        providerRestartTasks[.openAICompatible] = PendingProviderRestart(
+            identifier: identifier,
+            task: task
+        )
+        let result = await task.value
+        if providerRestartTasks[.openAICompatible]?.identifier == identifier {
+            providerRestartTasks.removeValue(forKey: .openAICompatible)
+            pendingProviderRestarts.remove(.openAICompatible)
+        }
+        return result
+    }
+
+    private func executeRestartOpenAICompatible(
+        configuration: OpenAICompatibleProviderConfiguration
+    ) async -> Bool {
+        guard let lease = await acquireLifecycleLease() else {
+            applicationError = "Codeness is shutting down; the \(providerName(.openAICompatible)) provider cannot be restarted."
+            return false
+        }
+        let operation = Task { @MainActor [weak self] in
+            await self?.performRestartOpenAICompatible(
+                configuration: configuration,
+                lease: lease
+            ) ?? false
+        }
+        activeLifecycleCancellation = { operation.cancel() }
+        let result = await operation.value
+        finishLifecycleOperation(lease)
+        return result
+    }
+
+    private func performRestartOpenAICompatible(
+        configuration: OpenAICompatibleProviderConfiguration,
+        lease: LifecycleLease
+    ) async -> Bool {
+        guard lifecycleIsCurrent(lease) else { return false }
+        guard !coordinators.values.contains(where: {
+            $0.hasActiveWork(for: .openAICompatible)
+        }) else {
+            applicationError = "Finish active \(providerName(.openAICompatible)) turns or coordinator work before changing its endpoint."
+            return false
+        }
+        let configuration = OpenAICompatibleProviderConfiguration(
+            endpoint: configuration.endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKeyFile: configuration.apiKeyFile.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKeyName: configuration.apiKeyName.trimmingCharacters(in: .whitespacesAndNewlines),
+            displayName: configuration.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        guard configuration.validationMessage == nil else {
+            applicationError = configuration.validationMessage
+                ?? "The \(providerName(.openAICompatible)) endpoint is invalid."
+            return false
+        }
+        let launchFence: AgentProviderRegistry.LaunchFence
+        let acquiredFreshFence: Bool
+        if let retainedFence = retainedProviderLaunchFenceTokens[.openAICompatible] {
+            launchFence = retainedFence
+            acquiredFreshFence = false
+        } else {
+            do {
+                launchFence = try await agentProviders.fenceLaunches(for: .openAICompatible)
+                acquiredFreshFence = true
+            } catch {
+                guard lifecycleIsCurrent(lease) else { return false }
+                applicationError = error.localizedDescription
+                return false
+            }
+        }
+        guard await agentProviders.waitForLaunchesToDrain(
+            launchFence,
+            timeout: providerLaunchDrainTimeout
+        ) else {
+            retainedProviderLaunchFenceTokens[.openAICompatible] = launchFence
+            retainedProviderLaunchFences.insert(.openAICompatible)
+            if lifecycleIsCurrent(lease) {
+                applicationError = Self.providerLaunchDrainFailure
+                openAICompatibleState = .failed(Self.providerLaunchDrainFailure)
+            }
+            return false
+        }
+
+        let outcome = await performRestartOpenAICompatibleWhileLaunchesFenced(
+            configuration: configuration,
+            lease: lease
+        )
+        await finishProviderRestart(
+            providerID: .openAICompatible,
+            outcome: outcome,
+            launchFence: launchFence,
+            acquiredFreshFence: acquiredFreshFence,
+            lifecycleRemainsCurrent: lifecycleIsCurrent(lease)
+        )
+        return outcome.succeeded
+    }
+
+    private func performRestartOpenAICompatibleWhileLaunchesFenced(
+        configuration: OpenAICompatibleProviderConfiguration,
+        lease: LifecycleLease
+    ) async -> ProviderRestartOutcome {
+        guard lifecycleIsCurrent(lease) else { return .oldProviderUntouched }
+        let oldProviderStopped = await openAICompatibleProvider?.shutdownAndVerify() ?? true
+        guard oldProviderStopped else {
+            if lifecycleIsCurrent(lease) {
+                applicationError = openAICompatibleRestartCleanupFailure
+                openAICompatibleState = .failed(openAICompatibleRestartCleanupFailure)
+            }
+            return .failedClosed
+        }
+        guard lifecycleIsCurrent(lease) else { return .failedClosed }
+        for coordinator in coordinators.values {
+            coordinator.providerRestarted(.openAICompatible)
+        }
+        await agentProviders.unregister(.openAICompatible)
+        guard lifecycleIsCurrent(lease) else { return .failedClosed }
+        let provider = OpenAICompatibleAgentProvider(configuration: configuration)
+        await agentProviders.register(provider)
+        guard lifecycleIsCurrent(lease) else { return .failedClosed }
+        openAICompatibleProvider = provider
+        openAICompatibleConfiguration = configuration
+        openAICompatibleState = .ready("Configured")
+        UserDefaults.standard.set(
+            configuration.endpoint,
+            forKey: Self.openAICompatibleEndpointKey
+        )
+        UserDefaults.standard.set(
+            configuration.apiKeyFile,
+            forKey: Self.openAICompatibleAPIKeyFileKey
+        )
+        UserDefaults.standard.set(
+            configuration.apiKeyName,
+            forKey: Self.openAICompatibleAPIKeyNameKey
+        )
+        UserDefaults.standard.set(
+            configuration.displayName,
+            forKey: Self.openAICompatibleDisplayNameKey
+        )
+        return .succeeded
+    }
+
     private func finishProviderRestart(
         providerID: AgentProviderID,
         outcome: ProviderRestartOutcome,
@@ -970,6 +1189,7 @@ final class CodenessApplicationModel {
         }
         let codexStopped = (providerReport[.codex] ?? true) && appServerStopped
         let claudeStopped = providerReport[.claude] ?? true
+        let openAICompatibleStopped = providerReport[.openAICompatible] ?? true
         let providersStopped = providerReport.values.allSatisfy { $0 }
         guard providersStopped, appServerStopped, probesStopped else {
             var failures: [String] = []
@@ -979,6 +1199,12 @@ final class CodenessApplicationModel {
             } else {
                 claudeState = .stopped
                 currentClaudeExecutablePath = ""
+            }
+            if !openAICompatibleStopped {
+                failures.append(openAICompatibleQuitCleanupFailure)
+                openAICompatibleState = .failed(openAICompatibleQuitCleanupFailure)
+            } else {
+                openAICompatibleState = .stopped
             }
             if !codexStopped {
                 failures.append(Self.appServerCleanupFailure)
@@ -1015,6 +1241,7 @@ final class CodenessApplicationModel {
         eventTask = nil
         serverState = .stopped
         claudeState = .stopped
+        openAICompatibleState = .stopped
         return true
     }
 

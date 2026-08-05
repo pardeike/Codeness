@@ -13,7 +13,7 @@ struct WorkflowCatalogTests {
             bundles: [bundle]
         )
 
-        #expect(providers.providers.map(\.id) == [.codex, .claude])
+        #expect(providers.providers.map(\.id) == [.codex, .claude, .openAICompatible])
         #expect(providers.provider(.codex)?.supportsPlanMode == true)
         #expect(providers.provider(.codex)?.supportsFastMode == true)
         #expect(providers.provider(.codex)?.minimumVersion == "0.145.0")
@@ -24,6 +24,7 @@ struct WorkflowCatalogTests {
         #expect(providers.provider(.claude)?.knownModels.contains {
             $0.id == "sonnet" && !$0.supportsFastMode
         } == true)
+        #expect(providers.provider(.openAICompatible)?.knownModels.isEmpty == true)
         #expect(workflows.defaultTemplateID == "implement-review-fix")
         #expect(Set(workflows.templates.map(\.id)) == [
             "implement-review-fix",
