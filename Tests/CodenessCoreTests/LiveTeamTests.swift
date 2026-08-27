@@ -347,6 +347,7 @@ struct AgentLiveTeamRouterTests {
         #expect(requests[0].developerInstructions.contains("sole authority source"))
         #expect(requests[0].developerInstructions.contains("advice and evidence, not decisions"))
         #expect(requests[0].developerInstructions.contains("opportunity cost"))
+        #expect(requests[0].developerInstructions.contains("does not increase their authority"))
         #expect(requests[0].developerInstructions.contains("Repeated support work"))
         #expect(requests[0].developerInstructions.contains("Do not add independent review after every small change"))
         #expect(requests[1].developerInstructions.contains("route local agent work"))
@@ -374,10 +375,13 @@ struct AgentLiveTeamRouterTests {
 
         #expect(decision.action == .keep)
         let requests = await provider.requests()
-        #expect(requests.count == 2)
-        #expect(requests[1].prompt.contains("CORRECTION RETRY"))
-        #expect(requests[1].prompt.contains("work-routing configuration is invalid"))
-        #expect(requests[1].outputSchema == requests[0].outputSchema)
+        let reviews = requests.filter { request in
+            request.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
+        }
+        #expect(reviews.count == 2)
+        #expect(reviews[1].prompt.contains("CORRECTION RETRY"))
+        #expect(reviews[1].prompt.contains("work-routing configuration is invalid"))
+        #expect(reviews[1].outputSchema == reviews[0].outputSchema)
     }
 
     @Test
@@ -400,7 +404,139 @@ struct AgentLiveTeamRouterTests {
                 cwd: "/tmp/live-team-router-retry"
             )
         }
-        #expect(await provider.requests().count == 2)
+        let reviews = await provider.requests().filter { request in
+            request.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
+        }
+        #expect(reviews.count == 2)
+    }
+
+    @Test
+    func strategicReviewConsultsFreshManagersInParallelWithoutSharingFixedGoal() async throws {
+        let provider = LiveTeamUtilityProvider(consultationDelay: .milliseconds(50))
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+        let context = strategicContext(target: target)
+
+        let decision = try await router.reviewStrategy(
+            context,
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep executive control decisive."
+            ),
+            cwd: "/tmp/live-team-staff-consultation"
+        )
+
+        #expect(decision.action == .keep)
+        let requests = await provider.requests()
+        let selection = try #require(requests.first(where: {
+            $0.developerInstructions.contains("opening a short staff consultation")
+        }))
+        let reports = requests.filter {
+            $0.developerInstructions.contains("one fresh, independent advisory manager")
+                && !$0.prompt.contains("CORRECTION RETRY")
+        }
+        let finalReview = try #require(requests.first(where: {
+            $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
+        }))
+
+        #expect(selection.prompt.contains(context.userGoal))
+        #expect(reports.count == 2)
+        #expect(reports.allSatisfy { !$0.prompt.contains(context.userGoal) })
+        #expect(reports.allSatisfy { $0.target == target })
+        #expect(reports.allSatisfy { $0.developerInstructions.contains("have no authority") })
+        #expect(finalReview.prompt.contains("STAFF CONSULTATION"))
+        #expect(finalReview.prompt.contains("Creative direction is stalled"))
+        #expect(finalReview.prompt.contains("Engineering has a working vertical path"))
+        #expect(finalReview.prompt.contains(context.userGoal))
+        #expect(finalReview.prompt.contains("do not count votes"))
+        #expect(finalReview.prompt.contains("vote count is not a reason to act"))
+        #expect(await provider.maximumConcurrentConsultations() == 2)
+    }
+
+    @Test
+    func strategicReviewPreservesAnUnavailableManagerWithoutLosingOtherAdvice() async throws {
+        let provider = LiveTeamUtilityProvider(unavailablePersona: "Creative Director")
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+
+        let decision = try await router.reviewStrategy(
+            strategicContext(target: target),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep executive control decisive."
+            ),
+            cwd: "/tmp/live-team-partial-staff-consultation"
+        )
+
+        #expect(decision.action == .keep)
+        let requests = await provider.requests()
+        let creativeReports = requests.filter {
+            $0.developerInstructions.contains("one fresh, independent advisory manager")
+                && $0.prompt.contains("Creative Director")
+        }
+        #expect(creativeReports.count == 2)
+        let finalReview = try #require(requests.first(where: {
+            $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
+        }))
+        #expect(finalReview.prompt.contains("Creative Director"))
+        #expect(finalReview.prompt.contains("unavailable after retry"))
+        #expect(finalReview.prompt.contains("Engineering has a working vertical path"))
+    }
+
+    @Test
+    func strategicReviewDoesNotSilentlySkipAnEntireFailedConsultation() async {
+        let provider = LiveTeamUtilityProvider(unavailablePersona: "Director")
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+
+        await #expect(throws: AgentProviderError.self) {
+            try await router.reviewStrategy(
+                strategicContext(target: target),
+                configuration: LiveTeamOverseerConfiguration(
+                    target: target,
+                    instructions: "Keep executive control decisive."
+                ),
+                cwd: "/tmp/live-team-failed-staff-consultation"
+            )
+        }
+
+        let requests = await provider.requests()
+        #expect(requests.filter {
+            $0.developerInstructions.contains("one fresh, independent advisory manager")
+        }.count == 4)
+        #expect(!requests.contains(where: {
+            $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
+        }))
+    }
+
+    @Test
+    func completionReviewAlsoUsesStaffConsultation() async throws {
+        let provider = LiveTeamUtilityProvider()
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+        let context = strategicContext(target: target)
+
+        let decision = try await router.reviewCompletion(
+            context,
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep executive control decisive."
+            ),
+            cwd: "/tmp/live-team-completion-consultation"
+        )
+
+        #expect(decision.outcome == .continueWork)
+        let requests = await provider.requests()
+        let finalReview = try #require(requests.first(where: {
+            $0.outputSchema.objectValue?["properties"]?.objectValue?["outcome"] != nil
+        }))
+        #expect(finalReview.prompt.contains("STAFF CONSULTATION"))
+        #expect(finalReview.prompt.contains("Creative Director"))
+        #expect(finalReview.prompt.contains(context.userGoal))
     }
 
     @Test
@@ -534,6 +670,8 @@ struct AgentLiveTeamRouterTests {
         ))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.coordinatorSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.completionSchema))
+        #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.staffSelectionSchema))
+        #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.staffReportSchema))
         #expect(schemaEnumValues(
             AgentLiveTeamRouter.coordinatorSchema,
             property: "disposition"
@@ -546,6 +684,14 @@ struct AgentLiveTeamRouterTests {
             AgentLiveTeamRouter.completionSchema,
             property: "outcome"
         ) == ["complete", "continueWork"])
+        #expect(schemaEnumValues(
+            AgentLiveTeamRouter.staffReportSchema,
+            property: "involvement"
+        ) == ["essential", "supporting", "notNeeded", "unknown"])
+        #expect(schemaEnumValues(
+            AgentLiveTeamRouter.staffReportSchema,
+            property: "progress"
+        ) == ["advancing", "stalled", "regressing", "unknown"])
     }
 
     private static let invalidStrategicRevision = """
@@ -615,9 +761,19 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     nonisolated let id: AgentProviderID = .codex
     private var utilityRequests: [AgentUtilityRequest] = []
     private var outputs: [String]
+    private let consultationDelay: Duration
+    private let unavailablePersona: String?
+    private var activeConsultations = 0
+    private var maximumActiveConsultations = 0
 
-    init(outputs: [String] = []) {
+    init(
+        outputs: [String] = [],
+        consultationDelay: Duration = .zero,
+        unavailablePersona: String? = nil
+    ) {
         self.outputs = outputs
+        self.consultationDelay = consultationDelay
+        self.unavailablePersona = unavailablePersona
     }
 
     func prepareSession(_ request: AgentSessionRequest) throws -> AgentSession {
@@ -647,8 +803,59 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         throw AgentProviderError.missingRun(runID)
     }
 
-    func runUtility(_ request: AgentUtilityRequest) -> AgentUtilityResult {
+    func runUtility(_ request: AgentUtilityRequest) async -> AgentUtilityResult {
         utilityRequests.append(request)
+        if request.developerInstructions.contains("opening a short staff consultation") {
+            return AgentUtilityResult(output: """
+            {
+              "personas": [
+                {
+                  "name": "Creative Director",
+                  "mandate": "Judge whether the experience is becoming a coherent product."
+                },
+                {
+                  "name": "Engineering Director",
+                  "mandate": "Judge implementation progress, technical risk, and the next production move."
+                }
+              ]
+            }
+            """)
+        }
+        if request.developerInstructions.contains("one fresh, independent advisory manager") {
+            activeConsultations += 1
+            maximumActiveConsultations = max(
+                maximumActiveConsultations,
+                activeConsultations
+            )
+            if consultationDelay > .zero {
+                try? await Task.sleep(for: consultationDelay)
+            }
+            activeConsultations -= 1
+            if let unavailablePersona,
+               request.prompt.contains(unavailablePersona) {
+                return AgentUtilityResult(output: "invalid report")
+            }
+            if request.prompt.contains("Creative Director") {
+                return AgentUtilityResult(output: """
+                {
+                  "involvement": "essential",
+                  "progress": "stalled",
+                  "evidence": "Creative direction is stalled while recent work concentrates on support documents.",
+                  "concern": "The playable experience is not yet carrying the product ambition.",
+                  "nextMove": "Build and evaluate the next player-facing slice."
+                }
+                """)
+            }
+            return AgentUtilityResult(output: """
+            {
+              "involvement": "essential",
+              "progress": "advancing",
+              "evidence": "Engineering has a working vertical path and can continue implementation.",
+              "concern": "None supported by the supplied evidence.",
+              "nextMove": "Continue the highest-value production unit."
+            }
+            """)
+        }
         if !outputs.isEmpty {
             return AgentUtilityResult(output: outputs.removeFirst())
         }
@@ -660,6 +867,29 @@ private actor LiveTeamUtilityProvider: AgentProviding {
               "disposition": "continueTeam",
               "evidence": "The member reported implementation and tests.",
               "progressEvidence": "acceptedValidation"
+            }
+            """)
+        }
+        if request.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil {
+            return AgentUtilityResult(output: """
+            {
+              "action": "keep",
+              "reason": "The current setup still has useful product work.",
+              "evidence": "The staff reports and durable result support forward motion.",
+              "workingGoal": null,
+              "members": null,
+              "coordinator": null,
+              "overseerTargetID": null,
+              "preferredNextMemberID": null
+            }
+            """)
+        }
+        if request.outputSchema.objectValue?["properties"]?.objectValue?["outcome"] != nil {
+            return AgentUtilityResult(output: """
+            {
+              "outcome": "continueWork",
+              "evidence": "The staff reports show meaningful work remains.",
+              "reason": "The fixed goal is not yet complete."
             }
             """)
         }
@@ -690,6 +920,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     func shutdown() {}
     func shutdownAndVerify() -> Bool { true }
     func requests() -> [AgentUtilityRequest] { utilityRequests }
+    func maximumConcurrentConsultations() -> Int { maximumActiveConsultations }
 }
 
 private func strategicContext(target: AgentTarget) -> LiveTeamOverseerContext {

@@ -142,6 +142,23 @@ public protocol LiveTeamOverseerRouting: Sendable {
     ) async throws -> LiveTeamDefinition
 }
 
+private struct LiveTeamStaffPersona: Sendable, Equatable {
+    let name: String
+    let mandate: String
+}
+
+private struct LiveTeamStaffReport: Sendable, Equatable {
+    let persona: LiveTeamStaffPersona
+    let involvement: String
+    let progress: String
+    let evidence: String
+    let concern: String
+    let nextMove: String
+    let failure: String?
+
+    var isAvailable: Bool { failure == nil }
+}
+
 public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRouting {
     private static let maximumGoalCharacters = 24_000
     private static let maximumResultCharacters = 8_000
@@ -223,9 +240,19 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 "strategic review requires a current live-team definition"
             )
         }
+        let staffReports = try await conductStaffConsultation(
+            context,
+            mode: .strategicReview,
+            configuration: configuration,
+            cwd: cwd
+        )
         let request = AgentUtilityRequest(
             cwd: cwd,
-            prompt: Self.overseerPrompt(context, mode: .strategicReview),
+            prompt: Self.overseerPrompt(
+                context,
+                mode: .strategicReview,
+                staffReports: staffReports
+            ),
             target: configuration.target,
             developerInstructions: Self.overseerDeveloperInstructions(
                 policy: configuration.instructions
@@ -268,15 +295,172 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         configuration: LiveTeamOverseerConfiguration,
         cwd: String
     ) async throws -> LiveTeamCompletionDecision {
+        let staffReports = try await conductStaffConsultation(
+            context,
+            mode: .completionReview,
+            configuration: configuration,
+            cwd: cwd
+        )
         let request = AgentUtilityRequest(
             cwd: cwd,
-            prompt: Self.overseerPrompt(context, mode: .completionReview),
+            prompt: Self.overseerPrompt(
+                context,
+                mode: .completionReview,
+                staffReports: staffReports
+            ),
             target: configuration.target,
             developerInstructions: Self.completionDeveloperInstructions,
             outputSchema: Self.completionSchema
         )
         let result = try await providers.runUtility(request)
         return try Self.decodeCompletionDecision(result.output)
+    }
+
+    private func conductStaffConsultation(
+        _ context: LiveTeamOverseerContext,
+        mode: LiveTeamOverseerMode,
+        configuration: LiveTeamOverseerConfiguration,
+        cwd: String
+    ) async throws -> [LiveTeamStaffReport] {
+        let personas = try await selectStaffPersonas(
+            context,
+            mode: mode,
+            configuration: configuration,
+            cwd: cwd
+        )
+        let requests = personas.map { persona in
+            AgentUtilityRequest(
+                cwd: cwd,
+                prompt: Self.staffReportPrompt(context, persona: persona),
+                target: configuration.target,
+                developerInstructions: Self.staffReportDeveloperInstructions,
+                outputSchema: Self.staffReportSchema
+            )
+        }
+        let providers = self.providers
+        let reports = await withTaskGroup(
+            of: (Int, LiveTeamStaffReport).self,
+            returning: [LiveTeamStaffReport].self
+        ) { group in
+            for (index, request) in requests.enumerated() {
+                let persona = personas[index]
+                group.addTask {
+                    let report = await Self.requestStaffReport(
+                        persona: persona,
+                        request: request,
+                        providers: providers
+                    )
+                    return (index, report)
+                }
+            }
+            var indexed: [(Int, LiveTeamStaffReport)] = []
+            for await report in group {
+                indexed.append(report)
+            }
+            return indexed.sorted { $0.0 < $1.0 }.map { $0.1 }
+        }
+        try Task.checkCancellation()
+        guard reports.contains(where: { $0.isAvailable }) else {
+            throw AgentProviderError.invalidResponse(
+                "the staff consultation produced no usable manager reports"
+            )
+        }
+        return reports
+    }
+
+    private func selectStaffPersonas(
+        _ context: LiveTeamOverseerContext,
+        mode: LiveTeamOverseerMode,
+        configuration: LiveTeamOverseerConfiguration,
+        cwd: String
+    ) async throws -> [LiveTeamStaffPersona] {
+        let request = AgentUtilityRequest(
+            cwd: cwd,
+            prompt: Self.staffSelectionPrompt(context, mode: mode),
+            target: configuration.target,
+            developerInstructions: Self.staffSelectionDeveloperInstructions(
+                policy: configuration.instructions
+            ),
+            outputSchema: Self.staffSelectionSchema
+        )
+        do {
+            let result = try await providers.runUtility(request)
+            return try Self.decodeStaffPersonas(result.output)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let retry = AgentUtilityRequest(
+                cwd: request.cwd,
+                prompt: """
+                \(request.prompt)
+
+                CORRECTION RETRY
+                The previous staff list was unavailable or invalid: \(error.localizedDescription)
+                Return one corrected list with two to six distinct, relevant manager personas.
+                """,
+                target: request.target,
+                developerInstructions: request.developerInstructions,
+                outputSchema: request.outputSchema
+            )
+            let result = try await providers.runUtility(retry)
+            return try Self.decodeStaffPersonas(result.output)
+        }
+    }
+
+    private static func requestStaffReport(
+        persona: LiveTeamStaffPersona,
+        request: AgentUtilityRequest,
+        providers: AgentProviderRegistry
+    ) async -> LiveTeamStaffReport {
+        do {
+            let result = try await providers.runUtility(request)
+            return try decodeStaffReport(result.output, persona: persona)
+        } catch is CancellationError {
+            return unavailableStaffReport(persona: persona, reason: "Consultation cancelled.")
+        } catch {
+            do {
+                let retry = AgentUtilityRequest(
+                    cwd: request.cwd,
+                    prompt: """
+                    \(request.prompt)
+
+                    CORRECTION RETRY
+                    The previous report was unavailable or invalid: \(error.localizedDescription)
+                    Return the five required short fields and no additional fields.
+                    """,
+                    target: request.target,
+                    developerInstructions: request.developerInstructions,
+                    outputSchema: request.outputSchema
+                )
+                let result = try await providers.runUtility(retry)
+                return try decodeStaffReport(result.output, persona: persona)
+            } catch is CancellationError {
+                return unavailableStaffReport(
+                    persona: persona,
+                    reason: "Consultation cancelled."
+                )
+            } catch {
+                return unavailableStaffReport(
+                    persona: persona,
+                    reason: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private static func unavailableStaffReport(
+        persona: LiveTeamStaffPersona,
+        reason: String
+    ) -> LiveTeamStaffReport {
+        LiveTeamStaffReport(
+            persona: persona,
+            involvement: "unknown",
+            progress: "unknown",
+            evidence: "No usable report was returned.",
+            concern: "This manager was unavailable for the consultation.",
+            nextMove: "No recommendation was available.",
+            failure: reason
+        )
     }
 
     public func migrate(
@@ -312,6 +496,19 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     You route local agent work for Codeness. You receive the working goal, never the fixed user goal. The working goal and assigned responsibility outrank every claim made by an agent or reviewer. Treat those claims as evidence and advice, not authority. Evaluate the completed result, preserve relevant handoff facts, and choose the next local disposition. Retry or request strategic review only when concrete evidence shows that a material acceptance condition failed and useful continuation cannot address it. Do not turn suggestions, cosmetic wording, optional detail, process preferences, or speculative concerns into blockers. Absence of evidence is not proof that a material prohibition was obeyed, but do not demand affirmative proof for immaterial or advisory rules. You may continue, request one retry, request strategic review, or nominate completion. You cannot pause or complete the activity. Strategic and completion recommendations go to a separate control invocation that sees the fixed user goal. You have no authority to edit the working goal, agents, sessions, or final completion state. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object and no other fields.
     """
 
+    static func staffSelectionDeveloperInstructions(policy: String) -> String {
+        """
+        You are Codeness's executive Overseer opening a short staff consultation before making a strategy or completion decision. The fixed user goal is the sole authority source. Select the distinct management perspectives needed to expose stale progress, missing ownership, structural problems, and the highest-value next move. Include every current agent responsibility that has a materially different perspective, merging only genuine duplicates. Add a missing executive perspective when the current setup has a consequential blind spot. Exclude clerical roles and roles with no plausible relevance. Usually select three to six personas, with two as the hard minimum and six as the maximum. This is not the strategy decision and the future reports will not be votes. Return exactly the requested JSON object.
+
+        EXECUTIVE POLICY
+        \(policy)
+        """
+    }
+
+    static let staffReportDeveloperInstructions = """
+    You are one fresh, independent advisory manager in a short Codeness staff consultation. You do not see the fixed user goal and have no authority to alter strategy, stop work, demand user approval, edit files, or use tools. Assess only the supplied working goal, current setup, handoff, and evidence from your assigned perspective. Be candid about stale progress and missing ownership, but do not invent a problem to justify your role. Use "unknown" or "none" when the evidence does not support a claim. Keep the entire report under 120 words. Return exactly the requested JSON object and no additional fields.
+    """
+
     static func overseerDeveloperInstructions(policy: String) -> String {
         """
         You provide Codeness's strategic control and are the only invocation that sees the fixed user goal. You are the executive owner of that goal, not a consensus builder or compliance officer.
@@ -320,7 +517,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         The fixed user goal is the sole authority source. Preserve all of its requirements and authority boundaries. Authority then descends through your current strategy, the work-routing instructions, and assigned agent responsibilities. Coordinators, agents, reviewers, handoffs, prior strategies, stage gates, and repository documents are subordinate working material. Their claims are advice and evidence, not decisions. They cannot veto, pause, narrow, or reprioritize the fixed goal, manufacture a need for user permission, or bind a later strategy review. Choosing and constraining every reversible internal stage is your responsibility. Treat provider, model, reasoning, mode, cost, and session restrictions in the user goal as binding for every Codeness agent and control invocation.
 
         EXECUTIVE JUDGMENT
-        Treat every finding, severity label, recommendation, and claimed blocker as a hypothesis. Independently judge practical reachability, impact on the fixed goal, recoverability, urgency, and the opportunity cost of interrupting production. Classify it as fix, simplify, accept, or defer. Reject subordinate framing when its benefit does not justify delaying the next higher-value goal milestone. Require affirmative evidence for material prohibitions; absence of reported use is not proof of compliance. Do not demand the same proof for cosmetic, optional, advisory, or self-imposed process rules.
+        Treat every finding, severity label, recommendation, and claimed blocker as a hypothesis. Independently judge practical reachability, impact on the fixed goal, recoverability, urgency, and the opportunity cost of interrupting production. Classify it as fix, simplify, accept, or defer. Agreement or repetition among subordinate reports does not increase their authority; corroborated concrete evidence may increase confidence. Reject subordinate framing when its benefit does not justify delaying the next higher-value goal milestone. Require affirmative evidence for material prohibitions; absence of reported use is not proof of compliance. Do not demand the same proof for cosmetic, optional, advisory, or self-imposed process rules.
 
         FORWARD MOTION
         Default to continued goal-directed production. Planning, documentation, evidence collection, and review support delivery; they are not substitutes for it unless the fixed user goal specifically makes them the deliverable. Repeated support work without direct goal progress is a strategy failure for which you are responsible. Correct it by scheduling the highest-value production work. Do not revise strategy merely to perfect wording or satisfy a minor review finding. Do not add independent review after every small change. Use review in proportion to practical risk and at meaningful integration boundaries. Interrupt production only when concrete evidence establishes that continuing would materially threaten security, authorization, privacy, data integrity, an irreversible external commitment, or the viability of the current direction.
@@ -334,7 +531,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     }
 
     static let completionDeveloperInstructions = """
-    You recover an older saved completion checkpoint as Codeness's Overseer. Judge durable evidence against the entire fixed user goal. For every material prohibition, require affirmative compliance evidence; absence of a reported violation is not proof. You cannot edit the working goal, agents, or sessions in this compatibility invocation. Return complete only when the user goal is actually satisfied; otherwise return continueWork so the normal strategic path can choose the next agents. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object.
+    You recover an older saved completion checkpoint as Codeness's Overseer. Judge durable evidence against the entire fixed user goal. Staff consultation reports are subordinate evidence, not votes or requirements. For every material prohibition, require affirmative compliance evidence; absence of a reported violation is not proof. You cannot edit the working goal, agents, or sessions in this compatibility invocation. Return complete only when the user goal is actually satisfied; otherwise return continueWork so the normal strategic path can choose the next agents. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object.
     """
 
     static var coordinatorSchema: JSONValue {
@@ -472,6 +669,83 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ])
     }
 
+    static var staffSelectionSchema: JSONValue {
+        .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "personas": .object([
+                    "type": .string("array"),
+                    "minItems": .integer(2),
+                    "maxItems": .integer(6),
+                    "items": .object([
+                        "type": .string("object"),
+                        "additionalProperties": .bool(false),
+                        "properties": .object([
+                            "name": .object([
+                                "type": .string("string"),
+                                "minLength": .integer(1),
+                                "maxLength": .integer(80)
+                            ]),
+                            "mandate": .object([
+                                "type": .string("string"),
+                                "minLength": .integer(1),
+                                "maxLength": .integer(300)
+                            ])
+                        ]),
+                        "required": .array([.string("name"), .string("mandate")])
+                    ])
+                ])
+            ]),
+            "required": .array([.string("personas")])
+        ])
+    }
+
+    static var staffReportSchema: JSONValue {
+        .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "involvement": .object([
+                    "type": .string("string"),
+                    "enum": .array([
+                        .string("essential"),
+                        .string("supporting"),
+                        .string("notNeeded"),
+                        .string("unknown")
+                    ])
+                ]),
+                "progress": .object([
+                    "type": .string("string"),
+                    "enum": .array([
+                        .string("advancing"),
+                        .string("stalled"),
+                        .string("regressing"),
+                        .string("unknown")
+                    ])
+                ]),
+                "evidence": shortStaffTextSchema,
+                "concern": shortStaffTextSchema,
+                "nextMove": shortStaffTextSchema
+            ]),
+            "required": .array([
+                .string("involvement"),
+                .string("progress"),
+                .string("evidence"),
+                .string("concern"),
+                .string("nextMove")
+            ])
+        ])
+    }
+
+    private static var shortStaffTextSchema: JSONValue {
+        .object([
+            "type": .string("string"),
+            "minLength": .integer(1),
+            "maxLength": .integer(400)
+        ])
+    }
+
     private static func memberSchema(targetIDs: [JSONValue]) -> JSONValue {
         .object([
             "type": .string("object"),
@@ -570,22 +844,92 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         """
     }
 
-    private static func overseerPrompt(
+    private static func staffSelectionPrompt(
         _ context: LiveTeamOverseerContext,
         mode: LiveTeamOverseerMode
+    ) -> String {
+        let current = context.currentDefinition.map(definitionDescription)
+            ?? "No current setup exists."
+        return """
+        REVIEW MODE
+        \(mode.displayName)
+
+        REVIEW TRIGGER
+        \(context.triggerReason)
+
+        CURRENT STRATEGY
+        \(current)
+
+        CURRENT HANDOFF
+        \(context.coordinatorHandoff ?? "None")
+
+        RECENT EVIDENCE
+        \(evidenceDescription(context))
+
+        FIXED USER GOAL
+        \(abbreviated(context.userGoal, limit: maximumGoalCharacters))
+
+        Select the relevant manager personas for a short consultation before your decision. Cover materially different perspectives and the current agents' real responsibilities. Add a missing management perspective only when it can expose a consequential blind spot. Do not decide the strategy yet.
+        """
+    }
+
+    private static func staffReportPrompt(
+        _ context: LiveTeamOverseerContext,
+        persona: LiveTeamStaffPersona
+    ) -> String {
+        let current = context.currentDefinition.map(definitionDescription)
+            ?? "No current setup exists."
+        return """
+        YOUR MANAGER PERSONA
+        \(persona.name)
+
+        YOUR MANDATE
+        \(persona.mandate)
+
+        CURRENT WORKING GOAL
+        \(abbreviated(
+            context.currentDefinition?.workingGoal ?? "No working goal exists.",
+            limit: maximumGoalCharacters
+        ))
+
+        CURRENT STRATEGY AND TEAM
+        \(current)
+
+        CURRENT HANDOFF
+        \(context.coordinatorHandoff ?? "None")
+
+        RECENT EVIDENCE
+        \(evidenceDescription(context))
+
+        RECENT STRATEGY CHANGES
+        \(editHistoryDescription(context))
+
+        Report your present involvement, real progress, one evidence-backed concern or "none", and the single next move you would recommend. You are advising the Overseer, not making the decision.
+        """
+    }
+
+    private static func overseerPrompt(
+        _ context: LiveTeamOverseerContext,
+        mode: LiveTeamOverseerMode,
+        staffReports: [LiveTeamStaffReport] = []
     ) -> String {
         let targets = context.targetOptions.map {
             "- \($0.id): \($0.label) [\($0.target.providerID.rawValue) / \($0.target.model) / \($0.target.options.mode.rawValue)]"
         }.joined(separator: "\n")
-        let evidence = context.recentEvidence.suffix(maximumEvidenceItems).map {
+        let evidence = evidenceDescription(context)
+        let edits = editHistoryDescription(context)
+        let staff = staffReports.map { report in
+            let availability = report.failure.map {
+                "\n  Availability: unavailable after retry — \(abbreviated($0, limit: 300))"
+            } ?? ""
+            return """
+            - \(report.persona.name) — \(report.persona.mandate)
+              Involvement: \(report.involvement)
+              Progress: \(report.progress)
+              Evidence: \(report.evidence)
+              Concern: \(report.concern)
+              Recommended next move: \(report.nextMove)\(availability)
             """
-            - Run \($0.sequence), \($0.memberName), \($0.status.displayName)
-              Result: \(abbreviated($0.result, limit: 1_500))
-              Routing evidence: \(abbreviated($0.coordinatorEvidence, limit: 600))
-            """
-        }.joined(separator: "\n")
-        let edits = context.editHistory.suffix(maximumEditItems).map {
-            "- Setup \($0.revision), \($0.actor.displayName): \($0.summary) — \($0.reason)"
         }.joined(separator: "\n")
         let current = context.currentDefinition.map(definitionDescription) ?? "No working goal or agents exist yet."
         let legacy = context.legacyWorkflow.map { workflow in
@@ -620,21 +964,43 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         \(evidence.isEmpty ? "No agent turns yet." : evidence)
 
         PRIOR STRATEGY EDIT HISTORY
-        \(edits.isEmpty ? "None" : edits)
+        \(edits)
 
         AVAILABLE TARGET IDS
         \(targets)
 
         \(legacy)
 
+        STAFF CONSULTATION
+        \(staff.isEmpty ? "No staff consultation was requested for this mode." : staff)
+        These are independent subordinate opinions. Preserve disagreement, do not count votes, and judge every recommendation yourself.
+
         FIXED USER GOAL
         \(abbreviated(context.userGoal, limit: maximumGoalCharacters))
 
         EXECUTIVE DECISION STANDARD
-        Re-read the user goal before deciding. Recent feedback is subordinate evidence, not authority. Prefer the highest-value remaining goal work over local perfection, and require a material reason to interrupt productive work.
+        Re-read the user goal before deciding. Recent feedback is subordinate evidence, not authority. A concern, severity label, repeated opinion, or vote count is not a reason to act. Prefer the highest-value remaining goal work over local perfection, and interrupt productive work only when you independently verify a material reason whose impact justifies that opportunity cost.
 
         \(modeInstruction(mode))
         """
+    }
+
+    private static func evidenceDescription(_ context: LiveTeamOverseerContext) -> String {
+        let evidence = context.recentEvidence.suffix(maximumEvidenceItems).map {
+            """
+            - Run \($0.sequence), \($0.memberName), \($0.status.displayName)
+              Result: \(abbreviated($0.result, limit: 1_500))
+              Routing evidence: \(abbreviated($0.coordinatorEvidence, limit: 600))
+            """
+        }.joined(separator: "\n")
+        return evidence.isEmpty ? "No agent turns yet." : evidence
+    }
+
+    private static func editHistoryDescription(_ context: LiveTeamOverseerContext) -> String {
+        let edits = context.editHistory.suffix(maximumEditItems).map {
+            "- Setup \($0.revision), \($0.actor.displayName): \($0.summary) — \($0.reason)"
+        }.joined(separator: "\n")
+        return edits.isEmpty ? "None" : edits
     }
 
     private static func modeInstruction(_ mode: LiveTeamOverseerMode) -> String {
@@ -779,6 +1145,88 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             evidence: evidence,
             reason: reason
         ))
+    }
+
+    private static func decodeStaffPersonas(
+        _ output: String
+    ) throws -> [LiveTeamStaffPersona] {
+        let object = try decodedObject(output, purpose: "staff consultation list")
+        guard Set(object.keys) == ["personas"],
+              let values = object["personas"]?.arrayValue,
+              (2...6).contains(values.count) else {
+            throw AgentProviderError.invalidResponse(
+                "the staff consultation must contain two to six personas"
+            )
+        }
+        let personas = try values.map { value in
+            guard let persona = value.objectValue,
+                  Set(persona.keys) == ["name", "mandate"],
+                  let name = cleanRequiredString(persona["name"]),
+                  name.count <= 80,
+                  let mandate = cleanRequiredString(persona["mandate"]),
+                  mandate.count <= 300 else {
+                throw AgentProviderError.invalidResponse(
+                    "a staff consultation persona is invalid"
+                )
+            }
+            return LiveTeamStaffPersona(name: name, mandate: mandate)
+        }
+        let distinctNames = Set(personas.map { $0.name.lowercased() })
+        guard distinctNames.count == personas.count else {
+            throw AgentProviderError.invalidResponse(
+                "staff consultation persona names must be distinct"
+            )
+        }
+        return personas
+    }
+
+    private static func decodeStaffReport(
+        _ output: String,
+        persona: LiveTeamStaffPersona
+    ) throws -> LiveTeamStaffReport {
+        let object = try decodedObject(output, purpose: "staff consultation report")
+        let allowed: Set<String> = [
+            "involvement", "progress", "evidence", "concern", "nextMove"
+        ]
+        let allowedInvolvement: Set<String> = [
+            "essential", "supporting", "notNeeded", "unknown"
+        ]
+        let allowedProgress: Set<String> = [
+            "advancing", "stalled", "regressing", "unknown"
+        ]
+        guard Set(object.keys) == allowed,
+              let involvement = object["involvement"]?.stringValue,
+              allowedInvolvement.contains(involvement),
+              let progress = object["progress"]?.stringValue,
+              allowedProgress.contains(progress),
+              let evidence = cleanRequiredString(object["evidence"]),
+              evidence.count <= 400,
+              let concern = cleanRequiredString(object["concern"]),
+              concern.count <= 400,
+              let nextMove = cleanRequiredString(object["nextMove"]),
+              nextMove.count <= 400 else {
+            throw AgentProviderError.invalidResponse(
+                "a staff consultation report has missing, extra, or invalid fields"
+            )
+        }
+        let wordCount = [evidence, concern, nextMove]
+            .joined(separator: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .count
+        guard wordCount <= 120 else {
+            throw AgentProviderError.invalidResponse(
+                "a staff consultation report exceeds 120 words"
+            )
+        }
+        return LiveTeamStaffReport(
+            persona: persona,
+            involvement: involvement,
+            progress: progress,
+            evidence: evidence,
+            concern: concern,
+            nextMove: nextMove,
+            failure: nil
+        )
     }
 
     private static func decodeDefinitionValue(
