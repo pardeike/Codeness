@@ -40,9 +40,9 @@ Codeness includes three ready-to-use workflows:
 
 Every bundled workflow can be edited, duplicated, or used as the starting point for a custom workflow.
 
-The current template model freezes workflow structure after an activity starts. A design proposal replaces it for
-new activities with a fixed user goal, an overseer-created working goal, and a live ordered loop that can change at
-safe boundaries while work is running. See [Live loop editing redesign](Documentation/live-loop-redesign.md).
+The current template model freezes workflow structure after an activity starts. A design proposal replaces it with
+a Board-owned user goal, a strategic Overseer, a tactical Coordinator, and a live team that can change at safe
+boundaries while work is running. See [Live team redesign](Documentation/live-loop-redesign.md).
 
 ## Get started
 
