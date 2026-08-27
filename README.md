@@ -78,7 +78,7 @@ The selected folder is not silently replaced by a parent Git root. Different sub
 
 ## During an activity
 
-- **Pause** stops after the current result and handoff reach a saved boundary.
+- **Pause** stops after the current result and handoff reach a saved boundary. Any strategy or completion review requested by that handoff waits for Resume.
 - **Stop Now** interrupts the active turn. Resume recovers from the saved assignment and current repository state.
 - **Change Goal** takes effect immediately while paused or between turns while running, then triggers a strategy review.
 - Codeness chooses one-time or recurring agents and their memory policy as part of its strategy.

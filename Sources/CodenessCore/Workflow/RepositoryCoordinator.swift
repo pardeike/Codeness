@@ -4114,6 +4114,15 @@ public final class RepositoryCoordinator {
             pauseLiveTeamActivity(message: "Codeness cannot review the strategy right now.")
             return
         }
+        if pauseAfterCurrent {
+            state.resumeCheckpoint = .invokeOverseer(request)
+            state.boardDirectionReason = nil
+            record.activity?.liveTeam = state
+            record.activity?.status = .paused
+            statusMessage = "Paused before \(request.mode.displayName.lowercased())"
+            try? await persist()
+            return
+        }
         if request.mode == .bootstrap || request.mode == .strategicReview {
             state.lastStrategicReviewAt = .now
         }

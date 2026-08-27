@@ -261,6 +261,65 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
+    func pauseAfterCurrentDefersCoordinatorRequestedReviewUntilResume() async throws {
+        let fixture = try makeFixture(goal: "Pause before the next control action.")
+        defer { fixture.remove() }
+        let definition = liveDefinition(members: [
+            liveMember(id: "deliver", sessionPolicy: .ownMemory)
+        ])
+        let gate = FirstRunGate()
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            firstRunGate: gate
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.requestOversight, evidence: "The next action needs a strategy change."),
+            decision(.completionCandidate)
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: fixture.goal)
+        await gate.waitUntilBlocked()
+        let reviewDateBeforePause = coordinator.record.activity?.liveTeam?.lastStrategicReviewAt
+
+        coordinator.setPauseAfterCurrent(true)
+        await gate.release()
+        try await waitUntil { coordinator.record.activity?.status == .paused }
+
+        #expect(await overseer.recordedStrategicContexts().isEmpty)
+        #expect(coordinator.statusMessage == "Paused before strategic review")
+        #expect(
+            coordinator.record.activity?.liveTeam?.lastStrategicReviewAt
+                == reviewDateBeforePause
+        )
+        guard case .invokeOverseer(let request)? =
+            coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
+            Issue.record("Pause did not preserve the requested Overseer review.")
+            return
+        }
+        #expect(request.reason == "The next action needs a strategy change.")
+
+        await coordinator.resume()
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+
+        #expect(await overseer.recordedStrategicContexts().count == 2)
+        #expect(await provider.runRequests().count == 2)
+    }
+
+    @Test
     func successfulSteeringIsRecordedInTheActiveTurnTranscript() async throws {
         let fixture = try makeFixture(goal: "Deliver the fixed user goal.")
         defer { fixture.remove() }
