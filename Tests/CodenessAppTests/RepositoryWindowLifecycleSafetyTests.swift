@@ -152,20 +152,13 @@ struct RepositoryWindowLifecycleSafetyTests {
         await recent.coordinator.load()
         try original.assertUnchanged(at: fixture.repositoryURL, after: "Open Recent")
 
-        // Reset through the real repository-window path. The operation must archive
-        // only Codeness metadata, retain the previous editable configuration, and
-        // leave every byte in the selected Git repository untouched.
-        let previousSettings = recent.coordinator.record.settings
-        #expect(recent.coordinator.canStartOver)
+        // Paused work remains resumable. Start Over is reserved for a goal the
+        // Overseer has completed, so reopening cannot discard this checkpoint.
+        #expect(!recent.coordinator.canStartOver)
         await recent.coordinator.startOver()
-        #expect(recent.coordinator.record.activity == nil)
-        #expect(recent.coordinator.record.activityDraft?.goal == "Protect this fixture")
-        #expect(recent.coordinator.record.activityDraft?.prompts == .builtInDefaults)
-        #expect(recent.coordinator.record.implementerThreadID == nil)
-        #expect(recent.coordinator.record.reviewerThreadID == nil)
-        #expect(recent.coordinator.record.settings == previousSettings)
-        #expect(recent.coordinator.canStartActivity)
-        try original.assertUnchanged(at: fixture.repositoryURL, after: "Start Over")
+        #expect(recent.coordinator.record.activity?.goal == "Protect this fixture")
+        #expect(recent.coordinator.canResume)
+        try original.assertUnchanged(at: fixture.repositoryURL, after: "rejected Start Over")
 
         recent.window?.performClose(nil)
         try await waitUntil { restoredManager.isEmpty }

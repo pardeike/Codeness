@@ -1,6 +1,6 @@
 # Goal-directed orchestration
 
-Status: implemented in the isolated prototype; not deployed to `/Applications/Codeness.app`
+Status: implemented in Codeness
 
 Origin: UnityBridge intervention, 2026-08-27
 
@@ -15,12 +15,12 @@ The user configures no template, role preset, or per-repository model matrix. Pr
 The interface uses five connected terms:
 
 - **Goal:** the user's definition of success, restrictions, and authority.
-- **Agents:** the editable set of bounded responsibilities Codeness prepared.
+- **Agents:** the visible set of bounded responsibilities Codeness prepared.
 - **Turn:** one agent execution.
 - **Round:** one pass through every recurring agent.
 - **Memory:** the provider conversation an agent retains, shares, or recreates.
 
-The interface says **agent change**, not revision. It does not expose the internal strategic or local-routing roles. Codeness is the subject in explanations: “Codeness reviews the strategy,” “Codeness prepares the next handoff,” and “Codeness needs your direction.”
+The interface says **agent change**, not revision. It does not expose the internal strategic or local-routing roles. Codeness is the subject in explanations: “Codeness reviews the strategy” and “Codeness prepares the next handoff.”
 
 Older source types retain names such as `LiveTeam*`, `member`, `cycle`, and `revision` for persisted compatibility. They are implementation vocabulary, not product copy. Old fixed-process types remain only to decode and adapt saved documents.
 
@@ -34,11 +34,17 @@ Two control agents have deliberately different authority. Their source names are
 | Coordinator | Evaluates one completed turn and prepares the next local action | No | No |
 | Agent | Performs one bounded responsibility | No | No |
 
-The Overseer acts like the strategic controller. It may change the working goal, agent order and responsibilities, targets, schedules, and memory policies. It cannot change the user goal or invent authority absent from it.
+The Overseer acts like the strategic controller. It may change the working goal, agent order and responsibilities, targets, schedules, and memory policies. At the same decision point, it may conclude that the fixed user goal is satisfied and the correct setup has no agents because no work remains; that completes the activity. It cannot change the user goal or invent authority absent from it.
 
-The Coordinator is the local manager. It receives the working goal, the completed result, bounded recent handoffs, and the proposed next agent. It may continue, retry once, pause, request a strategy review, or nominate completion. Its response schema contains no strategy edit or final-completion field.
+The Coordinator is the local manager. It receives the working goal, the completed result, bounded recent handoffs, and the proposed next agent. It may continue, retry once, request a strategy review, or suggest that the goal may be complete. Strategy and completion suggestions always go to the Overseer; the Coordinator cannot set the activity to Paused or Completed. Its response schema contains no strategy edit or final-completion field.
 
 This separation is the main feedback-loop control. Frequent local handoffs cannot repeatedly reinterpret the task. Strategy changes happen only in the less frequent control path that can compare evidence with the original goal.
+
+## User interaction contract
+
+The user creates or opens a project, defines the fixed goal, pauses or resumes work, steers an active agent, and edits the fixed goal. Codeness owns working goals, stage choices, agent setup, routing, review cadence, and completion judgment. After completion, Start Over archives the Codeness activity and returns to the goal editor without changing repository contents.
+
+File > New Project asks for a folder name and location, creates that empty folder, initializes Git, and opens its goal editor. Opening an existing folder also initializes Git when the folder is not already in a repository.
 
 ## Start
 
@@ -88,16 +94,16 @@ agent turn
 saved result
     |
     v
-local routing: continue, retry, pause, strategy review, or completion check
+local routing: continue, retry, strategy review, or completion check
     |
     v
 saved routing decision
     |
     v
-next agent turn or control review
+next agent turn or Overseer review
 ```
 
-One local retry is allowed. Repeated failure becomes strategy evidence rather than an unlimited retry loop.
+One local retry is allowed. Repeated failure becomes strategy evidence rather than an unlimited retry loop. Because only the Overseer sees the fixed user goal, it alone chooses the next internal stage and decides when no work remains.
 
 ## Strategy cadence and feedback limits
 
@@ -105,7 +111,6 @@ Strategy review occurs:
 
 - at initial setup;
 - after the user changes the goal;
-- when the user requests it;
 - when local routing requests it;
 - after two failures by the same agent;
 - when no agent can run;
@@ -114,11 +119,11 @@ Strategy review occurs:
 
 Automatic strategy changes apply only between turns. A running turn retains the exact assignment, working goal, and memory binding it started with.
 
-Elapsed time is a cooldown, never a trigger. Codeness has no strategy-review timer. Fast rounds keep accumulating until the next turn boundary after the cooldown expires. A user request, goal change, repeated failure, unrunnable setup, or completion claim bypasses the periodic cooldown because waiting cannot improve those decisions. The round limit, turn limit, cooldown, repeated-failure threshold, and automatic-change limit are separate values in the internal orchestration policy; they are not another user-facing settings form.
+The turn list marks each applied strategy revision with a compact chapter divider before the affected agent turns. Its Info popover shows the structural summary, reason, and evidence. This is a transparency surface, not an approval point.
 
-Codeness pauses after three automatic agent changes without durable progress. Durable progress currently means a repository change, accepted validation, a resolved blocker, or explicit user acknowledgment. These values are initial guardrails and should change only from observed activity data.
+Elapsed time is a cooldown, never a trigger. Codeness has no strategy-review timer. Fast rounds keep accumulating until the next turn boundary after the cooldown expires. A goal change, repeated failure, unrunnable setup, or completion claim bypasses the periodic cooldown because waiting cannot improve those decisions. The round limit, turn limit, cooldown, and repeated-failure threshold are internal orchestration values, not another user-facing settings form.
 
-A user edit always wins over an automatic proposal. Stale edits are rejected against the saved change sequence. The interface hides that sequence because users need the conflict behavior, not its storage mechanism.
+The user may change the fixed goal at any time. A running agent finishes against its immutable assignment, then the Overseer revises the strategy against the changed goal before another agent starts.
 
 ## Memory choices
 
@@ -136,15 +141,17 @@ The two control roles use fresh bounded invocations. Their durable memory is Cod
 
 ## Completion
 
-Local routing can only nominate completion. Codeness then uses a fresh control invocation with the original goal and bounded durable evidence.
+Local routing can only suggest that the goal may be complete. Codeness then activates the Overseer with the fixed user goal and bounded durable evidence, using the same strategic decision point that can keep or replace the agents.
 
-The completion audit may:
+The Overseer may:
 
-- complete the activity;
-- continue work, which triggers a strategy review; or
-- pause for user direction.
+- keep the current agents;
+- replace the working goal or agent setup;
+- complete the activity when the fixed user goal is satisfied and no agents are needed.
 
-The completion audit cannot edit the agents in the same response. This keeps “is the goal complete?” separate from “what setup should work next?”
+This makes stopping the loop a strategic setup decision owned by the only control role that sees the fixed user goal. Older saved completion-review checkpoints remain recoverable, but new work does not create them.
+
+The user can pause and later resume at a durable checkpoint. Working goals, agent instructions, handoffs, strategies, and stage gates are project documents that the Overseer may revise; they cannot create a user-approval requirement. Older saved strategy-direction pauses are repaired to an autonomous Overseer checkpoint without presenting a direction alert.
 
 ## Existing documents
 
@@ -154,7 +161,7 @@ Active documents from the fixed-process version adapt automatically on open:
 2. The old configuration, cursor, sessions, goal, and bounded evidence are supplied once to the strategic control path.
 3. Codeness validates and saves the resulting agents.
 4. The old active configuration fields are removed.
-5. The document remains paused for review or Resume.
+5. The document remains paused until Resume.
 
 There is no migration choice, offer, or button. If no usable goal exists, Codeness asks only for the goal. A failed attempt preserves the old paused activity and Resume retries adaptation; it never falls back to new work through the old engine.
 
@@ -168,6 +175,7 @@ The prototype deletes:
 - process and prompt-template editors;
 - restore-built-in controls;
 - repository role/model presets;
+- manual agent, memory, strategy-review, and review-before-apply controls;
 - process choice at activity start; and
 - migration buttons and persisted migration-request flags.
 
@@ -176,7 +184,7 @@ The Settings window now contains only agent-provider discovery, the optional Ope
 ## Persistence and recovery
 
 - A turn owns an immutable launch setup, agent snapshot, working goal, and memory binding.
-- A pending user or automatic change becomes authoritative only after it is saved.
+- A pending goal or automatic agent change becomes authoritative only after it is saved.
 - A crash during a turn recovers against that turn's launch snapshot.
 - A removed active agent may finish because its running turn owns the old snapshot.
 - Provider sessions are released only when no saved turn, checkpoint, or agent references them.

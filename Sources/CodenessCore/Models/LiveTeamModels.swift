@@ -432,9 +432,9 @@ public enum LiveTeamCoordinatorDisposition: String, Codable, CaseIterable, Senda
         switch self {
         case .continueTeam: "Continue"
         case .retryCurrent: "Retry current agent"
-        case .pause: "Pause"
+        case .pause: "Request strategy review"
         case .requestOversight: "Review strategy"
-        case .completionCandidate: "Check completion"
+        case .completionCandidate: "Suggest goal complete"
         }
     }
 }
@@ -486,7 +486,6 @@ public struct LiveTeamMemberSnapshot: Codable, Equatable, Sendable {
 public struct LiveTeamState: Codable, Equatable, Sendable {
     public var overseer: LiveTeamOverseerConfiguration
     public var currentDefinition: LiveTeamDefinition?
-    public var previousDefinition: LiveTeamDefinition?
     public var pendingRevision: LiveTeamPendingRevision?
     public var checkpoint: LiveTeamCheckpoint?
     public var resumeCheckpoint: LiveTeamResumeCheckpoint?
@@ -494,12 +493,10 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
     public var coordinatorHandoff: String?
     public var lastCoordinatorDecision: LiveTeamCoordinatorDecision?
     public var editHistory: [LiveTeamEditRecord]
-    public var reviewAutomaticChangesFirst: Bool
     public var workerTurnsSinceStrategicReview: Int
     public var cyclesSinceStrategicReview: Int
     public var lastStrategicReviewAt: Date?
     public var cyclesUnderCurrentRevision: Int
-    public var automaticRevisionsWithoutProgress: Int
     public var localRetryMemberID: String?
     public var localRetryCount: Int
     public var memberFailureCounts: [String: Int]
@@ -510,7 +507,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
     public init(
         overseer: LiveTeamOverseerConfiguration,
         currentDefinition: LiveTeamDefinition? = nil,
-        previousDefinition: LiveTeamDefinition? = nil,
         pendingRevision: LiveTeamPendingRevision? = nil,
         checkpoint: LiveTeamCheckpoint? = nil,
         resumeCheckpoint: LiveTeamResumeCheckpoint? = nil,
@@ -518,12 +514,10 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         coordinatorHandoff: String? = nil,
         lastCoordinatorDecision: LiveTeamCoordinatorDecision? = nil,
         editHistory: [LiveTeamEditRecord] = [],
-        reviewAutomaticChangesFirst: Bool = false,
         workerTurnsSinceStrategicReview: Int = 0,
         cyclesSinceStrategicReview: Int = 0,
         lastStrategicReviewAt: Date? = nil,
         cyclesUnderCurrentRevision: Int = 0,
-        automaticRevisionsWithoutProgress: Int = 0,
         localRetryMemberID: String? = nil,
         localRetryCount: Int = 0,
         memberFailureCounts: [String: Int] = [:],
@@ -533,7 +527,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
     ) {
         self.overseer = overseer
         self.currentDefinition = currentDefinition
-        self.previousDefinition = previousDefinition
         self.pendingRevision = pendingRevision
         self.checkpoint = checkpoint
         self.resumeCheckpoint = resumeCheckpoint
@@ -541,12 +534,10 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         self.coordinatorHandoff = coordinatorHandoff
         self.lastCoordinatorDecision = lastCoordinatorDecision
         self.editHistory = editHistory
-        self.reviewAutomaticChangesFirst = reviewAutomaticChangesFirst
         self.workerTurnsSinceStrategicReview = max(workerTurnsSinceStrategicReview, 0)
         self.cyclesSinceStrategicReview = max(cyclesSinceStrategicReview, 0)
         self.lastStrategicReviewAt = lastStrategicReviewAt
         self.cyclesUnderCurrentRevision = max(cyclesUnderCurrentRevision, 0)
-        self.automaticRevisionsWithoutProgress = max(automaticRevisionsWithoutProgress, 0)
         self.localRetryMemberID = localRetryMemberID
         self.localRetryCount = max(localRetryCount, 0)
         self.memberFailureCounts = memberFailureCounts
@@ -558,7 +549,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case overseer
         case currentDefinition
-        case previousDefinition
         case pendingRevision
         case checkpoint
         case resumeCheckpoint
@@ -566,12 +556,10 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         case coordinatorHandoff
         case lastCoordinatorDecision
         case editHistory
-        case reviewAutomaticChangesFirst
         case workerTurnsSinceStrategicReview
         case cyclesSinceStrategicReview
         case lastStrategicReviewAt
         case cyclesUnderCurrentRevision
-        case automaticRevisionsWithoutProgress
         case localRetryMemberID
         case localRetryCount
         case memberFailureCounts
@@ -590,10 +578,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
             currentDefinition: try container.decodeIfPresent(
                 LiveTeamDefinition.self,
                 forKey: .currentDefinition
-            ),
-            previousDefinition: try container.decodeIfPresent(
-                LiveTeamDefinition.self,
-                forKey: .previousDefinition
             ),
             pendingRevision: try container.decodeIfPresent(
                 LiveTeamPendingRevision.self,
@@ -623,10 +607,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
                 [LiveTeamEditRecord].self,
                 forKey: .editHistory
             ) ?? [],
-            reviewAutomaticChangesFirst: try container.decodeIfPresent(
-                Bool.self,
-                forKey: .reviewAutomaticChangesFirst
-            ) ?? false,
             workerTurnsSinceStrategicReview: try container.decodeIfPresent(
                 Int.self,
                 forKey: .workerTurnsSinceStrategicReview
@@ -642,10 +622,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
             cyclesUnderCurrentRevision: try container.decodeIfPresent(
                 Int.self,
                 forKey: .cyclesUnderCurrentRevision
-            ) ?? 0,
-            automaticRevisionsWithoutProgress: try container.decodeIfPresent(
-                Int.self,
-                forKey: .automaticRevisionsWithoutProgress
             ) ?? 0,
             localRetryMemberID: try container.decodeIfPresent(
                 String.self,
@@ -678,7 +654,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(overseer, forKey: .overseer)
         try container.encodeIfPresent(currentDefinition, forKey: .currentDefinition)
-        try container.encodeIfPresent(previousDefinition, forKey: .previousDefinition)
         try container.encodeIfPresent(pendingRevision, forKey: .pendingRevision)
         try container.encodeIfPresent(checkpoint, forKey: .checkpoint)
         try container.encodeIfPresent(resumeCheckpoint, forKey: .resumeCheckpoint)
@@ -690,10 +665,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         )
         try container.encode(editHistory, forKey: .editHistory)
         try container.encode(
-            reviewAutomaticChangesFirst,
-            forKey: .reviewAutomaticChangesFirst
-        )
-        try container.encode(
             workerTurnsSinceStrategicReview,
             forKey: .workerTurnsSinceStrategicReview
         )
@@ -703,10 +674,6 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
             forKey: .lastStrategicReviewAt
         )
         try container.encode(cyclesUnderCurrentRevision, forKey: .cyclesUnderCurrentRevision)
-        try container.encode(
-            automaticRevisionsWithoutProgress,
-            forKey: .automaticRevisionsWithoutProgress
-        )
         try container.encodeIfPresent(localRetryMemberID, forKey: .localRetryMemberID)
         try container.encode(localRetryCount, forKey: .localRetryCount)
         try container.encode(memberFailureCounts, forKey: .memberFailureCounts)
@@ -742,23 +709,17 @@ public struct LiveTeamOversightPolicy: Sendable, Equatable {
     public var periodicWorkerTurnInterval: Int
     public var minimumPeriodicReviewInterval: TimeInterval
     public var repeatedFailureThreshold: Int
-    public var automaticChangeLimitWithoutProgress: Int
 
     public init(
         periodicRoundInterval: Int = 3,
         periodicWorkerTurnInterval: Int = 12,
         minimumPeriodicReviewInterval: TimeInterval = 10 * 60,
-        repeatedFailureThreshold: Int = 2,
-        automaticChangeLimitWithoutProgress: Int = 3
+        repeatedFailureThreshold: Int = 2
     ) {
         self.periodicRoundInterval = max(periodicRoundInterval, 1)
         self.periodicWorkerTurnInterval = max(periodicWorkerTurnInterval, 1)
         self.minimumPeriodicReviewInterval = max(minimumPeriodicReviewInterval, 0)
         self.repeatedFailureThreshold = max(repeatedFailureThreshold, 1)
-        self.automaticChangeLimitWithoutProgress = max(
-            automaticChangeLimitWithoutProgress,
-            1
-        )
     }
 
     public func periodicReviewIsDue(
@@ -894,6 +855,7 @@ public enum LiveTeamStrategicAction: String, Codable, CaseIterable, Sendable {
     case keep
     case revise
     case pause
+    case complete
 }
 
 public struct LiveTeamStrategicDecision: Codable, Equatable, Sendable {

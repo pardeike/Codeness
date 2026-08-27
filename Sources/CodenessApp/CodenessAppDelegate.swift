@@ -80,6 +80,10 @@ final class CodenessAppDelegate: NSObject, NSApplicationDelegate {
         windowManager?.presentRepositoryOpenPanel()
     }
 
+    func newProject() {
+        windowManager?.presentNewProjectPanel()
+    }
+
     func importWorkspace() {
         windowManager?.presentWorkspaceImportPanel()
     }

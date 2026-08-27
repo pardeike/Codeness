@@ -959,7 +959,7 @@ struct AppServerIntegrationTests {
             activity: ActivityRecord(
                 goal: "Keep this activity",
                 prompts: .builtInDefaults,
-                status: .paused,
+                status: .completed,
                 runs: [
                     RunRecord(
                         sequence: 1,
@@ -972,7 +972,8 @@ struct AppServerIntegrationTests {
                         effort: "high",
                         prompt: "Implement"
                     )
-                ]
+                ],
+                completedAt: .now
             )
         )
         let baseStore = WorkspaceStore(rootURL: root)

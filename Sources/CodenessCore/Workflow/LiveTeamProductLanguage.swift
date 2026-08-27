@@ -122,7 +122,6 @@ enum LiveTeamProductLanguage {
         state.overseer.instructions = narrative(state.overseer.instructions)
         state.overseer.target = executionTarget(state.overseer.target)
         state.currentDefinition = state.currentDefinition.map(definition)
-        state.previousDefinition = state.previousDefinition.map(definition)
         if var pending = state.pendingRevision {
             pending.definition = definition(pending.definition)
             pending.reason = narrative(pending.reason)

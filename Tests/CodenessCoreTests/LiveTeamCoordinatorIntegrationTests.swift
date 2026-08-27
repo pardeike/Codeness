@@ -72,7 +72,7 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
-    func goalOnlyBootstrapPersistsBothDurabilityBarriersAndRequiresCompletionReview() async throws {
+    func goalOnlyBootstrapPersistsBothDurabilityBarriersAndRequiresOverseerCompletion() async throws {
         let fixture = try makeFixture(goal: "Board-only goal: ship the durable result.")
         defer { fixture.remove() }
         let definition = liveDefinition(members: [
@@ -106,7 +106,7 @@ struct LiveTeamCoordinatorIntegrationTests {
         #expect(await overseer.sawDurableGoalOnlyBootstrap())
         #expect(await provider.preparationFollowedDurableRevision() == [true])
         #expect(await overseer.bootstrapCount() == 1)
-        #expect(await overseer.completionReviewCount() == 1)
+        #expect(await overseer.completionReviewCount() == 0)
         #expect(await coordinatorRouter.routeCount() == 1)
 
         let activity = try #require(coordinator.record.activity)
@@ -122,14 +122,60 @@ struct LiveTeamCoordinatorIntegrationTests {
         let coordinatorContexts = await coordinatorRouter.contexts()
         #expect(coordinatorContexts.map(\.workingGoal) == [definition.workingGoal])
         #expect(coordinatorContexts[0].sourceResult == "Worker result 1")
-        let completionContexts = await overseer.completionContexts()
-        #expect(completionContexts.first?.userGoal == fixture.goal)
-        #expect(completionContexts.first?.currentDefinition == definition)
+        let strategicContexts = await overseer.recordedStrategicContexts()
+        #expect(strategicContexts.count == 1)
+        #expect(strategicContexts.first?.userGoal == fixture.goal)
+        #expect(strategicContexts.first?.currentDefinition == definition)
+        #expect(strategicContexts.first?.triggerReason.contains("no agents may be needed") == true)
 
         let persisted = try await fixture.store.load(canonicalPath: fixture.canonicalPath)
         #expect(persisted.activity?.status == .completed)
         #expect(persisted.activity?.liveTeam?.currentDefinition == definition)
         #expect(await provider.releasedSessionIDs() == ["codex-session-1"])
+    }
+
+    @Test
+    func coordinatorPauseRecommendationCannotStopWithoutOverseerApproval() async throws {
+        let fixture = try makeFixture(goal: "Continue unless the fixed goal requires me.")
+        defer { fixture.remove() }
+        let definition = liveDefinition(members: [
+            liveMember(id: "deliver", sessionPolicy: .ownMemory)
+        ])
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.pause, evidence: "The local result suggests asking the user."),
+            decision(.completionCandidate)
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: fixture.goal)
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.count == 2)
+        #expect(activity.runs.allSatisfy { $0.status == .completed })
+        #expect(activity.runs[0].coordinatorDecision?.disposition == .pause)
+        #expect(await coordinatorRouter.routeCount() == 2)
+        let reviews = await overseer.recordedStrategicContexts()
+        #expect(reviews.count == 2)
+        #expect(reviews[0].userGoal == fixture.goal)
+        #expect(reviews[0].triggerReason.contains("older work-routing action"))
+        #expect(reviews[1].triggerReason.contains("no agents may be needed"))
     }
 
     @Test
@@ -163,80 +209,6 @@ struct LiveTeamCoordinatorIntegrationTests {
         #expect(fresh.existingSessionIDs == [nil, nil])
         #expect(fresh.preparedSessionIDs == ["codex-session-1", "codex-session-2"])
         #expect(fresh.releasedSessionIDs == ["codex-session-1", "codex-session-2"])
-    }
-
-    @Test
-    func boardRevisionWaitsForSafeBoundaryAndNextRunUsesImmutableRevisionSnapshot() async throws {
-        let fixture = try makeFixture(goal: "Keep the fixed Board goal.")
-        defer { fixture.remove() }
-        let initialMember = liveMember(
-            id: "deliver",
-            instructions: "Use revision one instructions.",
-            sessionPolicy: .ownMemory
-        )
-        let initialDefinition = liveDefinition(members: [initialMember])
-        let revisedMember = liveMember(
-            id: "deliver",
-            instructions: "Use revision two instructions.",
-            sessionPolicy: .ownMemory
-        )
-        var proposedDefinition = liveDefinition(members: [revisedMember])
-        proposedDefinition.workingGoal = "Use the revised working goal."
-
-        let gate = FirstRunGate()
-        let provider = RecordingLiveTeamProvider(
-            store: fixture.store,
-            canonicalPath: fixture.canonicalPath,
-            firstRunGate: gate
-        )
-        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
-            decision(.continueTeam),
-            decision(.completionCandidate)
-        ])
-        let overseer = RecordingLiveTeamOverseer(
-            definition: initialDefinition,
-            store: fixture.store,
-            canonicalPath: fixture.canonicalPath,
-            expectedGoal: fixture.goal
-        )
-        let coordinator = makeCoordinator(
-            fixture: fixture,
-            provider: provider,
-            coordinatorRouter: coordinatorRouter,
-            overseer: overseer
-        )
-
-        await coordinator.load()
-        await coordinator.startActivity(goal: fixture.goal)
-        await gate.waitUntilBlocked()
-
-        let accepted = await coordinator.submitLiveTeamRevision(
-            proposedDefinition,
-            baseRevision: 1,
-            reason: "The Board changed the operating setup."
-        )
-        #expect(accepted)
-        #expect(coordinator.liveTeamDefinition?.revision == 1)
-        #expect(coordinator.pendingLiveTeamRevision?.actor == .board)
-        #expect(coordinator.record.activity?.runs.first?.liveTeamMember?.member == initialMember)
-
-        await gate.release()
-        try await waitUntil { coordinator.record.activity?.status == .completed }
-        try await waitUntilAsync { await provider.releasedSessionIDs().count == 2 }
-
-        let runs = try #require(coordinator.record.activity?.runs)
-        #expect(runs.count == 2)
-        #expect(runs[0].liveTeamMember?.revision == 1)
-        #expect(runs[0].liveTeamMember?.member.instructions == initialMember.instructions)
-        #expect(runs[1].liveTeamMember?.revision == 2)
-        #expect(runs[1].liveTeamMember?.workingGoal == proposedDefinition.workingGoal)
-        #expect(runs[1].liveTeamMember?.member.instructions == revisedMember.instructions)
-        #expect(coordinator.liveTeamDefinition?.revision == 2)
-        #expect(coordinator.pendingLiveTeamRevision == nil)
-        #expect(await provider.existingSessionIDs() == [nil, nil])
-        #expect(Set(await provider.releasedSessionIDs()) == [
-            "codex-session-1", "codex-session-2"
-        ])
     }
 
     @Test
@@ -281,7 +253,7 @@ struct LiveTeamCoordinatorIntegrationTests {
         try await waitUntil { coordinator.record.activity?.status == .completed }
 
         let strategicContexts = await overseer.recordedStrategicContexts()
-        #expect(strategicContexts.count == 1)
+        #expect(strategicContexts.count == 2)
         #expect(strategicContexts.first?.userGoal == amendedGoal)
         #expect(coordinator.record.activity?.goal == amendedGoal)
         #expect(coordinator.record.activity?.goalAmendments.count == 1)
@@ -431,6 +403,97 @@ struct LiveTeamCoordinatorIntegrationTests {
         #expect(runs[1].prompt.contains("Original immutable member assignment."))
         #expect(await provider.existingSessionIDs() == ["codex-session-stale"])
         #expect(await provider.preparedSessionIDs() == ["codex-session-stale"])
+    }
+
+    @Test
+    func olderCoordinatorPauseResumesThroughOverseerAuthority() async throws {
+        let fixture = try makeFixture(goal: "Only strategic control may pause this work.")
+        defer { fixture.remove() }
+        let member = liveMember(id: "deliver", sessionPolicy: .ownMemory)
+        let definition = liveDefinition(members: [member])
+        let checkpoint = LiveTeamCheckpoint(memberID: member.id, cycle: 1, revision: 1)
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: 1,
+            cycle: 1,
+            sessionSlotID: "member:deliver"
+        )
+        let pauseDecision = decision(
+            .pause,
+            evidence: "The released local router asked for user direction."
+        )
+        let pausedRun = RunRecord(
+            sequence: 1,
+            role: .implementer,
+            kind: .implementation,
+            status: .paused,
+            threadID: "codex-session-1",
+            model: member.target.model,
+            effort: member.target.options.effort ?? "",
+            prompt: "Original immutable member assignment.",
+            finalOutput: "Durable local result",
+            relayError: pauseDecision.evidence,
+            completedAt: .now,
+            agentTarget: member.target,
+            sessionLineage: 1,
+            liveTeamMember: snapshot,
+            coordinatorDecision: pauseDecision
+        )
+        var record = RepositoryRecord(canonicalPath: fixture.canonicalPath)
+        record.activity = ActivityRecord(
+            goal: fixture.goal,
+            prompts: .builtInDefaults,
+            status: .paused,
+            runs: [pausedRun],
+            liveTeam: LiveTeamState(
+                overseer: liveOverseerConfiguration(),
+                currentDefinition: definition,
+                checkpoint: checkpoint,
+                resumeCheckpoint: .perform(checkpoint),
+                coordinatorHandoff: pauseDecision.handoff,
+                lastCoordinatorDecision: pauseDecision,
+                memberFailureCounts: [member.id: 1]
+            )
+        )
+        try await fixture.store.save(record)
+
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.completionCandidate)
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+
+        #expect(coordinator.record.activity?.runs[0].status == .completed)
+        #expect(coordinator.record.activity?.runs[0].relayError == nil)
+        #expect(
+            coordinator.record.activity?.liveTeam?.resumeCheckpoint
+                == .applyCoordinatorDecision(pausedRun.id)
+        )
+        #expect(coordinator.record.activity?.liveTeam?.memberFailureCounts[member.id] == nil)
+
+        await coordinator.resume()
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+
+        #expect(await overseer.recordedStrategicContexts().count == 2)
+        #expect(coordinator.record.activity?.runs.count == 2)
+        #expect(await coordinatorRouter.routeCount() == 1)
     }
 
     @Test
@@ -597,7 +660,7 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
-    func expectedOverseerPauseRequestsBoardDirectionWithoutReportingAnError() async throws {
+    func olderOverseerPauseIsRejectedInsteadOfRequestingUserDirection() async throws {
         let fixture = try makeFixture(goal: "Pause when the Board must decide.")
         defer { fixture.remove() }
         let reason = "The remaining evidence decision belongs to the Board."
@@ -633,26 +696,42 @@ struct LiveTeamCoordinatorIntegrationTests {
 
         await coordinator.load()
         await coordinator.startActivity(goal: fixture.goal)
-        try await waitUntil { coordinator.boardDirectionMessage == reason }
+        try await waitUntil { coordinator.errorMessage != nil }
 
         #expect(coordinator.record.activity?.status == .paused)
-        #expect(coordinator.errorMessage == nil)
-        #expect(coordinator.statusMessage == "Paused for your direction")
+        #expect(coordinator.errorMessage?.contains("cannot ask you") == true)
+        #expect(coordinator.statusMessage == "Strategy review returned an invalid pause")
         #expect(
             coordinator.record.activity?.liveTeam?.editHistory.last?.summary
-                == "Paused for your direction"
+                == "Rejected autonomous pause"
         )
         let persisted = try await fixture.store.load(canonicalPath: fixture.canonicalPath)
         #expect(persisted.activity?.liveTeam?.editHistory.last?.reason == reason)
-        #expect(persisted.activity?.liveTeam?.boardDirectionReason == reason)
-        #expect(persisted.activity?.liveTeam?.resumeCheckpoint == nil)
+        #expect(persisted.activity?.liveTeam?.boardDirectionReason == nil)
+        guard case .invokeOverseer(let resumeRequest)? =
+            persisted.activity?.liveTeam?.resumeCheckpoint else {
+            Issue.record("The Overseer pause did not preserve a review checkpoint.")
+            return
+        }
+        #expect(!resumeRequest.automatic)
+        #expect(resumeRequest.continuation == nil)
+        #expect(resumeRequest.reason.contains(reason))
+        #expect(coordinator.canResume)
 
-        coordinator.clearBoardDirectionMessage()
-        #expect(coordinator.boardDirectionMessage == nil)
+        coordinator.clearError()
+        await coordinator.resume()
+        try await waitUntilAsync {
+            await overseer.recordedStrategicContexts().count == 2
+        }
+        let resumedReviews = await overseer.recordedStrategicContexts()
+        #expect(resumedReviews[1].triggerReason.contains("previously stopped at an internal strategy boundary"))
+        #expect(resumedReviews[1].triggerReason.contains("cannot manufacture a need for user approval"))
+        #expect(resumedReviews[1].triggerReason.contains("Choose and constrain the next reversible internal stage"))
+        #expect(coordinator.record.activity?.status == .paused)
     }
 
     @Test
-    func olderDirectionPauseRestoresNoticeAndDropsCompletedAgentCheckpoint() async throws {
+    func olderDirectionPauseRestoresAutonomousReviewAndDropsCompletedAgentCheckpoint() async throws {
         let fixture = try makeFixture(goal: "Pause when the user must decide.")
         defer { fixture.remove() }
         let oldReason = "The Board must decide after the team revision."
@@ -709,9 +788,15 @@ struct LiveTeamCoordinatorIntegrationTests {
         )
         await coordinator.load()
 
-        #expect(coordinator.boardDirectionMessage == normalizedReason)
-        #expect(coordinator.statusMessage == "Paused for your direction")
-        #expect(coordinator.record.activity?.liveTeam?.resumeCheckpoint == nil)
+        #expect(coordinator.statusMessage == "Paused before strategic review")
+        guard case .invokeOverseer(let resumeRequest)? =
+            coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
+            Issue.record("The older pause was not repaired to an Overseer checkpoint.")
+            return
+        }
+        #expect(resumeRequest.continuation == nil)
+        #expect(resumeRequest.reason.contains(normalizedReason))
+        #expect(coordinator.canResume)
         #expect(coordinator.record.activity?.goal == fixture.goal)
         #expect(
             coordinator.record.activity?.liveTeam?.currentDefinition?.strategicReason
@@ -719,18 +804,18 @@ struct LiveTeamCoordinatorIntegrationTests {
         )
         #expect(
             coordinator.record.activity?.liveTeam?.editHistory.last?.summary
-                == "Paused for your direction"
+                == "Recovered internal strategy boundary"
         )
         #expect(
             coordinator.record.activity?.liveTeam?.editHistory.last?.evidence
                 == "routing evidence came from the last round."
         )
         let persisted = try await fixture.store.load(canonicalPath: fixture.canonicalPath)
-        #expect(persisted.activity?.liveTeam?.boardDirectionReason == normalizedReason)
-        #expect(persisted.activity?.liveTeam?.resumeCheckpoint == nil)
+        #expect(persisted.activity?.liveTeam?.boardDirectionReason == nil)
+        #expect(persisted.activity?.liveTeam?.resumeCheckpoint == .invokeOverseer(resumeRequest))
         #expect(
             persisted.activity?.liveTeam?.editHistory.last?.summary
-                == "Paused for your direction"
+                == "Recovered internal strategy boundary"
         )
     }
 
@@ -1087,6 +1172,13 @@ private actor RecordingLiveTeamOverseer: LiveTeamOverseerRouting {
         _ = configuration
         _ = cwd
         strategicContexts.append(context)
+        if context.triggerReason.contains("no agents may be needed") {
+            return LiveTeamStrategicDecision(
+                action: .complete,
+                reason: "The fixed goal is satisfied and no agents are needed.",
+                evidence: "The bounded durable evidence satisfies the full goal."
+            )
+        }
         return strategicDecision
     }
 

@@ -1372,11 +1372,10 @@ struct GenericCoordinatorIntegrationTests {
         }
         #expect(coordinator.record.activity?.runs.last?.status == .failed)
 
-        #expect(coordinator.canStartOver)
+        #expect(!coordinator.canStartOver)
         await coordinator.startOver()
         #expect(coordinator.record.activity?.id == activityID)
-        #expect(coordinator.errorMessage?.contains("Provider-session detachment was not confirmed") == true)
-        #expect(await provider.releasedSessionIDs() == ["controlled-session"])
+        #expect((await provider.releasedSessionIDs()).isEmpty)
 
         let failedDetachClose = await coordinator.prepareForClose(strategy: .immediate)
         guard case .failed(let detachFailure) = failedDetachClose else {
@@ -1384,6 +1383,14 @@ struct GenericCoordinatorIntegrationTests {
             return
         }
         #expect(detachFailure.contains("could not confirm provider-session detachment"))
+        #expect(await provider.releasedSessionIDs() == ["controlled-session"])
+
+        let repeatedDetachClose = await coordinator.prepareForClose(strategy: .immediate)
+        guard case .failed(let repeatedDetachFailure) = repeatedDetachClose else {
+            Issue.record("Expected the second close to surface the repeated detachment failure")
+            return
+        }
+        #expect(repeatedDetachFailure.contains("could not confirm provider-session detachment"))
         #expect(await provider.releasedSessionIDs() == [
             "controlled-session",
             "controlled-session"

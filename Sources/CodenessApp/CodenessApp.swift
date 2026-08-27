@@ -41,6 +41,14 @@ private struct RepositoryWindowCommands: Commands {
         }
 
         CommandGroup(replacing: .newItem) {
+            Button("New Project…") {
+                appDelegate.newProject()
+            }
+            .keyboardShortcut("n", modifiers: .command)
+            .help("Create a new project folder, initialize Git, and open it in Codeness")
+
+            Divider()
+
             Button("Open Workspace…") {
                 appDelegate.openRepository()
             }

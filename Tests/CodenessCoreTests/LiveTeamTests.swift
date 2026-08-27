@@ -147,7 +147,6 @@ struct LiveTeamModelTests {
         #expect(decoded.overseer == state.overseer)
         #expect(decoded.editHistory.isEmpty)
         #expect(decoded.completedOnceMemberIDs.isEmpty)
-        #expect(!decoded.reviewAutomaticChangesFirst)
         #expect(decoded.workerTurnsSinceStrategicReview == 0)
         #expect(decoded.lastStrategicReviewAt == nil)
         #expect(decoded.boardDirectionReason == nil)
@@ -338,6 +337,8 @@ struct AgentLiveTeamRouterTests {
         #expect(requests[0].developerInstructions.contains("model"))
         #expect(requests[0].developerInstructions.contains("binding for every Codeness agent"))
         #expect(requests[0].developerInstructions.contains("affirmative evidence"))
+        #expect(requests[0].developerInstructions.contains("working documents that you may revise"))
+        #expect(requests[0].developerInstructions.contains("every reversible internal stage"))
         #expect(requests[1].developerInstructions.contains("route local agent work"))
         #expect(requests[1].developerInstructions.contains("Absence of evidence"))
     }
@@ -430,13 +431,13 @@ struct AgentLiveTeamRouterTests {
     }
 
     @Test
-    func strategicKeepAndPauseIgnoreStrayStrategyFields() throws {
+    func legacyStrategicPauseAndCurrentNonRevisionActionsIgnoreStrayFields() throws {
         let current = liveTeamDefinition()
         let targetOptions = [
             LiveTeamTargetOption(id: "primary", label: "Primary", target: testTarget())
         ]
 
-        for action in ["keep", "pause"] {
+        for action in ["keep", "pause", "complete"] {
             let decision = try AgentLiveTeamRouter.decodeStrategicDecision(
                 """
                 {
@@ -473,7 +474,25 @@ struct AgentLiveTeamRouterTests {
         ))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.coordinatorSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.completionSchema))
+        #expect(schemaEnumValues(
+            AgentLiveTeamRouter.coordinatorSchema,
+            property: "disposition"
+        ) == ["continueTeam", "retryCurrent", "requestOversight", "completionCandidate"])
+        #expect(schemaEnumValues(
+            AgentLiveTeamRouter.strategicSchema(targetOptions: targetOptions),
+            property: "action"
+        ) == ["keep", "revise", "complete"])
+        #expect(schemaEnumValues(
+            AgentLiveTeamRouter.completionSchema,
+            property: "outcome"
+        ) == ["complete", "continueWork"])
     }
+}
+
+private func schemaEnumValues(_ value: JSONValue, property: String) -> [String] {
+    value.objectValue?["properties"]?.objectValue?[property]?.objectValue?["enum"]?
+        .arrayValue?
+        .compactMap(\.stringValue) ?? []
 }
 
 private func schemaUsesStrictObjectProperties(_ value: JSONValue) -> Bool {

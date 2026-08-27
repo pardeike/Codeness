@@ -56,6 +56,7 @@ final class RepositoryWindowManager {
     private let applicationModel: CodenessApplicationModel
     private let commandState: RepositoryWindowCommandState
     private var windowControllers: [String: RepositoryWindowController] = [:]
+    private var newProjectPanel: NSSavePanel?
     private var repositoryOpenPanel: NSOpenPanel?
     private var workspaceImportPanel: NSOpenPanel?
     private var workspaceExportPanel: NSSavePanel?
@@ -79,6 +80,38 @@ final class RepositoryWindowManager {
 
     var isEmpty: Bool {
         windowControllers.isEmpty
+    }
+
+    func presentNewProjectPanel() {
+        guard newProjectPanel == nil else {
+            newProjectPanel?.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let savePanel = NSSavePanel()
+        savePanel.title = "New Project"
+        savePanel.prompt = "Create"
+        savePanel.message = "Choose a name and location for the new project folder. Codeness will initialize Git and then ask for the goal."
+        savePanel.nameFieldStringValue = "Untitled Project"
+        savePanel.canCreateDirectories = true
+        savePanel.isExtensionHidden = true
+        newProjectPanel = savePanel
+
+        savePanel.begin { [weak self, weak savePanel] response in
+            guard let self, let savePanel else { return }
+            newProjectPanel = nil
+            guard response == .OK, let selectedURL = savePanel.url else { return }
+            Task {
+                do {
+                    let workspaceURL = try await applicationModel.createWorkspace(
+                        at: selectedURL
+                    )
+                    _ = try await openRepository(at: workspaceURL, display: true)
+                } catch {
+                    presentError(error)
+                }
+            }
+        }
     }
 
     func presentRepositoryOpenPanel() {

@@ -255,7 +255,6 @@ public final class RepositoryCoordinator {
     public var pendingInteractionCount: Int { pendingInteractions.count }
     public private(set) var statusMessage = "Loading repository history…"
     public private(set) var errorMessage: String?
-    public private(set) var boardDirectionMessage: String?
     public private(set) var isLoaded = false
     public private(set) var pauseAfterCurrent = false
     public private(set) var isStartingActivity = false
@@ -506,14 +505,12 @@ public final class RepositoryCoordinator {
             && !isClosing
     }
 
-    /// Starting over is intentionally unavailable while any repository-changing
-    /// work, handoff routing, close preparation, or server interaction is live.
-    /// The user can pause or stop the active turn first and then reset from a durable checkpoint.
+    /// Starting over creates a new activity only after the Overseer has completed
+    /// the current goal. Paused work resumes from its durable checkpoint instead.
     public var canStartOver: Bool {
         guard isLoaded,
               loadInProgressGeneration == nil,
-              record.activity != nil,
-              record.activity?.status != .running,
+              record.activity?.status == .completed,
               !isStartingActivity,
               !isStartingOver,
               !isClosing,
@@ -693,7 +690,6 @@ public final class RepositoryCoordinator {
         loadInProgressGeneration = generation
         defer { finishLoad(generation: generation) }
         errorMessage = nil
-        boardDirectionMessage = nil
         do {
             let loadedRecord = try await store.load(
                 canonicalPath: record.canonicalPath,
@@ -736,7 +732,11 @@ public final class RepositoryCoordinator {
             guard isCurrentLoad(generation) else { return }
             if record.activity?.liveTeam != nil {
                 recoverInterruptedLiveTeamState()
-                restoreBoardDirectionPresentationIfNeeded()
+                if record.activity?.liveTeam?.pendingRevision != nil {
+                    _ = await activatePendingLiveTeamRevision()
+                }
+                repairCoordinatorPauseAuthorityIfNeeded()
+                repairAutonomousDirectionPauseIfNeeded()
             } else if record.activity?.workflow != nil {
                 recoverInterruptedGenericState()
             } else {
@@ -965,7 +965,6 @@ public final class RepositoryCoordinator {
         viewState.pauseAfterCurrent = false
         scheduleViewStateSave()
         errorMessage = nil
-        boardDirectionMessage = nil
         statusMessage = "Saving the goal…"
 
         do {
@@ -2170,199 +2169,6 @@ public final class RepositoryCoordinator {
         }
     }
 
-    @discardableResult
-    public func submitLiveTeamRevision(
-        _ proposedDefinition: LiveTeamDefinition,
-        baseRevision: Int,
-        reason: String,
-        evidence: String = "User edit",
-        preferredNextMemberID: String? = nil,
-        replacePendingBoardRevision: Bool = false,
-        discardOverseerProposal: Bool = false
-    ) async -> Bool {
-        guard let current = record.activity?.liveTeam?.currentDefinition else {
-            errorMessage = LiveTeamRevisionError.noCurrentDefinition.localizedDescription
-            return false
-        }
-        if record.activity?.liveTeam?.pendingRevision?.actor == .overseer {
-            guard discardOverseerProposal else {
-                errorMessage = "Review or discard Codeness's proposed agent changes before saving yours."
-                return false
-            }
-            record.activity?.liveTeam?.pendingRevision = nil
-        }
-        do {
-            let pending = try LiveTeamStateMachine.pendingRevision(
-                definition: proposedDefinition,
-                baseRevision: baseRevision,
-                actor: .board,
-                reason: reason,
-                evidence: evidence,
-                preferredNextMemberID: preferredNextMemberID,
-                currentDefinition: current,
-                existingPending: record.activity?.liveTeam?.pendingRevision,
-                replacingBoardPending: replacePendingBoardRevision
-            )
-            let previousActivity = record.activity
-            record.activity?.liveTeam?.pendingRevision = pending
-            record.activity?.liveTeam?.boardDirectionReason = nil
-            boardDirectionMessage = nil
-            do {
-                // Acknowledging the Board edit means this pending revision is
-                // already durable, even when an active turn keeps its launch
-                // snapshot until the next safe boundary.
-                try await persist()
-            } catch {
-                record.activity = previousActivity
-                throw error
-            }
-            let boundaryIsOpen = !hasActiveAgentTurn
-                && routingTasks.isEmpty
-                && completingRunIDs.isEmpty
-                && liveTeamControlInvocationCount == 0
-            if boundaryIsOpen {
-                guard await activatePendingLiveTeamRevision() else { return false }
-                record.activity?.status = .paused
-                if let checkpoint = preferredLiveTeamContinuation(
-                    requested: record.activity?.liveTeam?.checkpoint,
-                    preferredMemberID: preferredNextMemberID
-                ) {
-                    record.activity?.liveTeam?.checkpoint = checkpoint
-                    record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
-                }
-                statusMessage = "Agent changes applied"
-                try? await persist()
-            } else {
-                statusMessage = "Agent changes saved for between turns"
-            }
-            return true
-        } catch {
-            errorMessage = error.localizedDescription
-            return false
-        }
-    }
-
-    public func reviewLiveTeamStrategyNow() async {
-        guard record.activity?.liveTeam?.currentDefinition != nil else { return }
-        boardDirectionMessage = nil
-        let request = LiveTeamOverseerRequest(
-            mode: .strategicReview,
-            reason: "The user requested a strategic review now.",
-            continuation: record.activity?.liveTeam?.checkpoint,
-            automatic: false,
-            leavePaused: record.activity?.status == .paused
-        )
-        if hasActiveAgentTurn
-            || !routingTasks.isEmpty
-            || !completingRunIDs.isEmpty
-            || liveTeamControlInvocationCount > 0 {
-            record.activity?.liveTeam?.strategicReviewAfterBoundary = request
-            statusMessage = "Strategy review queued for between turns"
-            try? await persist()
-        } else {
-            await invokeLiveTeamOverseer(request)
-        }
-    }
-
-    @discardableResult
-    public func setReviewAutomaticLiveTeamChangesFirst(_ enabled: Bool) async -> Bool {
-        guard record.activity?.liveTeam != nil else { return false }
-        let previous = record.activity?.liveTeam?.reviewAutomaticChangesFirst
-        record.activity?.liveTeam?.reviewAutomaticChangesFirst = enabled
-        do {
-            try await persist()
-            return true
-        } catch {
-            record.activity?.liveTeam?.reviewAutomaticChangesFirst = previous ?? false
-            errorMessage = error.localizedDescription
-            return false
-        }
-    }
-
-    @discardableResult
-    public func acceptPendingOverseerRevision() async -> Bool {
-        guard record.activity?.status == .paused,
-              record.activity?.liveTeam?.pendingRevision?.actor == .overseer else {
-            return false
-        }
-        guard await activatePendingLiveTeamRevision() else { return false }
-        if let checkpoint = preferredLiveTeamContinuation(
-            requested: record.activity?.liveTeam?.checkpoint,
-            preferredMemberID: nil
-        ) {
-            record.activity?.liveTeam?.checkpoint = checkpoint
-            record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
-        }
-        statusMessage = "Agent changes accepted; paused"
-        try? await persist()
-        return true
-    }
-
-    @discardableResult
-    public func discardPendingOverseerRevision() async -> Bool {
-        guard record.activity?.liveTeam?.pendingRevision?.actor == .overseer else {
-            return false
-        }
-        let previous = record.activity?.liveTeam?.pendingRevision
-        record.activity?.liveTeam?.pendingRevision = nil
-        do {
-            try await persist()
-            statusMessage = pausedStatusMessage
-            return true
-        } catch {
-            record.activity?.liveTeam?.pendingRevision = previous
-            errorMessage = error.localizedDescription
-            return false
-        }
-    }
-
-    public func undoLastLiveTeamRevision() async -> Bool {
-        guard let state = record.activity?.liveTeam,
-              let current = state.currentDefinition,
-              var previous = state.previousDefinition else { return false }
-        previous.revision = current.revision + 1
-        previous.strategicReason = "You restored the preceding agents. Released conversation histories were not restored."
-        return await submitLiveTeamRevision(
-            previous,
-            baseRevision: current.revision,
-            reason: previous.strategicReason,
-            evidence: "User restored the preceding agents",
-            discardOverseerProposal: true
-        )
-    }
-
-    public func resetLiveTeamSession(memberID: String) async -> Bool {
-        guard record.activity?.status == .paused,
-              let definition = record.activity?.liveTeam?.currentDefinition,
-              let member = definition.member(id: memberID),
-              let slotID = member.sessionPolicy.persistentSlotID(memberID: memberID),
-              var session = record.activity?.stepSessions[slotID] else {
-            return false
-        }
-        let reference = session.providerSessionID.map {
-            ProviderSessionReference(
-                providerID: session.target.providerID,
-                sessionID: $0
-            )
-        }
-        let previous = session
-        session.lineage += 1
-        session.providerSessionID = nil
-        record.activity?.stepSessions[slotID] = session
-        do {
-            try await persist()
-            if let reference {
-                await releaseProviderSessions([reference])
-            }
-            statusMessage = "Reset \(member.name) memory"
-            return true
-        } catch {
-            record.activity?.stepSessions[slotID] = previous
-            errorMessage = error.localizedDescription
-            return false
-        }
-    }
-
     private func convertLegacyWorkflowNow() async {
         if let liveTeamRuntimeConfigurationProvider {
             liveTeamRuntimeConfiguration = liveTeamRuntimeConfigurationProvider(record.settings)
@@ -2876,10 +2682,6 @@ public final class RepositoryCoordinator {
 
     public func clearError() {
         errorMessage = nil
-    }
-
-    public func clearBoardDirectionMessage() {
-        boardDirectionMessage = nil
     }
 
     private func handleNotification(method: String, params: JSONValue, event: AppServerEvent) async {
@@ -3420,7 +3222,6 @@ public final class RepositoryCoordinator {
         viewState.pauseAfterCurrent = false
         scheduleViewStateSave()
         record.activity?.liveTeam?.boardDirectionReason = nil
-        boardDirectionMessage = nil
         statusMessage = "Resuming…"
 
         let checkpoint = liveTeam.resumeCheckpoint
@@ -3490,7 +3291,7 @@ public final class RepositoryCoordinator {
             return
         }
         if snapshotOverride == nil,
-           !(await activateBoardLiveTeamRevisionAtSafeBoundary()) {
+           !(await activatePendingLiveTeamRevisionAtSafeBoundary()) {
             return
         }
         guard let state = record.activity?.liveTeam,
@@ -3941,7 +3742,7 @@ public final class RepositoryCoordinator {
             return
         }
 
-        guard await activateBoardLiveTeamRevisionAtSafeBoundary() else {
+        guard await activatePendingLiveTeamRevisionAtSafeBoundary() else {
             completingRunIDs.remove(runID)
             return
         }
@@ -4042,9 +3843,6 @@ public final class RepositoryCoordinator {
               let definition = state.currentDefinition else { return }
 
         state.workerTurnsSinceStrategicReview += 1
-        if decision.progressEvidence.isDurable {
-            state.automaticRevisionsWithoutProgress = 0
-        }
         state.lastCoordinatorDecision = decision
         state.coordinatorHandoff = decision.handoff
         record.activity?.liveTeam = state
@@ -4104,32 +3902,23 @@ public final class RepositoryCoordinator {
             record.activity?.liveTeam?.memberFailureCounts[snapshot.member.id] = failures
             let failureThreshold = liveTeamRuntimeConfiguration?
                 .oversightPolicy.repeatedFailureThreshold ?? 2
-            if failures >= failureThreshold {
-                await requestLiveTeamStrategicReview(
-                    reason: "\(snapshot.member.name) has remained blocked \(failureThreshold) times.",
-                    automatic: true,
-                    continuation: nextLiveTeamCheckpoint(after: snapshot),
-                    unrunnable: true,
-                    sourceRunID: runID
-                )
-            } else {
-                let checkpoint = LiveTeamCheckpoint(
+            let repeated = failures >= failureThreshold
+            let reason = repeated
+                ? "\(snapshot.member.name) has remained blocked \(failureThreshold) times."
+                : decision.evidence.isEmpty
+                    ? "An older work-routing action requested a strategy review."
+                    : "An older work-routing action requested a strategy review: \(decision.evidence)"
+            await requestLiveTeamStrategicReview(
+                reason: reason,
+                automatic: true,
+                continuation: LiveTeamCheckpoint(
                     memberID: snapshot.member.id,
                     cycle: snapshot.cycle,
                     revision: definition.revision
-                )
-                record.activity?.status = .paused
-                record.activity?.liveTeam?.checkpoint = checkpoint
-                record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
-                updateRun(runID) {
-                    $0.status = .paused
-                    $0.relayError = decision.evidence.isEmpty
-                        ? "Work routing requested your direction."
-                        : decision.evidence
-                }
-                statusMessage = "Paused for your review"
-                try? await persist()
-            }
+                ),
+                unrunnable: repeated,
+                sourceRunID: runID
+            )
 
         case .requestOversight:
             markLiveTeamMemberComplete(snapshot)
@@ -4145,16 +3934,15 @@ public final class RepositoryCoordinator {
 
         case .completionCandidate:
             markLiveTeamMemberComplete(snapshot)
-            let request = LiveTeamOverseerRequest(
-                mode: .completionReview,
+            await requestLiveTeamStrategicReview(
                 reason: decision.evidence.isEmpty
-                    ? "Work routing nominated the goal for completion review."
-                    : decision.evidence,
-                sourceRunID: runID,
+                    ? "Work routing suggests the fixed goal may be complete and no agents may be needed."
+                    : "Work routing suggests the fixed goal may be complete and no agents may be needed: \(decision.evidence)",
+                automatic: true,
                 continuation: nextLiveTeamCheckpoint(after: snapshot),
-                automatic: true
+                unrunnable: false,
+                sourceRunID: runID
             )
-            await invokeLiveTeamOverseer(request)
 
         case .continueTeam:
             markLiveTeamMemberComplete(snapshot)
@@ -4326,14 +4114,6 @@ public final class RepositoryCoordinator {
             pauseLiveTeamActivity(message: "Codeness cannot review the strategy right now.")
             return
         }
-        if request.automatic,
-           state.pendingRevision?.actor == .board {
-            record.activity?.status = .paused
-            record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(request)
-            statusMessage = "Paused; your agent changes will apply before the next review"
-            try? await persist()
-            return
-        }
         if request.mode == .bootstrap || request.mode == .strategicReview {
             state.lastStrategicReviewAt = .now
         }
@@ -4341,7 +4121,6 @@ public final class RepositoryCoordinator {
         defer { liveTeamControlInvocationCount = max(0, liveTeamControlInvocationCount - 1) }
         state.resumeCheckpoint = .invokeOverseer(request)
         state.boardDirectionReason = nil
-        boardDirectionMessage = nil
         record.activity?.liveTeam = state
         record.activity?.status = .running
         statusMessage = switch request.mode {
@@ -4471,6 +4250,12 @@ public final class RepositoryCoordinator {
             return
         }
         switch decision.action {
+        case .complete:
+            await completeLiveTeam(
+                reason: decision.reason,
+                evidence: decision.evidence
+            )
+
         case .keep:
             let continuation = preferredLiveTeamContinuation(
                 requested: request.continuation,
@@ -4489,7 +4274,15 @@ public final class RepositoryCoordinator {
                 await performLiveTeam(checkpoint: continuation)
             } else {
                 record.activity?.status = .paused
-                statusMessage = "Strategy reviewed; no eligible next agent"
+                record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(
+                    autonomousContinuationOverseerRequest(
+                        previousReason: "The strategy was kept even though no eligible agent remained.",
+                        sourceRunID: request.sourceRunID,
+                        continuation: nil
+                    )
+                )
+                statusMessage = "Strategy review returned no runnable agent"
+                errorMessage = "Codeness kept a strategy that has no eligible agent. Resume will retry the strategic decision."
                 try? await persist()
             }
 
@@ -4499,20 +4292,23 @@ public final class RepositoryCoordinator {
                 preferredMemberID: nil
             )
             record.activity?.status = .paused
-            record.activity?.liveTeam?.resumeCheckpoint = continuation.map {
-                .perform($0)
-            }
-            record.activity?.liveTeam?.boardDirectionReason = decision.reason
+            record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(
+                autonomousContinuationOverseerRequest(
+                    previousReason: decision.reason,
+                    sourceRunID: request.sourceRunID,
+                    continuation: continuation
+                )
+            )
+            record.activity?.liveTeam?.boardDirectionReason = nil
             record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
                 revision: current.revision,
                 actor: .overseer,
-                summary: "Paused for your direction",
+                summary: "Rejected autonomous pause",
                 reason: decision.reason,
                 evidence: decision.evidence
             ))
-            statusMessage = "Paused for your direction"
-            errorMessage = nil
-            boardDirectionMessage = decision.reason
+            statusMessage = "Strategy review returned an invalid pause"
+            errorMessage = "Codeness cannot ask you to manage an internal stage. Resume will retry the strategic decision."
             try? await persist()
 
         case .revise:
@@ -4556,28 +4352,10 @@ public final class RepositoryCoordinator {
                 record.activity?.liveTeam?.resumeCheckpoint = request.continuation.map {
                     .perform($0)
                 }
-                if record.activity?.liveTeam?.reviewAutomaticChangesFirst == true {
-                    record.activity?.status = .paused
-                    statusMessage = "Agent changes await your review"
-                    try await persist()
-                    return
-                }
                 guard await activatePendingLiveTeamRevision() else { return }
                 record.activity?.liveTeam?.workerTurnsSinceStrategicReview = 0
                 record.activity?.liveTeam?.cyclesSinceStrategicReview = 0
                 record.activity?.liveTeam?.cyclesUnderCurrentRevision = 0
-                if request.automatic {
-                    record.activity?.liveTeam?.automaticRevisionsWithoutProgress += 1
-                }
-                let limit = liveTeamRuntimeConfiguration?
-                    .oversightPolicy.automaticChangeLimitWithoutProgress ?? 3
-                if request.automatic,
-                   (record.activity?.liveTeam?.automaticRevisionsWithoutProgress ?? 0) >= limit {
-                    record.activity?.status = .paused
-                    statusMessage = "Paused after \(limit) automatic agent changes without durable progress"
-                    try? await persist()
-                    return
-                }
                 let continuation = preferredLiveTeamContinuation(
                     requested: request.continuation,
                     preferredMemberID: decision.preferredNextMemberID
@@ -4585,7 +4363,7 @@ public final class RepositoryCoordinator {
                 if request.leavePaused || pauseAfterCurrent {
                     record.activity?.status = .paused
                     record.activity?.liveTeam?.resumeCheckpoint = continuation.map { .perform($0) }
-                    statusMessage = "Agent changes applied; paused for your review"
+                    statusMessage = "Agent changes applied; paused"
                     try? await persist()
                 } else if let continuation {
                     await performLiveTeam(checkpoint: continuation)
@@ -4609,23 +4387,7 @@ public final class RepositoryCoordinator {
     ) async {
         switch decision.outcome {
         case .complete:
-            let revision = record.activity?.liveTeam?.currentDefinition?.revision ?? 1
-            record.activity?.status = .completed
-            record.activity?.completedAt = .now
-            record.activity?.liveTeam?.checkpoint = nil
-            record.activity?.liveTeam?.resumeCheckpoint = nil
-            record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
-                revision: revision,
-                actor: .overseer,
-                summary: "Confirmed goal complete",
-                reason: decision.reason,
-                evidence: decision.evidence
-            ))
-            statusMessage = "Activity complete"
-            pauseAfterCurrent = false
-            viewState.pauseAfterCurrent = false
-            scheduleViewStateSave()
-            await persistCompletedActivityAndDetachSessions()
+            await completeLiveTeam(reason: decision.reason, evidence: decision.evidence)
 
         case .continueWork:
             await requestLiveTeamStrategicReview(
@@ -4643,22 +4405,63 @@ public final class RepositoryCoordinator {
                 preferredMemberID: nil
             )
             record.activity?.status = .paused
-            record.activity?.liveTeam?.resumeCheckpoint = continuation.map {
-                .perform($0)
-            }
-            record.activity?.liveTeam?.boardDirectionReason = decision.reason
+            record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(
+                autonomousContinuationOverseerRequest(
+                    previousReason: decision.reason,
+                    sourceRunID: request.sourceRunID,
+                    continuation: continuation
+                )
+            )
+            record.activity?.liveTeam?.boardDirectionReason = nil
             record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
                 revision: revision,
                 actor: .overseer,
-                summary: "Completion needs your direction",
+                summary: "Rejected autonomous pause",
                 reason: decision.reason,
                 evidence: decision.evidence
             ))
-            statusMessage = "Completion review needs your direction"
-            errorMessage = nil
-            boardDirectionMessage = decision.reason
+            statusMessage = "Completion review returned an invalid pause"
+            errorMessage = "Codeness cannot ask you to manage an internal stage. Resume will return to strategic control."
             try? await persist()
         }
+    }
+
+    private func completeLiveTeam(reason: String, evidence: String) async {
+        let revision = record.activity?.liveTeam?.currentDefinition?.revision ?? 1
+        record.activity?.status = .completed
+        record.activity?.completedAt = .now
+        record.activity?.liveTeam?.checkpoint = nil
+        record.activity?.liveTeam?.resumeCheckpoint = nil
+        record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
+            revision: revision,
+            actor: .overseer,
+            summary: "Confirmed goal complete",
+            reason: reason,
+            evidence: evidence
+        ))
+        statusMessage = "Activity complete"
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        await persistCompletedActivityAndDetachSessions()
+    }
+
+    private func autonomousContinuationOverseerRequest(
+        previousReason: String,
+        sourceRunID: UUID?,
+        continuation: LiveTeamCheckpoint?
+    ) -> LiveTeamOverseerRequest {
+        LiveTeamOverseerRequest(
+            mode: .strategicReview,
+            reason: """
+            Codeness previously stopped at an internal strategy boundary for this reason: \(previousReason)
+
+            This was not a valid completion decision. Reassess the fixed user goal and durable evidence. Earlier working goals, agent instructions, handoffs, strategies, and self-imposed stage gates are project state you control; they cannot manufacture a need for user approval. Choose and constrain the next reversible internal stage, then keep or replace the agents. Complete the activity only when the fixed goal is satisfied and no work remains.
+            """,
+            sourceRunID: sourceRunID,
+            continuation: continuation,
+            automatic: false
+        )
     }
 
     private func makeLiveTeamOverseerContext(reason: String) -> LiveTeamOverseerContext {
@@ -4730,8 +4533,8 @@ public final class RepositoryCoordinator {
         )
     }
 
-    private func activateBoardLiveTeamRevisionAtSafeBoundary() async -> Bool {
-        guard record.activity?.liveTeam?.pendingRevision?.actor == .board else {
+    private func activatePendingLiveTeamRevisionAtSafeBoundary() async -> Bool {
+        guard record.activity?.liveTeam?.pendingRevision != nil else {
             return true
         }
         return await activatePendingLiveTeamRevision()
@@ -4765,7 +4568,6 @@ public final class RepositoryCoordinator {
             protectedSlotID: protectedFreshSlot
         )
         record.activity?.stepSessions = reconciliation.sessions
-        record.activity?.liveTeam?.previousDefinition = oldDefinition
         record.activity?.liveTeam?.currentDefinition = newDefinition
         record.activity?.liveTeam?.overseer.target = newDefinition.overseerTarget
         record.activity?.liveTeam?.pendingRevision = nil
@@ -7627,10 +7429,9 @@ public final class RepositoryCoordinator {
         statusMessage = message
     }
 
-    private func restoreBoardDirectionPresentationIfNeeded() {
+    private func repairAutonomousDirectionPauseIfNeeded() {
         guard record.activity?.status == .paused,
               record.activity?.liveTeam != nil else {
-            boardDirectionMessage = nil
             return
         }
         if let index = record.activity?.liveTeam?.editHistory.indices.last,
@@ -7661,16 +7462,84 @@ public final class RepositoryCoordinator {
             .contains(lastEdit.summary) {
             record.activity?.liveTeam?.boardDirectionReason = lastEdit.reason
         }
-        if record.activity?.liveTeam?.boardDirectionReason != nil,
-           let resumeCheckpoint = record.activity?.liveTeam?.resumeCheckpoint,
-           case .perform(let checkpoint) = resumeCheckpoint {
-            let continuation = preferredLiveTeamContinuation(
-                requested: checkpoint,
-                preferredMemberID: nil
+        if let reason = record.activity?.liveTeam?.boardDirectionReason {
+            let existingCheckpoint = record.activity?.liveTeam?.resumeCheckpoint
+            let continuation: LiveTeamCheckpoint?
+            let sourceRunID: UUID?
+            switch existingCheckpoint {
+            case .invokeOverseer(let request):
+                continuation = preferredLiveTeamContinuation(
+                    requested: request.continuation,
+                    preferredMemberID: nil
+                )
+                sourceRunID = request.sourceRunID ?? record.activity?.runs.last?.id
+            case .perform(let checkpoint):
+                continuation = preferredLiveTeamContinuation(
+                    requested: checkpoint,
+                    preferredMemberID: nil
+                )
+                sourceRunID = record.activity?.runs.last?.id
+            case nil:
+                continuation = nil
+                sourceRunID = record.activity?.runs.last?.id
+            default:
+                continuation = nil
+                sourceRunID = record.activity?.runs.last?.id
+            }
+            let resumeRequest = autonomousContinuationOverseerRequest(
+                previousReason: reason,
+                sourceRunID: sourceRunID,
+                continuation: continuation
             )
-            record.activity?.liveTeam?.resumeCheckpoint = continuation.map { .perform($0) }
+            record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(resumeRequest)
+            record.activity?.liveTeam?.boardDirectionReason = nil
+            if let index = record.activity?.liveTeam?.editHistory.indices.last,
+               let edit = record.activity?.liveTeam?.editHistory[index],
+               [
+                   "Paused for your direction",
+                   "Completion needs your direction"
+               ].contains(edit.summary) {
+                record.activity?.liveTeam?.editHistory[index] = LiveTeamEditRecord(
+                    id: edit.id,
+                    revision: edit.revision,
+                    actor: edit.actor,
+                    summary: "Recovered internal strategy boundary",
+                    reason: edit.reason,
+                    evidence: edit.evidence,
+                    createdAt: edit.createdAt
+                )
+            }
         }
-        boardDirectionMessage = record.activity?.liveTeam?.boardDirectionReason
+    }
+
+    /// Earlier goal-directed builds let a local routing decision pause the
+    /// activity directly. Restore that exact saved shape to the decision
+    /// boundary so Resume asks the control invocation that sees the user goal.
+    private func repairCoordinatorPauseAuthorityIfNeeded() {
+        guard var activity = record.activity,
+              activity.status == .paused,
+              activity.liveTeam?.boardDirectionReason == nil,
+              case .perform(let checkpoint)? = activity.liveTeam?.resumeCheckpoint,
+              let runIndex = activity.runs.indices.last,
+              activity.runs[runIndex].status == .paused,
+              activity.runs[runIndex].coordinatorDecision?.disposition == .pause,
+              activity.runs[runIndex].liveTeamMember?.member.id == checkpoint.memberID else {
+            return
+        }
+
+        let runID = activity.runs[runIndex].id
+        let memberID = checkpoint.memberID
+        activity.runs[runIndex].status = .completed
+        activity.runs[runIndex].relayError = nil
+        activity.liveTeam?.resumeCheckpoint = .applyCoordinatorDecision(runID)
+        if let failures = activity.liveTeam?.memberFailureCounts[memberID] {
+            if failures <= 1 {
+                activity.liveTeam?.memberFailureCounts.removeValue(forKey: memberID)
+            } else {
+                activity.liveTeam?.memberFailureCounts[memberID] = failures - 1
+            }
+        }
+        record.activity = activity
     }
 
     private func normalizeLiveTeamProductLanguageIfNeeded() {
@@ -7743,9 +7612,6 @@ public final class RepositoryCoordinator {
 
     private var pausedStatusMessage: String {
         guard let activity = record.activity else { return "Paused" }
-        if activity.liveTeam?.boardDirectionReason != nil {
-            return "Paused for your direction"
-        }
         if let checkpoint = activity.liveTeam?.resumeCheckpoint {
             switch checkpoint {
             case .invokeOverseer(let request):

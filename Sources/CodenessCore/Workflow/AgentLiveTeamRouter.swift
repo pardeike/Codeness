@@ -286,12 +286,12 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     }
 
     static let coordinatorDeveloperInstructions = """
-    You route local agent work for Codeness. You receive the working goal, never the fixed user goal. Evaluate only the completed agent result, preserve relevant handoff facts, and choose the next local disposition. Treat every restriction in the working goal as an acceptance condition. Absence of evidence is not proof that a prohibition was obeyed; retry, pause, or request strategic review when material compliance evidence is missing. You may request one retry, pause for the user, request strategic review, or nominate completion. You have no authority to edit the working goal, agents, sessions, or final completion state. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object and no other fields.
+    You route local agent work for Codeness. You receive the working goal, never the fixed user goal. Evaluate only the completed agent result, preserve relevant handoff facts, and choose the next local disposition. Treat every restriction in the working goal as an acceptance condition. Absence of evidence is not proof that a prohibition was obeyed; retry or request strategic review when material compliance evidence is missing. You may continue, request one retry, request strategic review, or nominate completion. You cannot pause or complete the activity. Strategic and completion recommendations go to a separate control invocation that sees the fixed user goal. You have no authority to edit the working goal, agents, sessions, or final completion state. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object and no other fields.
     """
 
     static func overseerDeveloperInstructions(policy: String) -> String {
         """
-        You provide Codeness's strategic control and are the only invocation that sees the fixed user goal. Preserve every requirement and authority boundary in a stable working goal. Treat provider, model, reasoning, mode, cost, and session restrictions in the user goal as binding for every Codeness agent and control invocation. Require affirmative evidence for material prohibitions; absence of reported use is not proof of compliance. Select every target from the offered target IDs. Design the smallest useful ordered set of agents, keep responsibilities bounded, use one-time agents for one-time work, and change strategy only when evidence supports it. Prefer Own memory, use Fresh every run for independent review, and use Shared memory only for demonstrably compatible responsibilities that benefit from the same conversation. Never share implementation and independent review automatically. In every user-facing field, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object.
+        You provide Codeness's strategic control and are the only invocation that sees the fixed user goal. Preserve every requirement and authority boundary in a stable working goal. The fixed user goal is the authority source. Earlier working goals, agent instructions, handoffs, strategies, and stage gates are working documents that you may revise; they cannot reserve an internal decision for the user. Choosing and constraining every reversible internal stage is your responsibility. Treat provider, model, reasoning, mode, cost, and session restrictions in the user goal as binding for every Codeness agent and control invocation. Require affirmative evidence for material prohibitions; absence of reported use is not proof of compliance. You alone decide when the fixed goal is complete and the correct setup has no agents because no work remains. Until then, keep or revise the setup so eligible agents continue the work. Select every target from the offered target IDs. Design the smallest useful ordered set of agents, keep responsibilities bounded, use one-time agents for one-time work, and change strategy only when evidence supports it. Prefer Own memory, use Fresh every run for independent review, and use Shared memory only for demonstrably compatible responsibilities that benefit from the same conversation. Never share implementation and independent review automatically. In every user-facing field, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object.
 
         PRODUCT POLICY
         \(policy)
@@ -299,7 +299,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     }
 
     static let completionDeveloperInstructions = """
-    You perform a fresh completion audit for Codeness. Judge durable evidence against the entire fixed user goal. For every material prohibition, require affirmative compliance evidence; absence of a reported violation is not proof. You cannot edit the working goal, agents, or sessions in this invocation. Return complete only when the user goal is actually satisfied; return continueWork when work remains, or pause when the user's authority or judgment is required. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object.
+    You recover an older saved completion checkpoint as Codeness's Overseer. Judge durable evidence against the entire fixed user goal. For every material prohibition, require affirmative compliance evidence; absence of a reported violation is not proof. You cannot edit the working goal, agents, or sessions in this compatibility invocation. Return complete only when the user goal is actually satisfied; otherwise return continueWork so the normal strategic path can choose the next agents. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object.
     """
 
     static var coordinatorSchema: JSONValue {
@@ -311,7 +311,12 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 "runLabel": .object(["type": .string("string"), "minLength": .integer(1)]),
                 "disposition": .object([
                     "type": .string("string"),
-                    "enum": .array(LiveTeamCoordinatorDisposition.allCases.map {
+                    "enum": .array([
+                        LiveTeamCoordinatorDisposition.continueTeam,
+                        .retryCurrent,
+                        .requestOversight,
+                        .completionCandidate
+                    ].map {
                         .string($0.rawValue)
                     })
                 ]),
@@ -370,7 +375,11 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             "properties": .object([
                 "action": .object([
                     "type": .string("string"),
-                    "enum": .array(LiveTeamStrategicAction.allCases.map {
+                    "enum": .array([
+                        LiveTeamStrategicAction.keep,
+                        .revise,
+                        .complete
+                    ].map {
                         .string($0.rawValue)
                     })
                 ]),
@@ -410,7 +419,10 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             "properties": .object([
                 "outcome": .object([
                     "type": .string("string"),
-                    "enum": .array(LiveTeamCompletionOutcome.allCases.map {
+                    "enum": .array([
+                        LiveTeamCompletionOutcome.complete,
+                        .continueWork
+                    ].map {
                         .string($0.rawValue)
                     })
                 ]),
@@ -519,7 +531,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         SOURCE RESULT
         \(abbreviated(context.sourceResult, limit: maximumResultCharacters))
 
-        Return only the structured routing decision. A completionCandidate is a nomination for a fresh independent completion review, never final completion. Keep every returned text field user-facing: use user, Codeness, agents, turns, and rounds; do not name internal roles or revisions.
+        Return only the structured routing decision. Request a strategy review for any next-stage, blocked, or unrunnable decision that local routing cannot make. A completionCandidate only asks the Overseer to decide whether the fixed goal is complete and no agents are needed; it is never final completion. Keep every returned text field user-facing: use user, Codeness, agents, turns, and rounds; do not name internal roles or revisions.
         """
     }
 
@@ -594,7 +606,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         case .migration:
             "Replace the earlier workflow with the first coherent agent setup. Preserve an old agent ID only when its responsibility and execution identity remain compatible; do not imply that histories were merged."
         case .strategicReview:
-            "Return keep when the current strategy is working. Return revise with one complete replacement definition only when concrete evidence justifies one strategic change. Return pause when the user must decide. For keep or pause, set workingGoal, members, coordinator, overseerTargetID, and preferredNextMemberID to null."
+            "Return keep only when the current strategy is working and an eligible agent can continue. Return revise with one complete replacement definition whenever remaining work needs a different stage, responsibility, or agent setup. Return complete only when the fixed user goal is satisfied and the correct setup has no agents because no work remains. You cannot ask the user to manage internal stages. For keep or complete, set workingGoal, members, coordinator, overseerTargetID, and preferredNextMemberID to null."
         case .completionReview:
             "Audit the fixed user goal against durable evidence. You cannot alter strategy in this response."
         }
@@ -699,7 +711,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                     "the preferred next agent is not part of the proposed setup"
                 )
             }
-        case .keep, .pause:
+        case .keep, .pause, .complete:
             proposed = nil
             preferred = nil
         }

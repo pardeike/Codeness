@@ -11,8 +11,8 @@ Codeness coordinates locally installed Codex and Claude Code command-line agents
 - Start with the outcome. Provider, model, cost, memory, and authority limits belong in the same goal.
 - Let Codeness choose and adjust the agents instead of configuring a fixed process first.
 - Give each agent its own memory, a deliberately shared conversation, or a fresh conversation every turn.
-- Inspect every turn, handoff, change, timing measurement, and token count. Pause, steer, stop, edit the agents, and resume from saved state.
-- Keep repository ownership explicit. Codeness itself does not create worktrees, stash, commit, reset, or add orchestration files. Its agents may do so only when the goal and their instructions authorize it.
+- Inspect every turn, handoff, change, timing measurement, and token count. Pause, steer, edit the fixed goal, and resume from saved state.
+- Keep repository ownership explicit. Codeness initializes Git when the selected folder is not already in a repository. It does not create worktrees, stash, commit, reset, or add orchestration files itself. Its agents may do so only when the goal and their instructions authorize it.
 
 ## How it works
 
@@ -26,15 +26,15 @@ Codeness prepares a working goal, agents, targets, and memory choices
 An agent takes one bounded turn; Codeness chooses the next handoff
     |
     v
-Strategy reviews adjust the agents only when evidence warrants it
+The Overseer adjusts the agents when evidence warrants it
     |
     v
-A fresh completion review checks the original goal
+The Overseer completes only when the fixed goal has no work left
 ```
 
-Recurring agents return once per round. One-time agents retire after their first accepted turn unless their responsibility or the working goal changes. Agent changes take effect only between turns, after the current state is saved.
+Recurring agents return once per round. One-time agents retire after their first accepted turn unless their responsibility or the working goal changes. Agent changes take effect only between turns, after the current state is saved. Each strategy revision appears as a compact chapter break in the turn list; its Info button shows the change, reason, and evidence without asking for approval.
 
-Codeness reviews strategy after three rounds or twelve agent turns, after repeated failure, when local routing asks for help, when you request a review, and before final completion. Automatic periodic reviews also have a ten-minute cooldown, so fast rounds cannot create a review loop; time alone never starts work. Three automatic agent changes without durable progress pause the activity for your direction.
+Codeness reviews strategy after three rounds or twelve agent turns, after repeated failure, when local routing asks for help, and before final completion. Automatic periodic reviews also have a ten-minute cooldown, so fast rounds cannot create a review loop; time alone never starts work. Internal stage boundaries never ask the user for direction.
 
 The implementation and tradeoffs are recorded in [Goal-directed orchestration](Documentation/live-loop-redesign.md).
 
@@ -69,10 +69,10 @@ Use `CODENESS_CODESIGN_IDENTITY` for another Developer ID identity and `CODENESS
 
 ### Start an activity
 
-1. Open Codeness and choose the exact folder in which agents should work. Git is optional.
+1. Choose **File > New Project…** to name and locate a new empty folder, or choose **Open Workspace…** for an existing folder. Codeness initializes Git if needed.
 2. Describe the complete desired outcome. Include restrictions such as “use only Codex gpt-5.6-terra,” spending limits, memory requirements, and publishing authority.
 3. Select **Start**.
-4. Follow agent turns in the sidebar. Select **Edit Agents** to inspect or change the working goal, order, targets, schedule, or memory choices.
+4. Follow agent turns and Codeness's current read-only agent setup in the window.
 
 The selected folder is not silently replaced by a parent Git root. Different subfolders of one working tree can have independent Codeness documents.
 
@@ -81,14 +81,12 @@ The selected folder is not silently replaced by a parent Git root. Different sub
 - **Pause** stops after the current result and handoff reach a saved boundary.
 - **Stop Now** interrupts the active turn. Resume recovers from the saved assignment and current repository state.
 - **Change Goal** takes effect immediately while paused or between turns while running, then triggers a strategy review.
-- **Once** schedules one accepted turn. **Every round** keeps an agent in rotation.
-- **Own memory** keeps one private provider conversation. **Shared memory** reuses one compatible conversation deliberately. **Fresh every turn** creates independent context each time.
-- **Review Strategy Now** asks Codeness to reconsider the working goal and agents without waiting for the normal review point.
-- **Start Over** archives the activity, releases its sessions, and prefills a new activity with the previous goal. Repository files stay untouched.
+- Codeness chooses one-time or recurring agents and their memory policy as part of its strategy.
+- **Start Over** is available after completion. It archives the activity, releases its sessions, and prefills a new activity with the previous or amended goal. Repository files stay untouched.
 
-An ordinary handoff can nominate completion but cannot finish the activity. Codeness uses a fresh review against the entire original goal and saved evidence before marking work complete.
+An ordinary handoff can nominate completion but cannot finish the activity. The Overseer uses the fixed goal and saved evidence at the same strategic decision point that controls the agent setup.
 
-Agent tool and file operations run without Codeness approval prompts. Genuine questions and other user-input requests still appear in a native interaction sheet. Standard-mode agents and compatible-provider tools are not sandboxed; they have the account-level file and process access of Codeness.
+Agent tool and file operations run without Codeness approval prompts. Agents are instructed to make reversible internal decisions themselves and report unavailable external authority to Codeness instead of asking the user to manage a stage. Standard-mode agents and compatible-provider tools are not sandboxed; they have the account-level file and process access of Codeness.
 
 ## Agent providers
 

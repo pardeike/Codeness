@@ -7,7 +7,6 @@ struct RepositoryWindowView: View {
     let appearanceState: RepositoryWindowAppearanceState
     @Environment(CodenessApplicationModel.self) private var application
     @Environment(RepositoryWindowCommandState.self) private var commandState
-    @State private var showsSettings = false
     @State private var showsGoalAmendment = false
     @State private var showsStartOverConfirmation = false
     @State private var columnVisibility: NavigationSplitViewVisibility
@@ -70,15 +69,6 @@ struct RepositoryWindowView: View {
         // placement when the run list is shown or hidden.
         .toolbar { toolbarContent }
         .toolbar(removing: .sidebarToggle)
-        .sheet(isPresented: $showsSettings) {
-            if let definition = coordinator.liveTeamDefinition {
-                LiveTeamEditorSheet(
-                    coordinator: coordinator,
-                    definition: definition
-                )
-                .environment(application)
-            }
-        }
         .sheet(isPresented: $showsGoalAmendment) {
             GoalAmendmentSheet(coordinator: coordinator)
         }
@@ -87,12 +77,6 @@ struct RepositoryWindowView: View {
                 ServerInteractionSheet(coordinator: coordinator, interaction: interaction)
                     .id(interaction.id.encodedString())
             }
-        }
-        .alert("Direction Required", isPresented: boardDirectionBinding) {
-            Button("OK") { coordinator.clearBoardDirectionMessage() }
-                .help("Dismiss this request")
-        } message: {
-            Text(coordinator.boardDirectionMessage ?? "Codeness needs your direction.")
         }
         .alert("Repository Error", isPresented: coordinatorErrorBinding) {
             Button("OK") { coordinator.clearError() }
@@ -197,6 +181,9 @@ struct RepositoryWindowView: View {
                         ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
                             Section {
                                 ForEach(group.runs) { run in
+                                    if let change = strategyChange(before: run, in: activity) {
+                                        StrategyChapterRow(change: change)
+                                    }
                                     RunRow(
                                         run: run,
                                         isActive: coordinator.activeActivity?.status == .running
@@ -212,6 +199,10 @@ struct RepositoryWindowView: View {
                             } header: {
                                 RunGroupHeader(group: group)
                             }
+                        }
+
+                        ForEach(unrepresentedStrategyChanges(in: activity)) { change in
+                            StrategyChapterRow(change: change)
                         }
                     }
 
@@ -269,6 +260,41 @@ struct RepositoryWindowView: View {
             get: { coordinator.selectedRunID },
             set: { coordinator.selectRun($0) }
         )
+    }
+
+    private func strategyChange(
+        before run: RunRecord,
+        in activity: ActivityRecord
+    ) -> LiveTeamEditRecord? {
+        guard let revision = run.liveTeamMember?.revision,
+              revision > 1,
+              activity.runs.first(where: {
+                  $0.liveTeamMember?.revision == revision
+              })?.id == run.id else {
+            return nil
+        }
+        return strategyChanges(in: activity).first { $0.revision == revision }
+    }
+
+    private func unrepresentedStrategyChanges(
+        in activity: ActivityRecord
+    ) -> [LiveTeamEditRecord] {
+        let runRevisions = Set(activity.runs.compactMap(\.liveTeamMember?.revision))
+        return strategyChanges(in: activity).filter {
+            !runRevisions.contains($0.revision)
+        }
+    }
+
+    private func strategyChanges(in activity: ActivityRecord) -> [LiveTeamEditRecord] {
+        guard let edits = activity.liveTeam?.editHistory else { return [] }
+        var seenRevisions: Set<Int> = []
+        return edits
+            .filter { edit in
+                edit.actor == .overseer
+                    && edit.revision > 1
+                    && seenRevisions.insert(edit.revision).inserted
+            }
+            .sorted { $0.createdAt < $1.createdAt }
     }
 
     private func scrollRunListToBottom(using proxy: ScrollViewProxy) {
@@ -367,17 +393,6 @@ struct RepositoryWindowView: View {
                 .help(columnVisibility == .detailOnly ? "Show turn list" : "Hide turn list")
             }
         }
-
-        if coordinator.liveTeamDefinition != nil {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    showsSettings = true
-                } label: {
-                    Label("Edit Agents", systemImage: "person.3.sequence")
-                }
-                .help("Inspect or change the working goal, agents, and memory policies")
-            }
-        }
     }
 
     private var statusBar: some View {
@@ -425,13 +440,6 @@ struct RepositoryWindowView: View {
         Binding(
             get: { coordinator.errorMessage != nil },
             set: { if !$0 { coordinator.clearError() } }
-        )
-    }
-
-    private var boardDirectionBinding: Binding<Bool> {
-        Binding(
-            get: { coordinator.boardDirectionMessage != nil },
-            set: { if !$0 { coordinator.clearBoardDirectionMessage() } }
         )
     }
 
@@ -537,6 +545,78 @@ private struct RunGroupHeader: View {
 
     var body: some View {
         Text(group.title)
+    }
+}
+
+private struct StrategyChapterRow: View {
+    let change: LiveTeamEditRecord
+    @State private var showsDetails = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("New strategy")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Rectangle()
+                .fill(.quaternary)
+                .frame(height: 1)
+                .accessibilityHidden(true)
+            Button {
+                showsDetails.toggle()
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Show strategy change details")
+            .help("Show why Codeness changed the agent strategy")
+            .popover(isPresented: $showsDetails, arrowEdge: .leading) {
+                StrategyChangeDetails(change: change)
+            }
+        }
+        .padding(.top, 8)
+        .padding(.bottom, 2)
+        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .selectionDisabled()
+    }
+}
+
+private struct StrategyChangeDetails: View {
+    let change: LiveTeamEditRecord
+
+    var body: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Strategy changed")
+                    .font(.headline)
+                Text(change.summary)
+                    .font(.subheadline.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                detail("Why", text: change.reason)
+                if !change.evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    detail("Evidence", text: change.evidence)
+                }
+            }
+            .frame(width: 312, alignment: .leading)
+            .padding(14)
+        }
+        .frame(width: 340, height: 300)
+    }
+
+    private func detail(_ title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.callout)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

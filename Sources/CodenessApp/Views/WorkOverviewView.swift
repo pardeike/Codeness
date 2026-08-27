@@ -190,37 +190,6 @@ struct WorkOverviewView: View {
                         }
                     }
 
-                    Divider()
-
-                    HStack(spacing: 12) {
-                        Button("Review Strategy Now") {
-                            Task { await coordinator.reviewLiveTeamStrategyNow() }
-                        }
-                        .help("Ask Codeness to review the strategy between agent turns")
-
-                        Toggle(
-                            "Review changes before Codeness applies them",
-                            isOn: Binding(
-                                get: { state.reviewAutomaticChangesFirst },
-                                set: { enabled in
-                                    Task {
-                                        _ = await coordinator
-                                            .setReviewAutomaticLiveTeamChangesFirst(enabled)
-                                    }
-                                }
-                            )
-                        )
-                        .toggleStyle(.checkbox)
-
-                        Spacer()
-
-                        if state.previousDefinition != nil {
-                            Button("Undo Last Agent Change") {
-                                Task { _ = await coordinator.undoLastLiveTeamRevision() }
-                            }
-                            .help("Restore the preceding agents; released conversation histories cannot be restored")
-                        }
-                    }
                 } else {
                     HStack(spacing: 10) {
                         if activity.status == .running {
@@ -231,45 +200,11 @@ struct WorkOverviewView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-
-                if let pending = state.pendingRevision {
-                    Divider()
-                    pendingRevisionView(pending, activityStatus: activity.status)
-                }
             }
             .padding(8)
         } label: {
             Label("Agents", systemImage: "person.3.sequence.fill")
                 .font(.headline)
-        }
-    }
-
-    private func pendingRevisionView(
-        _ pending: LiveTeamPendingRevision,
-        activityStatus: ActivityStatus
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label(
-                pending.actor == .board
-                    ? "Your agent changes are saved and will take effect between turns."
-                    : "Codeness has proposed agent changes for you to review.",
-                systemImage: "clock.badge.exclamationmark"
-            )
-            .foregroundStyle(pending.actor == .board ? Color.secondary : Color.orange)
-            Text(pending.reason)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if pending.actor == .overseer, activityStatus == .paused {
-                HStack {
-                    Button("Accept Changes") {
-                        Task { _ = await coordinator.acceptPendingOverseerRevision() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    Button("Discard") {
-                        Task { _ = await coordinator.discardPendingOverseerRevision() }
-                    }
-                }
-            }
         }
     }
 

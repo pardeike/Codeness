@@ -915,7 +915,7 @@ struct RepositoryCoordinatorRecoveryTests {
             + "authoritative-tail\n"
         var savedRun = run(status: .interrupted)
         savedRun.transcript = fullTranscript
-        let record = repositoryRecord(activityStatus: .paused, run: savedRun)
+        let record = repositoryRecord(activityStatus: .completed, run: savedRun)
         let root = temporaryRoot()
         let baseStore = WorkspaceStore(rootURL: root)
         try await baseStore.save(record)
@@ -1254,8 +1254,9 @@ struct RepositoryCoordinatorRecoveryTests {
             activity: ActivityRecord(
                 goal: "Rebuild the parser from Docs/Parser.md",
                 prompts: prompts,
-                status: .paused,
-                runs: [savedRun]
+                status: .completed,
+                runs: [savedRun],
+                completedAt: .now
             )
         )
         let frame = StoredWindowFrame(x: 10, y: 20, width: 1_100, height: 760)

@@ -447,13 +447,13 @@ final class CodenessApplicationModel {
             overseer: LiveTeamOverseerConfiguration(
                 target: controlTarget,
                 instructions: """
-                Act as the Board's strategic Overseer. Preserve the fixed user goal and its authority boundaries. Create or revise the smallest useful team, keep the working goal stable unless strategy changes, choose session memory deliberately, demand durable evidence, and pause when new Board authority is required.
+                Act as Codeness's strategic Overseer. Preserve the fixed user goal and its authority boundaries. Create or revise the smallest useful team, keep the working goal stable unless strategy changes, choose session memory deliberately, and demand durable evidence. Own every reversible internal stage and agent decision. You alone decide when the fixed goal is complete and no agents are needed.
                 """
             ),
             defaultCoordinator: LiveTeamCoordinatorConfiguration(
                 target: controlTarget,
                 instructions: """
-                Manage only the current team's local flow. Preserve the working goal, keep handoffs bounded, allow at most one local retry for an incomplete result, and escalate strategic, completion, or authority questions to the Overseer. Never change the goal, team, order, or session policy.
+                Manage only the current team's local flow. Preserve the working goal, keep handoffs bounded, allow at most one local retry for an incomplete result, and escalate strategy or completion questions to the Overseer. You cannot stop the activity. Never change the goal, team, order, or session policy.
                 """
             ),
             targetOptions: targetOptions,
@@ -461,8 +461,7 @@ final class CodenessApplicationModel {
                 periodicRoundInterval: 3,
                 periodicWorkerTurnInterval: 12,
                 minimumPeriodicReviewInterval: 10 * 60,
-                repeatedFailureThreshold: 2,
-                automaticChangeLimitWithoutProgress: 3
+                repeatedFailureThreshold: 2
             )
         )
     }
@@ -537,6 +536,10 @@ final class CodenessApplicationModel {
 
     func canonicalWorkspace(for selectedURL: URL) async throws -> URL {
         try await resolver.canonicalWorkspace(for: selectedURL)
+    }
+
+    func createWorkspace(at selectedURL: URL) async throws -> URL {
+        try await resolver.createWorkspace(at: selectedURL)
     }
 
     func storedWindowFrame(for canonicalPath: String) async -> StoredWindowFrame? {

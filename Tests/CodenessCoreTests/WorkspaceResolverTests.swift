@@ -21,6 +21,39 @@ struct WorkspaceResolverTests {
         #expect(resolvedFirst == canonical(first))
         #expect(resolvedSecond == canonical(second))
         #expect(resolvedFirst != resolvedSecond)
+        #expect(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent(".git", isDirectory: true).path
+        ))
+        #expect(!FileManager.default.fileExists(
+            atPath: first.appendingPathComponent(".git", isDirectory: true).path
+        ))
+    }
+
+    @Test
+    func createsANewFolderAndInitializesGit() async throws {
+        let container = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: container) }
+        let project = container.appendingPathComponent("New Game", isDirectory: true)
+        let resolver = WorkspaceResolver()
+
+        let created = try await resolver.createWorkspace(at: project)
+
+        #expect(created == canonical(project))
+        #expect(FileManager.default.fileExists(atPath: created.path))
+        #expect(FileManager.default.fileExists(
+            atPath: created.appendingPathComponent(".git", isDirectory: true).path
+        ))
+
+        do {
+            _ = try await resolver.createWorkspace(at: project)
+            Issue.record("Expected an existing project path to be rejected")
+        } catch let error as WorkspaceResolutionError {
+            guard case .alreadyExists(let path) = error else {
+                Issue.record("Expected alreadyExists, received \(error)")
+                return
+            }
+            #expect(path == created.path)
+        }
     }
 
     @Test
