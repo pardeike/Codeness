@@ -95,7 +95,16 @@ public enum TranscriptFormatter {
                   let text = item["text"]?.stringValue else { return nil }
             return (text, item["phase"]?.stringValue)
         }
-        return agentMessages.last(where: { $0.1 == "final_answer" })?.0 ?? agentMessages.last?.0
+        if let finalAnswer = agentMessages.last(where: { $0.1 == "final_answer" })?.0 {
+            return finalAnswer
+        }
+        if let plan = items.last(where: { $0["type"]?.stringValue == "plan" })?["text"]?
+            .stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !plan.isEmpty {
+            return plan
+        }
+        return agentMessages.last?.0
     }
 
     private static func startedItem(_ item: JSONValue) -> TranscriptUpdate {
@@ -161,6 +170,16 @@ public enum TranscriptFormatter {
                 itemID: itemID,
                 finalOutput: phase == "final_answer" ? text : nil,
                 section: missingStream ? (phase == "final_answer" ? .result : .reasoning) : nil
+            )
+        case "plan":
+            let text = item["text"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let missingStream = itemID.map { !itemsWithDeltas.contains($0) } ?? true
+            return .init(
+                text: missingStream && !text.isEmpty ? "\n\nPlan\n\(text)\n" : "\n",
+                itemID: itemID,
+                finalOutput: text.isEmpty ? nil : text,
+                section: missingStream ? .result : nil
             )
         case "commandExecution":
             let status = item["status"]?.stringValue ?? "completed"

@@ -3,7 +3,7 @@ import SwiftUI
 
 enum AboutPresentation {
     static let productSummary =
-        "A native workflow supervisor for thoughtful, repeatable work with Codex and Claude."
+        "A native supervisor for thoughtful, adaptive work with Codex and Claude."
     static let creatorSummary =
         "Independent tools for people who enjoy making complicated things behave."
     static let patreonURL = URL(string: "https://www.patreon.com/pardeike")!

@@ -7,12 +7,8 @@ import OSLog
 @MainActor
 @Observable
 final class CodenessApplicationModel {
-    private static let promptDefaultsKey = "ActivityPromptDefaults"
-    private static let repositoryModelDefaultsKey = "RepositoryModelDefaults"
     private static let separatesRunTranscriptsKey = "SeparatesRunTranscripts"
     private static let transcriptVisibilityKey = "TranscriptVisibility"
-    private static let customWorkflowTemplatesKey = "CustomWorkflowTemplates"
-    private static let defaultWorkflowTemplateIDKey = "DefaultWorkflowTemplateID"
     private static let claudeExecutablePathKey = "ClaudeExecutablePath"
     private static let openAICompatibleEndpointKey = "OpenAICompatibleEndpoint"
     private static let openAICompatibleAPIKeyFileKey = "OpenAICompatibleAPIKeyFile"
@@ -107,10 +103,6 @@ final class CodenessApplicationModel {
     private(set) var openAICompatibleConfiguration: OpenAICompatibleProviderConfiguration
     private(set) var providerCatalog: AgentProviderCatalog
     private(set) var claudeModels: [AgentModelDescriptor]
-    private(set) var builtInWorkflowCatalog: WorkflowCatalog
-    private(set) var workflowCatalog: WorkflowCatalog
-    private(set) var promptDefaults: ActivityPrompts
-    private(set) var repositoryModelDefaults: RepositoryModelDefaults
     private(set) var separatesRunTranscripts: Bool
     private(set) var transcriptVisibility: TranscriptVisibility
     private(set) var pendingProviderRestarts: Set<AgentProviderID> = []
@@ -127,6 +119,7 @@ final class CodenessApplicationModel {
     @ObservationIgnored private var openAICompatibleProvider: (any AgentProviding)?
     @ObservationIgnored private let agentProviders: AgentProviderRegistry
     @ObservationIgnored private let workflowRouter: AgentWorkflowHandoffRouter
+    @ObservationIgnored private let liveTeamRouter: AgentLiveTeamRouter
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var didBootstrap = false
     @ObservationIgnored private var intentionalShutdown = false
@@ -164,27 +157,13 @@ final class CodenessApplicationModel {
         testingProviderLaunchDrainTimeout: Duration = .seconds(2)
     ) {
         let loadedProviderCatalog: AgentProviderCatalog
-        let loadedWorkflowCatalog: WorkflowCatalog
         var catalogError: String?
         do {
-            loadedProviderCatalog = try WorkflowCatalogLoader.loadBundledProviderCatalog()
+            loadedProviderCatalog = try AgentProviderCatalogLoader.loadBundled()
         } catch {
             loadedProviderCatalog = AgentProviderCatalog(schemaVersion: 1, providers: [])
             catalogError = error.localizedDescription
         }
-        do {
-            loadedWorkflowCatalog = try WorkflowCatalogLoader.loadBundledWorkflowCatalog()
-        } catch {
-            loadedWorkflowCatalog = WorkflowCatalog(
-                schemaVersion: 1,
-                defaultTemplateID: "",
-                templates: []
-            )
-            catalogError = [catalogError, error.localizedDescription]
-                .compactMap { $0 }
-                .joined(separator: "\n")
-        }
-
         self.appServer = appServer
         appServerShutdown = testingAppServerShutdown ?? { await appServer.shutdown() }
         self.router = router
@@ -193,7 +172,6 @@ final class CodenessApplicationModel {
         self.handoffConfigurationValidator = handoffConfigurationValidator
         providerCatalog = loadedProviderCatalog
         claudeModels = loadedProviderCatalog.provider(.claude)?.knownModels ?? []
-        builtInWorkflowCatalog = loadedWorkflowCatalog
         let codexProvider = testingCodexProvider
             ?? CodexAgentProvider(appServer: appServer)
         self.codexProvider = codexProvider
@@ -242,45 +220,11 @@ final class CodenessApplicationModel {
         self.agentProviders = agentProviders
         claudeProvider = initialClaudeProvider
         workflowRouter = AgentWorkflowHandoffRouter(providers: agentProviders)
+        liveTeamRouter = AgentLiveTeamRouter(providers: agentProviders)
         configuredExecutablePath = UserDefaults.standard.string(forKey: "CodexExecutablePath") ?? ""
         configuredClaudeExecutablePath = UserDefaults.standard.string(
             forKey: Self.claudeExecutablePathKey
         ) ?? ""
-        let customTemplates: [WorkflowTemplate]
-        if let data = UserDefaults.standard.data(forKey: Self.customWorkflowTemplatesKey),
-           let saved = try? JSONDecoder().decode([WorkflowTemplate].self, from: data) {
-            customTemplates = saved.filter { $0.validationMessage == nil }
-        } else {
-            customTemplates = []
-        }
-        let mergedTemplates = Self.mergedWorkflowTemplates(
-            builtIns: loadedWorkflowCatalog.templates,
-            custom: customTemplates
-        )
-        let savedDefaultID = UserDefaults.standard.string(
-            forKey: Self.defaultWorkflowTemplateIDKey
-        )
-        let defaultID = savedDefaultID.flatMap { id in
-            mergedTemplates.contains(where: { $0.id == id }) ? id : nil
-        } ?? loadedWorkflowCatalog.defaultTemplateID
-        workflowCatalog = WorkflowCatalog(
-            schemaVersion: 1,
-            defaultTemplateID: defaultID,
-            templates: mergedTemplates
-        )
-        if let data = UserDefaults.standard.data(forKey: Self.promptDefaultsKey),
-           let savedPrompts = try? JSONDecoder().decode(ActivityPrompts.self, from: data),
-           savedPrompts.validationMessage == nil {
-            promptDefaults = savedPrompts
-        } else {
-            promptDefaults = .builtInDefaults
-        }
-        if let data = UserDefaults.standard.data(forKey: Self.repositoryModelDefaultsKey),
-           let savedDefaults = try? JSONDecoder().decode(RepositoryModelDefaults.self, from: data) {
-            repositoryModelDefaults = savedDefaults
-        } else {
-            repositoryModelDefaults = .builtInDefaults
-        }
         if UserDefaults.standard.object(forKey: Self.separatesRunTranscriptsKey) == nil {
             separatesRunTranscripts = true
         } else {
@@ -313,16 +257,21 @@ final class CodenessApplicationModel {
         }
     }
 
-    func canRun(_ workflow: WorkflowTemplate) -> Bool {
-        let providerIDs = Set(
-            workflow.steps.map(\.target.providerID)
-                + [workflow.coordinator.target.providerID]
-        )
-        return !providerIDs.isEmpty
-            && providerIDs.allSatisfy(isProviderReady)
-            && providerIDs.isDisjoint(with: pendingProviderRestarts)
-            && providerIDs.isDisjoint(with: retainedProviderLaunchFences)
-            && workflowCompatibilityMessage(workflow) == nil
+    var liveTeamAvailabilityMessage: String? {
+        let runtime = liveTeamRuntimeConfiguration()
+        if let message = runtime.validationMessage {
+            return message
+        }
+        let targets = runtime.targetOptions.map(\.target)
+            + [runtime.overseer.target, runtime.defaultCoordinator.target]
+        if let message = targets.compactMap(targetCompatibilityMessage).first {
+            return message
+        }
+        return nil
+    }
+
+    var canStartLiveTeamActivity: Bool {
+        liveTeamAvailabilityMessage == nil
     }
 
     func isProviderRestartPending(_ providerID: AgentProviderID) -> Bool {
@@ -331,18 +280,6 @@ final class CodenessApplicationModel {
 
     func agentProviderRegistryForTesting() -> AgentProviderRegistry {
         agentProviders
-    }
-
-    func workflowCompatibilityMessage(_ workflow: WorkflowTemplate) -> String? {
-        for step in workflow.steps {
-            if let message = targetCompatibilityMessage(step.target) {
-                return "\(step.name): \(message)"
-            }
-        }
-        if let message = targetCompatibilityMessage(workflow.coordinator.target) {
-            return "Coordinator: \(message)"
-        }
-        return nil
     }
 
     func targetCompatibilityMessage(_ target: AgentTarget) -> String? {
@@ -478,7 +415,8 @@ final class CodenessApplicationModel {
         if let coordinator = coordinators[canonicalPath] {
             return coordinator
         }
-        let initialSettings = repositoryModelDefaults.applying(to: RepositorySettings())
+        let initialSettings = RepositorySettings()
+        let liveTeamRuntime = liveTeamRuntimeConfiguration()
         let coordinator = RepositoryCoordinator(
             canonicalPath: canonicalPath,
             appServer: appServer,
@@ -487,10 +425,114 @@ final class CodenessApplicationModel {
             handoffConfigurationValidator: handoffConfigurationValidator,
             initialSettings: initialSettings,
             agentProviders: agentProviders,
-            workflowRouter: workflowRouter
+            workflowRouter: workflowRouter,
+            liveTeamCoordinatorRouter: liveTeamRouter,
+            liveTeamOverseerRouter: liveTeamRouter,
+            liveTeamRuntimeConfiguration: liveTeamRuntime,
+            liveTeamRuntimeConfigurationProvider: { [weak self] _ in
+                self?.liveTeamRuntimeConfiguration() ?? liveTeamRuntime
+            }
         )
         coordinators[canonicalPath] = coordinator
         return coordinator
+    }
+
+    private func liveTeamRuntimeConfiguration() -> LiveTeamRuntimeConfiguration {
+        let targetOptions = availableLiveTeamTargetOptions()
+        let controlTarget = targetOptions.first?.target ?? AgentTarget(
+            providerID: .codex,
+            model: "unavailable"
+        )
+        return LiveTeamRuntimeConfiguration(
+            overseer: LiveTeamOverseerConfiguration(
+                target: controlTarget,
+                instructions: """
+                Act as the Board's strategic Overseer. Preserve the fixed user goal and its authority boundaries. Create or revise the smallest useful team, keep the working goal stable unless strategy changes, choose session memory deliberately, demand durable evidence, and pause when new Board authority is required.
+                """
+            ),
+            defaultCoordinator: LiveTeamCoordinatorConfiguration(
+                target: controlTarget,
+                instructions: """
+                Manage only the current team's local flow. Preserve the working goal, keep handoffs bounded, allow at most one local retry for an incomplete result, and escalate strategic, completion, or authority questions to the Overseer. Never change the goal, team, order, or session policy.
+                """
+            ),
+            targetOptions: targetOptions,
+            oversightPolicy: LiveTeamOversightPolicy(
+                periodicRoundInterval: 3,
+                periodicWorkerTurnInterval: 12,
+                minimumPeriodicReviewInterval: 10 * 60,
+                repeatedFailureThreshold: 2,
+                automaticChangeLimitWithoutProgress: 3
+            )
+        )
+    }
+
+    private func availableLiveTeamTargetOptions() -> [LiveTeamTargetOption] {
+        var options: [LiveTeamTargetOption] = []
+        for provider in providerCatalog.providers where isProviderAvailableForNewWork(provider.id) {
+            let discoveredModels = models(for: provider.id)
+            let candidateModels = discoveredModels.isEmpty
+                ? provider.knownModels
+                : discoveredModels
+            for model in candidateModels {
+                let efforts: [String?] = model.supportedEfforts.isEmpty
+                    ? [nil]
+                    : model.supportedEfforts.map(Optional.some)
+                for effort in efforts {
+                    options.append(liveTeamTargetOption(
+                        providerID: provider.id,
+                        model: model,
+                        effort: effort,
+                        mode: .standard,
+                        speed: .standard
+                    ))
+                    if model.supportsFastMode {
+                        options.append(liveTeamTargetOption(
+                            providerID: provider.id,
+                            model: model,
+                            effort: effort,
+                            mode: .standard,
+                            speed: .fast
+                        ))
+                    }
+                }
+            }
+        }
+        return options
+    }
+
+    private func isProviderAvailableForNewWork(_ providerID: AgentProviderID) -> Bool {
+        isProviderReady(providerID)
+            && !pendingProviderRestarts.contains(providerID)
+            && !retainedProviderLaunchFences.contains(providerID)
+    }
+
+    private func liveTeamTargetOption(
+        providerID: AgentProviderID,
+        model: AgentModelDescriptor,
+        effort: String?,
+        mode: AgentMode,
+        speed: AgentSpeed
+    ) -> LiveTeamTargetOption {
+        let effortID = effort ?? "default"
+        let target = AgentTarget(
+            providerID: providerID,
+            model: model.id,
+            options: AgentExecutionOptions(
+                effort: effort,
+                mode: mode,
+                speed: speed
+            )
+        )
+        var qualifiers = [effort ?? "provider default"]
+        if mode == .plan { qualifiers.append("Plan") }
+        if speed == .fast { qualifiers.append("Fast") }
+        return LiveTeamTargetOption(
+            id: [providerID.rawValue, model.id, effortID, mode.rawValue, speed.rawValue]
+                .joined(separator: ":"),
+            label: "\(providerName(providerID)) · \(model.id) · \(qualifiers.joined(separator: " · "))",
+            target: target
+        )
     }
 
     func canonicalWorkspace(for selectedURL: URL) async throws -> URL {
@@ -631,7 +673,7 @@ final class CodenessApplicationModel {
         guard !coordinators.values.contains(where: {
             $0.hasActiveWork(for: .codex)
         }) else {
-            applicationError = "Finish active Codex turns or coordinator work before restarting App Server."
+            applicationError = "Finish active Codex turns or routing work before restarting App Server."
             return false
         }
         let launchFence: AgentProviderRegistry.LaunchFence
@@ -683,7 +725,7 @@ final class CodenessApplicationModel {
         guard !coordinators.values.contains(where: {
             $0.hasActiveWork(for: .codex)
         }) else {
-            applicationError = "Finish active Codex turns or coordinator work before restarting App Server."
+            applicationError = "Finish active Codex turns or routing work before restarting App Server."
             return .oldProviderUntouched
         }
 
@@ -816,7 +858,7 @@ final class CodenessApplicationModel {
         guard !coordinators.values.contains(where: {
             $0.hasActiveWork(for: .claude)
         }) else {
-            applicationError = "Finish active Claude turns or coordinator work before restarting Claude."
+            applicationError = "Finish active Claude turns or routing work before restarting Claude."
             return false
         }
         let launchFence: AgentProviderRegistry.LaunchFence
@@ -868,7 +910,7 @@ final class CodenessApplicationModel {
         guard !coordinators.values.contains(where: {
             $0.hasActiveWork(for: .claude)
         }) else {
-            applicationError = "Finish active Claude turns or coordinator work before restarting Claude."
+            applicationError = "Finish active Claude turns or routing work before restarting Claude."
             return .oldProviderUntouched
         }
         guard let descriptor = providerCatalog.provider(.claude) else {
@@ -1015,7 +1057,7 @@ final class CodenessApplicationModel {
         guard !coordinators.values.contains(where: {
             $0.hasActiveWork(for: .openAICompatible)
         }) else {
-            applicationError = "Finish active \(providerName(.openAICompatible)) turns or coordinator work before changing its endpoint."
+            applicationError = "Finish active \(providerName(.openAICompatible)) turns or routing work before changing its endpoint."
             return false
         }
         let configuration = OpenAICompatibleProviderConfiguration(
@@ -1247,70 +1289,6 @@ final class CodenessApplicationModel {
 
     func clearError() {
         applicationError = nil
-    }
-
-    func updatePromptDefaults(_ prompts: ActivityPrompts) {
-        if let validationMessage = prompts.validationMessage {
-            applicationError = validationMessage
-            return
-        }
-        do {
-            UserDefaults.standard.set(try JSONEncoder().encode(prompts), forKey: Self.promptDefaultsKey)
-            promptDefaults = prompts
-        } catch {
-            applicationError = "Could not save prompt defaults: \(error.localizedDescription)"
-        }
-    }
-
-    func updateRepositoryModelDefaults(_ defaults: RepositoryModelDefaults) {
-        do {
-            UserDefaults.standard.set(
-                try JSONEncoder().encode(defaults),
-                forKey: Self.repositoryModelDefaultsKey
-            )
-            repositoryModelDefaults = defaults
-        } catch {
-            applicationError = "Could not save model defaults: \(error.localizedDescription)"
-        }
-    }
-
-    func updateWorkflowCatalog(_ catalog: WorkflowCatalog) {
-        guard catalog.schemaVersion == 1,
-              !catalog.templates.isEmpty,
-              catalog.templates.contains(where: { $0.id == catalog.defaultTemplateID }),
-              catalog.templates.allSatisfy({ $0.validationMessage == nil }) else {
-            applicationError = "The workflows are invalid."
-            return
-        }
-        let custom = catalog.templates.filter { template in
-            builtInWorkflowCatalog.template(id: template.id) != template
-        }
-        do {
-            UserDefaults.standard.set(
-                try JSONEncoder().encode(custom),
-                forKey: Self.customWorkflowTemplatesKey
-            )
-            UserDefaults.standard.set(
-                catalog.defaultTemplateID,
-                forKey: Self.defaultWorkflowTemplateIDKey
-            )
-            workflowCatalog = WorkflowCatalog(
-                schemaVersion: 1,
-                defaultTemplateID: catalog.defaultTemplateID,
-                templates: Self.mergedWorkflowTemplates(
-                    builtIns: builtInWorkflowCatalog.templates,
-                    custom: custom
-                )
-            )
-        } catch {
-            applicationError = "Could not save workflows: \(error.localizedDescription)"
-        }
-    }
-
-    func restoreBuiltInWorkflowCatalog() {
-        UserDefaults.standard.removeObject(forKey: Self.customWorkflowTemplatesKey)
-        UserDefaults.standard.removeObject(forKey: Self.defaultWorkflowTemplateIDKey)
-        workflowCatalog = builtInWorkflowCatalog
     }
 
     func setSeparatesRunTranscripts(_ enabled: Bool) {
@@ -1546,21 +1524,6 @@ final class CodenessApplicationModel {
 
     private func requireCurrentLifecycle(_ lease: LifecycleLease) throws {
         guard lifecycleIsCurrent(lease) else { throw CancellationError() }
-    }
-
-    private static func mergedWorkflowTemplates(
-        builtIns: [WorkflowTemplate],
-        custom: [WorkflowTemplate]
-    ) -> [WorkflowTemplate] {
-        var result = builtIns
-        for template in custom {
-            if let index = result.firstIndex(where: { $0.id == template.id }) {
-                result[index] = template
-            } else {
-                result.append(template)
-            }
-        }
-        return result
     }
 
     private static func isSupportedCodexVersion(

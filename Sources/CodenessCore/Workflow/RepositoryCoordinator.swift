@@ -169,6 +169,11 @@ public final class RepositoryCoordinator {
         let prompt: String
     }
 
+    private struct LiveTeamSessionFallback {
+        let checkpoint: LiveTeamCheckpoint
+        let prompt: String
+    }
+
     private struct ProviderSessionReference: Hashable {
         let providerID: AgentProviderID
         let sessionID: String
@@ -250,6 +255,7 @@ public final class RepositoryCoordinator {
     public var pendingInteractionCount: Int { pendingInteractions.count }
     public private(set) var statusMessage = "Loading repository history…"
     public private(set) var errorMessage: String?
+    public private(set) var boardDirectionMessage: String?
     public private(set) var isLoaded = false
     public private(set) var pauseAfterCurrent = false
     public private(set) var isStartingActivity = false
@@ -336,6 +342,12 @@ public final class RepositoryCoordinator {
     private let store: any RepositoryWorkspaceStoring
     private let agentProviders: AgentProviderRegistry?
     private let workflowRouter: (any WorkflowHandoffRouting)?
+    private let liveTeamCoordinatorRouter: (any LiveTeamCoordinatorRouting)?
+    private let liveTeamOverseerRouter: (any LiveTeamOverseerRouting)?
+    private var liveTeamRuntimeConfiguration: LiveTeamRuntimeConfiguration?
+    private let liveTeamRuntimeConfigurationProvider: (@MainActor @Sendable (
+        RepositorySettings
+    ) -> LiveTeamRuntimeConfiguration)?
     private var sessionsPrepared = false
     private var itemsWithDeltas: [UUID: Set<String>] = [:]
     private var deltaItemRetainedByteCounts: [UUID: Int] = [:]
@@ -397,6 +409,8 @@ public final class RepositoryCoordinator {
     private var genericRunTasks: [UUID: Task<Void, Never>] = [:]
     private var genericInteractionRoutes: [String: GenericInteractionRoute] = [:]
     private var genericSessionFallbacks: [UUID: GenericSessionFallback] = [:]
+    private var liveTeamSessionFallbacks: [UUID: LiveTeamSessionFallback] = [:]
+    private var liveTeamControlInvocationCount = 0
     private var providerLaunchLeases: [UUID: UUID] = [:]
     private var providerLaunchWaiters: [CheckedContinuation<Void, Never>] = []
     /// Sessions attached by this coordinator in the current app process.
@@ -415,6 +429,12 @@ public final class RepositoryCoordinator {
         initialSettings: RepositorySettings = .init(),
         agentProviders: AgentProviderRegistry? = nil,
         workflowRouter: (any WorkflowHandoffRouting)? = nil,
+        liveTeamCoordinatorRouter: (any LiveTeamCoordinatorRouting)? = nil,
+        liveTeamOverseerRouter: (any LiveTeamOverseerRouting)? = nil,
+        liveTeamRuntimeConfiguration: LiveTeamRuntimeConfiguration? = nil,
+        liveTeamRuntimeConfigurationProvider: (@MainActor @Sendable (
+            RepositorySettings
+        ) -> LiveTeamRuntimeConfiguration)? = nil,
         legacyInterruptionMaximumAttemptCount: Int = 3,
         legacyInterruptionRetryDelay: Duration = .milliseconds(250),
         legacyInterruptionTerminalTimeout: Duration = .seconds(2)
@@ -426,6 +446,10 @@ public final class RepositoryCoordinator {
         self.store = store
         self.agentProviders = agentProviders
         self.workflowRouter = workflowRouter
+        self.liveTeamCoordinatorRouter = liveTeamCoordinatorRouter
+        self.liveTeamOverseerRouter = liveTeamOverseerRouter
+        self.liveTeamRuntimeConfiguration = liveTeamRuntimeConfiguration
+        self.liveTeamRuntimeConfigurationProvider = liveTeamRuntimeConfigurationProvider
         self.legacyInterruptionMaximumAttemptCount = max(
             1,
             legacyInterruptionMaximumAttemptCount
@@ -445,6 +469,14 @@ public final class RepositoryCoordinator {
     }
 
     public var activity: ActivityRecord? { record.activity }
+
+    public var liveTeamDefinition: LiveTeamDefinition? {
+        record.activity?.liveTeam?.currentDefinition
+    }
+
+    public var pendingLiveTeamRevision: LiveTeamPendingRevision? {
+        record.activity?.liveTeam?.pendingRevision
+    }
 
     public var selectedRun: RunRecord? {
         guard let selectedRunID else { return nil }
@@ -466,7 +498,12 @@ public final class RepositoryCoordinator {
     }
 
     public var canStartActivity: Bool {
-        isLoaded && record.activity == nil && !isStartingActivity && !isStartingOver && !isClosing
+        isLoaded
+            && loadInProgressGeneration == nil
+            && record.activity == nil
+            && !isStartingActivity
+            && !isStartingOver
+            && !isClosing
     }
 
     /// Starting over is intentionally unavailable while any repository-changing
@@ -474,6 +511,7 @@ public final class RepositoryCoordinator {
     /// The user can pause or stop the active turn first and then reset from a durable checkpoint.
     public var canStartOver: Bool {
         guard isLoaded,
+              loadInProgressGeneration == nil,
               record.activity != nil,
               record.activity?.status != .running,
               !isStartingActivity,
@@ -519,17 +557,34 @@ public final class RepositoryCoordinator {
            (run.agentTarget?.providerID ?? .codex) == providerID {
             return true
         }
-        guard let workflow = record.activity?.workflow,
-              workflow.coordinator.target.providerID == providerID else {
-            return false
+        if let liveTeam = record.activity?.liveTeam {
+            let usesCoordinator = liveTeam.currentDefinition?.coordinator.target.providerID
+                == providerID
+            let usesOverseer = liveTeam.overseer.target.providerID == providerID
+            return (usesCoordinator || usesOverseer)
+                && (!routingTasks.isEmpty || workOverviewSummaryTask != nil)
         }
+        guard let workflow = record.activity?.workflow,
+              workflow.coordinator.target.providerID == providerID else { return false }
         return !routingTasks.isEmpty || workOverviewSummaryTask != nil
     }
 
     public var canResume: Bool {
-        guard !hasUnconfirmedSafetyStop,
+        guard loadInProgressGeneration == nil,
+              !hasUnconfirmedSafetyStop,
               let activity = activeActivity,
               activity.status == .paused else { return false }
+        if requiresLegacyConversion { return true }
+        if let liveTeam = activity.liveTeam {
+            if liveTeam.resumeCheckpoint != nil { return true }
+            guard let run = activity.runs.last else {
+                return liveTeam.checkpoint != nil || liveTeam.currentDefinition == nil
+            }
+            if run.status == .interrupted { return true }
+            guard run.finalOutput?.isEmpty == false else { return false }
+            return run.status == .routing
+                || (run.status == .paused && run.relayError != nil)
+        }
         if activity.workflow != nil {
             if activity.workflowResumeCheckpoint != nil { return true }
             guard let run = activity.runs.last else { return activity.workflowCursor != nil }
@@ -546,7 +601,18 @@ public final class RepositoryCoordinator {
     }
 
     public func canRestartWorkflowStep(_ runID: UUID) -> Bool {
-        !hasUnconfirmedSafetyStop && restartableWorkflowContext(for: runID) != nil
+        guard !hasUnconfirmedSafetyStop else { return false }
+        guard !requiresLegacyConversion else { return false }
+        if let activity = record.activity,
+           activity.status == .paused,
+           case .recoverRun(let checkpointRunID)? = activity.liveTeam?.resumeCheckpoint,
+           checkpointRunID == runID,
+           let run = activity.runs.first(where: { $0.id == runID }),
+           run.liveTeamMember != nil,
+           [.failed, .interrupted].contains(run.status) {
+            return true
+        }
+        return restartableWorkflowContext(for: runID) != nil
     }
 
     private var hasUnconfirmedSafetyStop: Bool {
@@ -557,10 +623,18 @@ public final class RepositoryCoordinator {
 
     public var canAmendGoal: Bool {
         isLoaded
+            && loadInProgressGeneration == nil
             && record.activity != nil
             && !isStartingActivity
             && !isStartingOver
             && !isClosing
+    }
+
+    public var requiresLegacyConversion: Bool {
+        record.activity?.workflow != nil
+            && record.activity?.liveTeam == nil
+            && liveTeamOverseerRouter != nil
+            && liveTeamRuntimeConfiguration != nil
     }
 
     public var goalForAmendment: String {
@@ -619,6 +693,7 @@ public final class RepositoryCoordinator {
         loadInProgressGeneration = generation
         defer { finishLoad(generation: generation) }
         errorMessage = nil
+        boardDirectionMessage = nil
         do {
             let loadedRecord = try await store.load(
                 canonicalPath: record.canonicalPath,
@@ -633,7 +708,13 @@ public final class RepositoryCoordinator {
 
             cancelWorkOverviewSummaryRequest()
             record = loadedRecord
+            if let liveTeamRuntimeConfigurationProvider {
+                liveTeamRuntimeConfiguration = liveTeamRuntimeConfigurationProvider(
+                    loadedRecord.settings
+                )
+            }
             viewState = loadedViewState
+            normalizeLiveTeamProductLanguageIfNeeded()
             pauseAfterCurrent = viewState.pauseAfterCurrent
             runIsAtBottom = viewState.transcriptViewports.mapValues(\.followsOutput)
             if viewState.runSelectionWasSaved {
@@ -653,7 +734,10 @@ public final class RepositoryCoordinator {
                   isCurrentLoad(generation) else { return }
             try await recoverOperationalRunPayloads(loadGeneration: generation)
             guard isCurrentLoad(generation) else { return }
-            if record.activity?.workflow != nil {
+            if record.activity?.liveTeam != nil {
+                recoverInterruptedLiveTeamState()
+                restoreBoardDirectionPresentationIfNeeded()
+            } else if record.activity?.workflow != nil {
                 recoverInterruptedGenericState()
             } else {
                 recoverInterruptedState()
@@ -664,6 +748,7 @@ public final class RepositoryCoordinator {
                 loadGeneration: generation
             )
             guard isCurrentLoad(generation) else { return }
+            repairCompletedPlanTurnIfNeeded()
             evictTranscripts(except: selectedRunID)
             isLoaded = true
             switch record.activity?.status {
@@ -683,6 +768,12 @@ public final class RepositoryCoordinator {
                 // Loading succeeded; keep the real record active even if recovery/view
                 // state cannot be written back yet.
                 errorMessage = "Repository history loaded, but its recovered state could not be saved: \(error.localizedDescription)"
+            }
+            if record.activity?.workflow != nil,
+               record.activity?.liveTeam == nil,
+               let status = record.activity?.status,
+               ![.completed, .cancelled].contains(status) {
+                await convertLegacyWorkflowNow()
             }
         } catch {
             guard isCurrentLoad(generation) else { return }
@@ -827,6 +918,72 @@ public final class RepositoryCoordinator {
         await performGeneric(cursor: cursor, previousHandoff: nil)
     }
 
+    /// Starts the live-team product path. The activity is saved in a goal-only
+    /// state before the fresh Overseer invocation, and revision 1 is saved again
+    /// before Codeness prepares any worker session.
+    public func startActivity(goal: String) async {
+        guard canStartActivity else { return }
+        if let liveTeamRuntimeConfigurationProvider {
+            liveTeamRuntimeConfiguration = liveTeamRuntimeConfigurationProvider(record.settings)
+        }
+        guard agentProviders != nil,
+              liveTeamCoordinatorRouter != nil,
+              liveTeamOverseerRouter != nil,
+              let runtime = liveTeamRuntimeConfiguration else {
+            errorMessage = "The agents are not configured."
+            return
+        }
+        let cleanGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanGoal.isEmpty else {
+            errorMessage = "The user goal is empty."
+            return
+        }
+        guard runtime.validationMessage == nil else {
+            errorMessage = runtime.validationMessage
+                ?? "Codeness has no valid agent targets."
+            return
+        }
+
+        isStartingActivity = true
+        defer { isStartingActivity = false }
+        cancelWorkOverviewSummaryRequest()
+        let request = LiveTeamOverseerRequest(
+            mode: .bootstrap,
+            reason: "Create the first working goal and agents for the user's goal.",
+            automatic: false
+        )
+        record.activityDraft = nil
+        record.activity = ActivityRecord(
+            goal: cleanGoal,
+            prompts: .builtInDefaults,
+            liveTeam: LiveTeamState(
+                overseer: runtime.bootstrapOverseerConfiguration(for: cleanGoal),
+                resumeCheckpoint: .invokeOverseer(request)
+            )
+        )
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        errorMessage = nil
+        boardDirectionMessage = nil
+        statusMessage = "Saving the goal…"
+
+        do {
+            try await persist()
+        } catch {
+            record.activity?.status = .paused
+            statusMessage = "Paused before preparing agents"
+            do {
+                try await persist()
+                errorMessage = "Could not save the goal before Codeness prepared the agents: \(error.localizedDescription)"
+            } catch {
+                errorMessage = "Could not save the goal or its retry point: \(error.localizedDescription)"
+            }
+            return
+        }
+        await invokeLiveTeamOverseer(request)
+    }
+
     public func handle(_ event: AppServerEvent) async {
         if protocolContainment != nil {
             if case .exited = event {
@@ -863,7 +1020,8 @@ public final class RepositoryCoordinator {
             if case .exited = event { return true }
             return false
         }
-        guard record.activity?.workflow == nil else { return false }
+        guard record.activity?.workflow == nil,
+              record.activity?.liveTeam == nil else { return false }
         if case .notification(let method, let params, _) = event,
            method == "serverRequest/resolved",
            let requestID = params["requestId"] {
@@ -895,6 +1053,17 @@ public final class RepositoryCoordinator {
             goal: goal,
             prompts: .builtInDefaults,
             workflow: workflow
+        )
+        guard record.activityDraft != draft else { return }
+        record.activityDraft = draft
+    }
+
+    public func updateActivityDraft(goal: String) {
+        guard isLoaded, record.activity == nil, !isStartingActivity, !isStartingOver else { return }
+        let draft = ActivityConfigurationDraft(
+            goal: goal,
+            prompts: .builtInDefaults,
+            workflow: nil
         )
         guard record.activityDraft != draft else { return }
         record.activityDraft = draft
@@ -1013,6 +1182,8 @@ public final class RepositoryCoordinator {
         let router = self.router
         let workflowRouter = self.workflowRouter
         let workflowCoordinator = record.activity?.workflow?.coordinator
+        let liveTeamRouter = self.liveTeamCoordinatorRouter
+        let liveTeamCoordinator = record.activity?.liveTeam?.currentDefinition?.coordinator
         let settings = record.settings.relay
         let store = self.store
         let canonicalPath = record.canonicalPath
@@ -1020,10 +1191,21 @@ public final class RepositoryCoordinator {
         workOverviewSummaryTask = Task { @MainActor [weak self] in
             do {
                 let text: String
-                if let workflowCoordinator {
+                if let liveTeamCoordinator {
+                    guard let liveTeamRouter else {
+                        throw AgentProviderError.invalidResponse(
+                            "work routing is unavailable"
+                        )
+                    }
+                    text = try await liveTeamRouter.summarizeWork(
+                        context,
+                        configuration: liveTeamCoordinator,
+                        cwd: canonicalPath
+                    )
+                } else if let workflowCoordinator {
                     guard let workflowRouter else {
                         throw AgentProviderError.invalidResponse(
-                            "the configured workflow coordinator is unavailable"
+                            "the configured work router is unavailable"
                         )
                     }
                     text = try await workflowRouter.summarizeWork(
@@ -1040,7 +1222,7 @@ public final class RepositoryCoordinator {
                    self.workOverviewSummaryTaskSignature == signature {
                     self.viewState.workOverviewSummary = WorkOverviewSummaryCache(
                         sourceSignature: signature,
-                        text: text
+                        text: LiveTeamProductLanguage.workSummary(text)
                     )
                     try? await store.saveViewState(
                         self.viewState,
@@ -1088,6 +1270,16 @@ public final class RepositoryCoordinator {
         guard record.activity?.status == .paused,
               !hasUnconfirmedSafetyStop else { return }
         focusActiveProgress()
+        if requiresLegacyConversion {
+            await convertLegacyWorkflowNow()
+            guard record.activity?.liveTeam != nil else { return }
+            await resumeLiveTeam()
+            return
+        }
+        if record.activity?.liveTeam != nil {
+            await resumeLiveTeam()
+            return
+        }
         if record.activity?.workflow != nil {
             await resumeGeneric()
             return
@@ -1222,6 +1414,9 @@ public final class RepositoryCoordinator {
         }
         if hasUnconfirmedSafetyStop {
             return await prepareSafetyStoppedRunsForClose()
+        }
+        if record.activity?.liveTeam != nil {
+            return await prepareLiveTeamForClose(strategy: strategy)
         }
         if record.activity?.workflow != nil {
             return await prepareGenericWorkflowForClose(strategy: strategy)
@@ -1503,6 +1698,10 @@ public final class RepositoryCoordinator {
             errorMessage = "Wait until the stopped provider turn confirms termination before restarting this workflow step."
             return
         }
+        if canRestartLiveTeamRun(runID) {
+            await restartLiveTeamRun(runID)
+            return
+        }
         guard var context = restartableWorkflowContext(for: runID) else {
             errorMessage = "Only the current failed or stopped workflow step can be restarted."
             return
@@ -1597,6 +1796,83 @@ public final class RepositoryCoordinator {
         )
     }
 
+    private func canRestartLiveTeamRun(_ runID: UUID) -> Bool {
+        guard let activity = record.activity,
+              activity.status == .paused,
+              case .recoverRun(let checkpointRunID)? = activity.liveTeam?.resumeCheckpoint,
+              checkpointRunID == runID,
+              let run = activity.runs.first(where: { $0.id == runID }),
+              run.liveTeamMember != nil,
+              [.failed, .interrupted].contains(run.status) else { return false }
+        return true
+    }
+
+    private func restartLiveTeamRun(_ runID: UUID) async {
+        guard let run = run(withID: runID),
+              let snapshot = run.liveTeamMember,
+              canRestartLiveTeamRun(runID) else { return }
+        let previousActivity = record.activity
+        let previousPause = pauseAfterCurrent
+        let slotID = snapshot.sessionSlotID
+        var session = record.activity?.stepSessions[slotID]
+            ?? WorkflowSessionState(
+                stepID: slotID,
+                lineage: (run.sessionLineage ?? 1) + 1,
+                target: snapshot.member.target
+            )
+        let superseded = session.providerSessionID.map {
+            ProviderSessionReference(
+                providerID: session.target.providerID,
+                sessionID: $0
+            )
+        }
+        session.lineage = max(session.lineage, run.sessionLineage ?? 0) + 1
+        session.providerSessionID = nil
+        session.target = snapshot.member.target
+        record.activity?.stepSessions[slotID] = session
+        let checkpoint = LiveTeamCheckpoint(
+            memberID: snapshot.member.id,
+            cycle: snapshot.cycle,
+            revision: snapshot.revision
+        )
+        record.activity?.status = .running
+        record.activity?.liveTeam?.checkpoint = checkpoint
+        record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        statusMessage = "Restarting \(snapshot.member.name.lowercased()) in a fresh session…"
+        do {
+            try await persist()
+        } catch {
+            record.activity = previousActivity
+            pauseAfterCurrent = previousPause
+            viewState.pauseAfterCurrent = previousPause
+            scheduleViewStateSave()
+            errorMessage = "Could not save the fresh agent turn: \(error.localizedDescription)"
+            return
+        }
+        if let superseded {
+            await releaseProviderSessions([superseded])
+        }
+        let prompt = """
+        FRESH MEMBER RESTART
+
+        The previous attempt did not finish cleanly. Its run remains in history and may have partially changed the repository. Inspect current state before editing and recover the exact immutable assignment below in a new provider session.
+
+        \(LiveTeamPromptBuilder.memberPrompt(
+            snapshot: snapshot,
+            handoff: record.activity?.liveTeam?.coordinatorHandoff
+        ))
+        """
+        await performLiveTeam(
+            checkpoint: checkpoint,
+            promptOverride: prompt,
+            snapshotOverride: snapshot,
+            allowsSessionFallback: false
+        )
+    }
+
     public func retryWorkflowStep(_ runID: UUID) async {
         guard var context = restartableWorkflowContext(for: runID),
               case .routeCompletedRun(let checkpointRunID)? =
@@ -1675,6 +1951,12 @@ public final class RepositoryCoordinator {
         guard let run = activeRun ?? record.activity?.runs.last,
               let finalOutput = run.finalOutput else { return }
         focusActiveProgress(on: run.id)
+        if record.activity?.liveTeam != nil {
+            record.activity?.status = .running
+            record.activity?.liveTeam?.resumeCheckpoint = nil
+            await beginLiveTeamRouting(runID: run.id, finalOutput: finalOutput)
+            return
+        }
         if record.activity?.workflow != nil {
             record.activity?.status = .running
             record.activity?.workflowResumeCheckpoint = nil
@@ -1690,6 +1972,20 @@ public final class RepositoryCoordinator {
         guard let run = activeRun ?? record.activity?.runs.last else { return }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             errorMessage = "The handoff must contain information for the next session."
+            return
+        }
+        if record.activity?.liveTeam != nil {
+            let liveDisposition: LiveTeamCoordinatorDisposition = switch disposition {
+            case .implementationComplete, .fixComplete: .completionCandidate
+            case .blocked, .failed, .unclear: .pause
+            case .implementationCheckpoint, .reviewComplete, .fixCheckpoint: .continueTeam
+            }
+            await useLiveTeamCoordinatorDecision(
+                handoff: text,
+                disposition: liveDisposition,
+                label: label,
+                evidence: "The user supplied the handoff after routing needed attention."
+            )
             return
         }
         if record.activity?.workflow != nil {
@@ -1749,6 +2045,49 @@ public final class RepositoryCoordinator {
         await applyGenericWorkflowDecision(runID: run.id, handoff: handoff)
     }
 
+    public func useLiveTeamCoordinatorDecision(
+        handoff: String,
+        disposition: LiveTeamCoordinatorDisposition,
+        label: String,
+        evidence: String
+    ) async {
+        guard record.activity?.liveTeam != nil,
+              let run = activeRun ?? record.activity?.runs.last,
+              run.liveTeamMember != nil else { return }
+        let clean = handoff.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            errorMessage = "The handoff must contain information for the agents."
+            return
+        }
+        focusActiveProgress(on: run.id)
+        let decision = LiveTeamCoordinatorDecision(
+            handoff: clean,
+            runLabel: normalizedRunLabel(label, fallback: run.displayName),
+            disposition: disposition,
+            evidence: evidence,
+            progressEvidence: .none
+        )
+        updateRun(run.id) {
+            $0.coordinatorDecision = decision
+            $0.relayError = nil
+            $0.status = .completed
+        }
+        record.activity?.liveTeam?.coordinatorHandoff = clean
+        record.activity?.liveTeam?.lastCoordinatorDecision = decision
+        record.activity?.status = .running
+        record.activity?.liveTeam?.resumeCheckpoint = .applyCoordinatorDecision(run.id)
+        do {
+            try await persist()
+            guard await releaseFreshLiveTeamSessionIfNeeded(for: run.id) else {
+                return
+            }
+            await applyLiveTeamCoordinatorDecision(runID: run.id, decision: decision)
+        } catch {
+            record.activity?.status = .paused
+            errorMessage = "Could not save the user-supplied handoff: \(error.localizedDescription)"
+        }
+    }
+
     @discardableResult
     public func updateSettings(_ settings: RepositorySettings) async -> Bool {
         do {
@@ -1758,12 +2097,17 @@ public final class RepositoryCoordinator {
             return false
         }
         let previousSettings = record.settings
+        let previousLiveTeamRuntimeConfiguration = liveTeamRuntimeConfiguration
         record.settings = settings
+        if let liveTeamRuntimeConfigurationProvider {
+            liveTeamRuntimeConfiguration = liveTeamRuntimeConfigurationProvider(settings)
+        }
         do {
             try await persist()
             return true
         } catch {
             record.settings = previousSettings
+            liveTeamRuntimeConfiguration = previousLiveTeamRuntimeConfiguration
             errorMessage = error.localizedDescription
             return false
         }
@@ -1818,6 +2162,286 @@ public final class RepositoryCoordinator {
         }
     }
 
+    @discardableResult
+    public func submitLiveTeamRevision(
+        _ proposedDefinition: LiveTeamDefinition,
+        baseRevision: Int,
+        reason: String,
+        evidence: String = "User edit",
+        preferredNextMemberID: String? = nil,
+        replacePendingBoardRevision: Bool = false,
+        discardOverseerProposal: Bool = false
+    ) async -> Bool {
+        guard let current = record.activity?.liveTeam?.currentDefinition else {
+            errorMessage = LiveTeamRevisionError.noCurrentDefinition.localizedDescription
+            return false
+        }
+        if record.activity?.liveTeam?.pendingRevision?.actor == .overseer {
+            guard discardOverseerProposal else {
+                errorMessage = "Review or discard Codeness's proposed agent changes before saving yours."
+                return false
+            }
+            record.activity?.liveTeam?.pendingRevision = nil
+        }
+        do {
+            let pending = try LiveTeamStateMachine.pendingRevision(
+                definition: proposedDefinition,
+                baseRevision: baseRevision,
+                actor: .board,
+                reason: reason,
+                evidence: evidence,
+                preferredNextMemberID: preferredNextMemberID,
+                currentDefinition: current,
+                existingPending: record.activity?.liveTeam?.pendingRevision,
+                replacingBoardPending: replacePendingBoardRevision
+            )
+            let previousActivity = record.activity
+            record.activity?.liveTeam?.pendingRevision = pending
+            record.activity?.liveTeam?.boardDirectionReason = nil
+            boardDirectionMessage = nil
+            do {
+                // Acknowledging the Board edit means this pending revision is
+                // already durable, even when an active turn keeps its launch
+                // snapshot until the next safe boundary.
+                try await persist()
+            } catch {
+                record.activity = previousActivity
+                throw error
+            }
+            let boundaryIsOpen = !hasActiveAgentTurn
+                && routingTasks.isEmpty
+                && completingRunIDs.isEmpty
+                && liveTeamControlInvocationCount == 0
+            if boundaryIsOpen {
+                guard await activatePendingLiveTeamRevision() else { return false }
+                record.activity?.status = .paused
+                if let checkpoint = preferredLiveTeamContinuation(
+                    requested: record.activity?.liveTeam?.checkpoint,
+                    preferredMemberID: preferredNextMemberID
+                ) {
+                    record.activity?.liveTeam?.checkpoint = checkpoint
+                    record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+                }
+                statusMessage = "Agent changes applied"
+                try? await persist()
+            } else {
+                statusMessage = "Agent changes saved for between turns"
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    public func reviewLiveTeamStrategyNow() async {
+        guard record.activity?.liveTeam?.currentDefinition != nil else { return }
+        boardDirectionMessage = nil
+        let request = LiveTeamOverseerRequest(
+            mode: .strategicReview,
+            reason: "The user requested a strategic review now.",
+            continuation: record.activity?.liveTeam?.checkpoint,
+            automatic: false,
+            leavePaused: record.activity?.status == .paused
+        )
+        if hasActiveAgentTurn
+            || !routingTasks.isEmpty
+            || !completingRunIDs.isEmpty
+            || liveTeamControlInvocationCount > 0 {
+            record.activity?.liveTeam?.strategicReviewAfterBoundary = request
+            statusMessage = "Strategy review queued for between turns"
+            try? await persist()
+        } else {
+            await invokeLiveTeamOverseer(request)
+        }
+    }
+
+    @discardableResult
+    public func setReviewAutomaticLiveTeamChangesFirst(_ enabled: Bool) async -> Bool {
+        guard record.activity?.liveTeam != nil else { return false }
+        let previous = record.activity?.liveTeam?.reviewAutomaticChangesFirst
+        record.activity?.liveTeam?.reviewAutomaticChangesFirst = enabled
+        do {
+            try await persist()
+            return true
+        } catch {
+            record.activity?.liveTeam?.reviewAutomaticChangesFirst = previous ?? false
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func acceptPendingOverseerRevision() async -> Bool {
+        guard record.activity?.status == .paused,
+              record.activity?.liveTeam?.pendingRevision?.actor == .overseer else {
+            return false
+        }
+        guard await activatePendingLiveTeamRevision() else { return false }
+        if let checkpoint = preferredLiveTeamContinuation(
+            requested: record.activity?.liveTeam?.checkpoint,
+            preferredMemberID: nil
+        ) {
+            record.activity?.liveTeam?.checkpoint = checkpoint
+            record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+        }
+        statusMessage = "Agent changes accepted; paused"
+        try? await persist()
+        return true
+    }
+
+    @discardableResult
+    public func discardPendingOverseerRevision() async -> Bool {
+        guard record.activity?.liveTeam?.pendingRevision?.actor == .overseer else {
+            return false
+        }
+        let previous = record.activity?.liveTeam?.pendingRevision
+        record.activity?.liveTeam?.pendingRevision = nil
+        do {
+            try await persist()
+            statusMessage = pausedStatusMessage
+            return true
+        } catch {
+            record.activity?.liveTeam?.pendingRevision = previous
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    public func undoLastLiveTeamRevision() async -> Bool {
+        guard let state = record.activity?.liveTeam,
+              let current = state.currentDefinition,
+              var previous = state.previousDefinition else { return false }
+        previous.revision = current.revision + 1
+        previous.strategicReason = "You restored the preceding agents. Released conversation histories were not restored."
+        return await submitLiveTeamRevision(
+            previous,
+            baseRevision: current.revision,
+            reason: previous.strategicReason,
+            evidence: "User restored the preceding agents",
+            discardOverseerProposal: true
+        )
+    }
+
+    public func resetLiveTeamSession(memberID: String) async -> Bool {
+        guard record.activity?.status == .paused,
+              let definition = record.activity?.liveTeam?.currentDefinition,
+              let member = definition.member(id: memberID),
+              let slotID = member.sessionPolicy.persistentSlotID(memberID: memberID),
+              var session = record.activity?.stepSessions[slotID] else {
+            return false
+        }
+        let reference = session.providerSessionID.map {
+            ProviderSessionReference(
+                providerID: session.target.providerID,
+                sessionID: $0
+            )
+        }
+        let previous = session
+        session.lineage += 1
+        session.providerSessionID = nil
+        record.activity?.stepSessions[slotID] = session
+        do {
+            try await persist()
+            if let reference {
+                await releaseProviderSessions([reference])
+            }
+            statusMessage = "Reset \(member.name) memory"
+            return true
+        } catch {
+            record.activity?.stepSessions[slotID] = previous
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func convertLegacyWorkflowNow() async {
+        if let liveTeamRuntimeConfigurationProvider {
+            liveTeamRuntimeConfiguration = liveTeamRuntimeConfigurationProvider(record.settings)
+        }
+        guard let router = liveTeamOverseerRouter,
+              let runtime = liveTeamRuntimeConfiguration,
+              let legacyActivity = record.activity,
+              ![.completed, .cancelled].contains(legacyActivity.status),
+              let legacyWorkflow = legacyActivity.workflow else { return }
+        errorMessage = nil
+        guard !legacyActivity.goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            record.activity?.status = .paused
+            statusMessage = "Define the goal before Codeness prepares the agents"
+            try? await persist()
+            return
+        }
+        let authoritativeLegacyActivity = legacyActivity
+        record.activity?.status = .paused
+        statusMessage = "Codeness · Preparing agents…"
+        let context = makeLiveTeamOverseerContext(
+            reason: "Use the earlier fixed activity configuration as evidence when preparing the first agents."
+        )
+        liveTeamControlInvocationCount += 1
+        defer {
+            liveTeamControlInvocationCount = max(0, liveTeamControlInvocationCount - 1)
+        }
+        do {
+            let definition = try await router.migrate(
+                context,
+                configuration: runtime.bootstrapOverseerConfiguration(
+                    for: legacyActivity.goal
+                ),
+                defaultCoordinator: runtime.defaultCoordinator,
+                cwd: record.canonicalPath
+            )
+            guard let checkpoint = LiveTeamStateMachine.initialCheckpoint(for: definition) else {
+                throw LiveTeamRevisionError.invalid("The prepared setup has no eligible agent.")
+            }
+            var migratedSessions: [String: WorkflowSessionState] = [:]
+            for member in definition.members {
+                guard case .ownMemory = member.sessionPolicy,
+                      let oldStep = legacyWorkflow.step(id: member.id),
+                      oldStep.instructions == member.instructions,
+                      !Self.requiresNewLineage(from: oldStep.target, to: member.target),
+                      var oldSession = authoritativeLegacyActivity.stepSessions[member.id]
+                else { continue }
+                let slotID = member.sessionPolicy.persistentSlotID(memberID: member.id)!
+                oldSession.target = member.target
+                migratedSessions[slotID] = WorkflowSessionState(
+                    stepID: slotID,
+                    lineage: oldSession.lineage,
+                    target: oldSession.target,
+                    providerSessionID: oldSession.providerSessionID
+                )
+            }
+            var overseer = runtime.overseer
+            overseer.target = definition.overseerTarget
+            let state = LiveTeamState(
+                overseer: overseer,
+                currentDefinition: definition,
+                checkpoint: checkpoint,
+                resumeCheckpoint: .perform(checkpoint),
+                editHistory: [LiveTeamEditRecord(
+                    revision: 1,
+                    actor: .overseer,
+                    summary: "Prepared \(definition.members.count) agents from earlier activity state",
+                    reason: definition.strategicReason,
+                    evidence: "Codeness considered the earlier \(legacyWorkflow.name) activity configuration once."
+                )]
+            )
+            record.activity?.workflow = nil
+            record.activity?.workflowCursor = nil
+            record.activity?.workflowResumeCheckpoint = nil
+            record.activity?.stepSessions = migratedSessions
+            record.activity?.liveTeam = state
+            record.activity?.status = .paused
+            try await persist()
+            statusMessage = "Agents ready; review the goal or resume"
+        } catch {
+            record.activity = authoritativeLegacyActivity
+            record.activity?.status = .paused
+            errorMessage = "Codeness could not prepare agents from the earlier activity state: \(error.localizedDescription)"
+            statusMessage = "Paused before preparing agents; Resume will try again"
+            try? await persist()
+        }
+    }
+
     public func testHandoffConfiguration(_ settings: RelaySettings) async throws {
         try await handoffConfigurationValidator.testRemote(settings)
     }
@@ -1860,10 +2484,28 @@ public final class RepositoryCoordinator {
                 activity.goal = cleanGoal
             }
         }
+        if activity.liveTeam != nil, activity.status != .running {
+            activity.liveTeam?.boardGoalAmendmentPendingReview = true
+        }
         record.activity = activity
         cancelWorkOverviewSummaryRequest()
         do {
             try await persist()
+            if record.activity?.workflow != nil,
+               record.activity?.liveTeam == nil {
+                await convertLegacyWorkflowNow()
+            }
+            if record.activity?.liveTeam?.boardGoalAmendmentPendingReview == true,
+               record.activity?.status == .paused {
+                record.activity?.liveTeam?.boardGoalAmendmentPendingReview = false
+                await requestLiveTeamStrategicReview(
+                    reason: "The user amended the goal.",
+                    automatic: false,
+                    continuation: record.activity?.liveTeam?.checkpoint,
+                    unrunnable: false,
+                    leavePaused: true
+                )
+            }
             return true
         } catch {
             record.activity = previousActivity
@@ -1889,6 +2531,12 @@ public final class RepositoryCoordinator {
         record.activity = activity
         cancelWorkOverviewSummaryRequest()
         return true
+    }
+
+    private func activatePendingLiveTeamGoalAmendment() {
+        if activatePendingGoalAmendment() {
+            record.activity?.liveTeam?.boardGoalAmendmentPendingReview = true
+        }
     }
 
     /// Archives the current Codeness-owned activity, then returns this repository
@@ -1923,7 +2571,7 @@ public final class RepositoryCoordinator {
             activityDraft: ActivityConfigurationDraft(
                 goal: restartGoal,
                 prompts: previousActivity.prompts,
-                workflow: previousActivity.workflow
+                workflow: nil
             ),
             activity: nil,
             createdAt: record.createdAt,
@@ -1982,6 +2630,7 @@ public final class RepositoryCoordinator {
             genericRunTasks.values.forEach { $0.cancel() }
             genericRunTasks.removeAll()
             genericSessionFallbacks.removeAll()
+            liveTeamSessionFallbacks.removeAll()
             hydratedTranscriptRunIDs.removeAll()
             pendingTranscriptBuffers.removeAll()
             visibleTranscriptChunks.removeAll()
@@ -2157,7 +2806,7 @@ public final class RepositoryCoordinator {
         protocolContainment = nil
         clearAllLegacyInterruptionDebts(advanceGeneration: true)
         markProviderSessionsDetachedByProcessBoundary(.codex)
-        if record.activity?.workflow != nil,
+        if (record.activity?.workflow != nil || record.activity?.liveTeam != nil),
            activeRun?.agentTarget?.providerID != .codex {
             return
         }
@@ -2166,7 +2815,9 @@ public final class RepositoryCoordinator {
         interactionResolutionInFlight = false
         if record.activity?.status == .running {
             record.activity?.status = .paused
-            if record.activity?.workflow != nil {
+            if record.activity?.liveTeam != nil {
+                recoverInterruptedLiveTeamState()
+            } else if record.activity?.workflow != nil {
                 markLastGenericRunInterruptedIfNeeded()
             } else {
                 markLastRunInterruptedIfNeeded()
@@ -2217,6 +2868,10 @@ public final class RepositoryCoordinator {
 
     public func clearError() {
         errorMessage = nil
+    }
+
+    public func clearBoardDirectionMessage() {
+        boardDirectionMessage = nil
     }
 
     private func handleNotification(method: String, params: JSONValue, event: AppServerEvent) async {
@@ -2750,6 +3405,1544 @@ public final class RepositoryCoordinator {
         statusMessage = "\(kind.displayName) running"
     }
 
+    private func resumeLiveTeam() async {
+        guard let activity = record.activity,
+              let liveTeam = activity.liveTeam else { return }
+        pauseAfterCurrent = false
+        viewState.pauseAfterCurrent = false
+        scheduleViewStateSave()
+        record.activity?.liveTeam?.boardDirectionReason = nil
+        boardDirectionMessage = nil
+        statusMessage = "Resuming…"
+
+        let checkpoint = liveTeam.resumeCheckpoint
+        record.activity?.status = .running
+        record.activity?.liveTeam?.resumeCheckpoint = nil
+        do {
+            switch checkpoint {
+            case .invokeOverseer(let request):
+                await invokeLiveTeamOverseer(request)
+            case .recoverRun(let runID):
+                guard let run = run(withID: runID) else {
+                    throw RepositoryCoordinatorError.missingRun(runID)
+                }
+                await recoverLiveTeamRun(run)
+            case .routeCompletedRun(let runID):
+                guard let run = run(withID: runID),
+                      let output = run.finalOutput,
+                      !output.isEmpty else {
+                    throw RepositoryCoordinatorError.missingRunOutput(runID)
+                }
+                await beginLiveTeamRouting(runID: runID, finalOutput: output)
+            case .applyCoordinatorDecision(let runID):
+                guard let decision = run(withID: runID)?.coordinatorDecision else {
+                    throw RepositoryCoordinatorError.missingRunOutput(runID)
+                }
+                await applyLiveTeamCoordinatorDecision(
+                    runID: runID,
+                    decision: decision
+                )
+            case .perform(let liveCheckpoint):
+                await performLiveTeam(checkpoint: liveCheckpoint)
+            case nil:
+                if liveTeam.currentDefinition == nil {
+                    let request = LiveTeamOverseerRequest(
+                        mode: .bootstrap,
+                        reason: "Retry preparing the first agents.",
+                        automatic: false
+                    )
+                    await invokeLiveTeamOverseer(request)
+                } else if let run = activity.runs.last,
+                          let output = run.finalOutput,
+                          !output.isEmpty,
+                          run.coordinatorDecision == nil {
+                    await beginLiveTeamRouting(runID: run.id, finalOutput: output)
+                } else if let current = liveTeam.checkpoint {
+                    await performLiveTeam(checkpoint: current)
+                }
+            }
+        } catch {
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = checkpoint
+            errorMessage = error.localizedDescription
+            try? await persist()
+        }
+    }
+
+    private func performLiveTeam(
+        checkpoint requestedCheckpoint: LiveTeamCheckpoint,
+        promptOverride: String? = nil,
+        snapshotOverride: LiveTeamMemberSnapshot? = nil,
+        allowsSessionFallback: Bool = true
+    ) async {
+        guard !isClosing else {
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.checkpoint = requestedCheckpoint
+            record.activity?.liveTeam?.resumeCheckpoint = .perform(requestedCheckpoint)
+            return
+        }
+        if snapshotOverride == nil,
+           !(await activateBoardLiveTeamRevisionAtSafeBoundary()) {
+            return
+        }
+        guard let state = record.activity?.liveTeam,
+              let definition = state.currentDefinition else {
+            pauseLiveTeamActivity(message: "Codeness has not prepared the agents.")
+            return
+        }
+
+        let snapshot: LiveTeamMemberSnapshot
+        let checkpoint: LiveTeamCheckpoint
+        if let snapshotOverride {
+            snapshot = snapshotOverride
+            checkpoint = LiveTeamCheckpoint(
+                memberID: snapshot.member.id,
+                cycle: snapshot.cycle,
+                revision: snapshot.revision
+            )
+        } else {
+            guard let reconciled = LiveTeamStateMachine.checkpoint(
+                reconciling: requestedCheckpoint,
+                in: definition,
+                completedOnceMemberIDs: state.completedOnceMemberIDs
+            ),
+            let member = definition.member(id: reconciled.memberID) else {
+                await requestLiveTeamStrategicReview(
+                    reason: "No eligible agent remains at the saved scheduling point.",
+                    automatic: true,
+                    continuation: nil,
+                    unrunnable: true
+                )
+                return
+            }
+            let runID = UUID()
+            let slotID = member.sessionPolicy.persistentSlotID(memberID: member.id)
+                ?? "fresh:\(member.id):\(runID.uuidString)"
+            snapshot = LiveTeamMemberSnapshot(
+                member: member,
+                workingGoal: definition.workingGoal,
+                revision: definition.revision,
+                cycle: reconciled.cycle,
+                sessionSlotID: slotID
+            )
+            checkpoint = reconciled
+        }
+
+        record.activity?.status = .running
+        record.activity?.liveTeam?.checkpoint = checkpoint
+        record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+        let prompt = promptOverride ?? LiveTeamPromptBuilder.memberPrompt(
+            snapshot: snapshot,
+            handoff: state.coordinatorHandoff
+        )
+        await launchLiveTeamRun(
+            snapshot: snapshot,
+            checkpoint: checkpoint,
+            prompt: prompt,
+            allowsSessionFallback: allowsSessionFallback
+        )
+    }
+
+    private func launchLiveTeamRun(
+        snapshot: LiveTeamMemberSnapshot,
+        checkpoint: LiveTeamCheckpoint,
+        prompt: String,
+        allowsSessionFallback: Bool
+    ) async {
+        guard let agentProviders,
+              record.activity?.liveTeam != nil,
+              !isClosing else {
+            pauseLiveTeamActivity(message: "The agent providers are not available.")
+            return
+        }
+        let member = snapshot.member
+        let previousRunID = record.activity?.runs.last?.id
+        let followsLiveRun = followsActiveProgress
+            || RunSelectionPolicy.shouldSelectNextRun(
+                selectedRunID: selectedRunID,
+                activeRunID: previousRunID,
+                activeRunIsAtBottom: previousRunID.flatMap { runIsAtBottom[$0] }
+            )
+        let compatibility = Self.compatibilityRoleAndKind(
+            for: WorkflowStep(
+                id: member.id,
+                name: member.name,
+                section: .loop,
+                instructions: member.instructions,
+                target: member.target
+            )
+        )
+        var sessionState = record.activity?.stepSessions[snapshot.sessionSlotID]
+            ?? WorkflowSessionState(
+                stepID: snapshot.sessionSlotID,
+                target: member.target
+            )
+        sessionState.target = member.target
+        record.activity?.stepSessions[snapshot.sessionSlotID] = sessionState
+
+        let run = RunRecord(
+            sequence: (record.activity?.runs.count ?? 0) + 1,
+            role: compatibility.role,
+            kind: compatibility.kind,
+            status: .queued,
+            threadID: sessionState.providerSessionID,
+            model: member.target.model,
+            effort: member.target.options.effort ?? "",
+            prompt: prompt,
+            workflowStep: WorkflowStepSnapshot(
+                step: WorkflowStep(
+                    id: member.id,
+                    name: member.name,
+                    section: .loop,
+                    instructions: member.instructions,
+                    target: member.target
+                ),
+                loopIteration: checkpoint.cycle
+            ),
+            agentTarget: member.target,
+            sessionLineage: sessionState.lineage,
+            liveTeamMember: snapshot
+        )
+        record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(run.id)
+        record.activity?.runs.append(run)
+        runIsAtBottom[run.id] = true
+        if followsLiveRun {
+            focusActiveProgress(on: run.id)
+        }
+        statusMessage = "Starting \(member.name.lowercased())…"
+        let launchLeaseID = beginProviderLaunchLease(runID: run.id)
+        defer { finishProviderLaunchLease(launchLeaseID) }
+
+        do {
+            try await persist()
+        } catch {
+            let queuedSaveError = error
+            record.activity?.runs.removeAll { $0.id == run.id }
+            runIsAtBottom.removeValue(forKey: run.id)
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+            selectedRunID = previousRunID
+            try? await persist()
+            errorMessage = "Could not save \(member.name) before starting it: \(queuedSaveError.localizedDescription)"
+            statusMessage = "Paused before \(member.name.lowercased())"
+            return
+        }
+
+        guard !isClosing else { return }
+
+        let reusableSessionID: String?
+        if member.sessionPolicy == .freshEveryRun {
+            reusableSessionID = nil
+        } else {
+            reusableSessionID = reusableLiveTeamProviderSessionID(
+                sessionState,
+                slotID: snapshot.sessionSlotID
+            )
+        }
+        var resumedExistingSession = reusableSessionID != nil
+        var session: AgentSession
+        do {
+            guard let preparedSession = try await prepareGenericSession(
+                liveTeamSessionRequest(
+                    existingSessionID: reusableSessionID,
+                    snapshot: snapshot
+                ),
+                runID: run.id,
+                using: agentProviders
+            ) else { return }
+            session = preparedSession
+        } catch {
+            guard !isClosing else { return }
+            guard allowsSessionFallback,
+                  let reusableSessionID,
+                  Self.confirmsUnavailableSession(error) else {
+                await failLiveTeamRunBeforeStart(
+                    runID: run.id,
+                    message: "Could not prepare \(member.name): \(error.localizedDescription)"
+                )
+                return
+            }
+            await recordGenericSessionFallback(runID: run.id, error: error)
+            await releaseProviderSessions([ProviderSessionReference(
+                providerID: member.target.providerID,
+                sessionID: reusableSessionID
+            )])
+            guard !isClosing else { return }
+            do {
+                guard let preparedSession = try await prepareGenericSession(
+                    liveTeamSessionRequest(existingSessionID: nil, snapshot: snapshot),
+                    runID: run.id,
+                    using: agentProviders
+                ) else { return }
+                session = preparedSession
+                sessionState = advanceLiveTeamSessionLineage(
+                    sessionState,
+                    snapshot: snapshot,
+                    runID: run.id
+                )
+                resumedExistingSession = false
+            } catch {
+                await failLiveTeamRunBeforeStart(
+                    runID: run.id,
+                    message: "Could not prepare \(member.name): \(error.localizedDescription)"
+                )
+                return
+            }
+        }
+
+        do {
+            sessionState.providerSessionID = session.id
+            record.activity?.stepSessions[snapshot.sessionSlotID] = sessionState
+            updateRun(run.id) {
+                $0.threadID = session.id
+                $0.sessionLineage = sessionState.lineage
+            }
+            try await persist()
+        } catch {
+            await failLiveTeamRunBeforeStart(
+                runID: run.id,
+                message: "Could not prepare \(member.name): \(error.localizedDescription)"
+            )
+            return
+        }
+
+        guard !isClosing else {
+            updateRun(run.id) { $0.status = .interrupted }
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(run.id)
+            try? await persist()
+            return
+        }
+
+        if allowsSessionFallback, resumedExistingSession {
+            liveTeamSessionFallbacks[run.id] = LiveTeamSessionFallback(
+                checkpoint: checkpoint,
+                prompt: prompt
+            )
+        }
+
+        do {
+            var handle: AgentRunHandle
+            do {
+                handle = try await agentProviders.startRun(
+                    AgentRunRequest(
+                        runID: run.id,
+                        session: session,
+                        cwd: record.canonicalPath,
+                        prompt: prompt,
+                        target: member.target
+                    )
+                )
+            } catch {
+                guard !isClosing else {
+                    liveTeamSessionFallbacks.removeValue(forKey: run.id)
+                    return
+                }
+                guard allowsSessionFallback,
+                      resumedExistingSession,
+                      Self.confirmsUnavailableSession(error) else {
+                    throw error
+                }
+                liveTeamSessionFallbacks.removeValue(forKey: run.id)
+                await recordGenericSessionFallback(runID: run.id, error: error)
+                await releaseProviderSessions([ProviderSessionReference(
+                    providerID: session.providerID,
+                    sessionID: session.id
+                )])
+                guard !isClosing else { return }
+                guard let preparedSession = try await prepareGenericSession(
+                    liveTeamSessionRequest(existingSessionID: nil, snapshot: snapshot),
+                    runID: run.id,
+                    using: agentProviders
+                ) else { return }
+                session = preparedSession
+                sessionState = advanceLiveTeamSessionLineage(
+                    sessionState,
+                    snapshot: snapshot,
+                    runID: run.id
+                )
+                sessionState.providerSessionID = session.id
+                record.activity?.stepSessions[snapshot.sessionSlotID] = sessionState
+                updateRun(run.id) {
+                    $0.threadID = session.id
+                    $0.sessionLineage = sessionState.lineage
+                }
+                try await persist()
+                guard !isClosing else { return }
+                handle = try await agentProviders.startRun(
+                    AgentRunRequest(
+                        runID: run.id,
+                        session: session,
+                        cwd: record.canonicalPath,
+                        prompt: prompt,
+                        target: member.target
+                    )
+                )
+            }
+            updateRun(run.id) {
+                $0.turnID = handle.executionID
+                $0.status = .running
+            }
+            do {
+                try await persist()
+            } catch {
+                errorMessage = "\(member.name) started, but its latest state could not be saved: \(error.localizedDescription)"
+            }
+
+            genericRunTasks[run.id] = Task { [weak self] in
+                for await event in handle.events {
+                    guard let self else { return }
+                    await self.handleAgentEvent(event, runID: run.id)
+                }
+                self?.genericRunTasks.removeValue(forKey: run.id)
+            }
+            statusMessage = isClosing
+                ? "Preparing to stop \(member.name.lowercased())…"
+                : "\(member.name) running"
+        } catch {
+            liveTeamSessionFallbacks.removeValue(forKey: run.id)
+            guard !isClosing else { return }
+            await failLiveTeamRunBeforeStart(
+                runID: run.id,
+                message: "Could not start \(member.name): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func liveTeamSessionRequest(
+        existingSessionID: String?,
+        snapshot: LiveTeamMemberSnapshot
+    ) -> AgentSessionRequest {
+        AgentSessionRequest(
+            existingSessionID: existingSessionID,
+            name: "\(repositoryName) — \(snapshot.member.name)",
+            cwd: record.canonicalPath,
+            target: snapshot.member.target,
+            developerInstructions: LiveTeamPromptBuilder.sessionInstructions()
+        )
+    }
+
+    private func reusableLiveTeamProviderSessionID(
+        _ session: WorkflowSessionState,
+        slotID: String
+    ) -> String? {
+        guard let providerSessionID = session.providerSessionID else { return nil }
+        let wasEstablished = record.activity?.runs.contains { run in
+            run.liveTeamMember?.sessionSlotID == slotID
+                && run.threadID == providerSessionID
+                && run.turnID != nil
+        } == true
+        return wasEstablished ? providerSessionID : nil
+    }
+
+    private func advanceLiveTeamSessionLineage(
+        _ sessionState: WorkflowSessionState,
+        snapshot: LiveTeamMemberSnapshot,
+        runID: UUID,
+        updatesRun: Bool = true
+    ) -> WorkflowSessionState {
+        var freshState = sessionState
+        let runLineage = run(withID: runID)?.sessionLineage ?? 0
+        freshState.lineage = max(freshState.lineage, runLineage) + 1
+        freshState.target = snapshot.member.target
+        freshState.providerSessionID = nil
+        record.activity?.stepSessions[snapshot.sessionSlotID] = freshState
+        if updatesRun {
+            updateRun(runID) {
+                $0.threadID = nil
+                $0.turnID = nil
+                $0.sessionLineage = freshState.lineage
+            }
+        }
+        return freshState
+    }
+
+    private func failLiveTeamRunBeforeStart(runID: UUID, message: String) async {
+        let text = RunTranscriptPresentation.storedText(
+            "\n\(message)\n",
+            section: .diagnostic
+        )
+        updateRun(runID) {
+            $0.status = .failed
+            $0.completedAt = .now
+        }
+        await recordTranscript(text, runID: runID)
+        record.activity?.status = .paused
+        record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(runID)
+        statusMessage = "Paused after an agent start failure"
+        errorMessage = message
+        await noteLiveTeamFailureAndReviewIfRepeated(runID: runID)
+        if isClosing {
+            await completeCloseAfterTerminalEvent()
+        } else {
+            try? await persist()
+        }
+    }
+
+    private func recoverLiveTeamRun(_ interruptedRun: RunRecord) async {
+        guard let snapshot = interruptedRun.liveTeamMember else {
+            pauseLiveTeamActivity(message: "The interrupted turn has no saved agent assignment.")
+            return
+        }
+        let checkpoint = LiveTeamCheckpoint(
+            memberID: snapshot.member.id,
+            cycle: snapshot.cycle,
+            revision: snapshot.revision
+        )
+        let recoveryPrompt = """
+        INTERRUPTED MEMBER RECOVERY
+
+        The preceding Codeness member turn was interrupted and may have partially changed the repository. Inspect the current state, recover the member's exact launch responsibility without blindly replaying completed edits, and finish with factual evidence for the Coordinator.
+
+        ORIGINAL IMMUTABLE ASSIGNMENT
+
+        \(interruptedRun.prompt)
+        """
+        record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(interruptedRun.id)
+        await performLiveTeam(
+            checkpoint: checkpoint,
+            promptOverride: recoveryPrompt,
+            snapshotOverride: snapshot,
+            allowsSessionFallback: true
+        )
+    }
+
+    private func beginLiveTeamRouting(runID: UUID, finalOutput: String) async {
+        guard !completingRunIDs.contains(runID),
+              run(withID: runID)?.liveTeamMember != nil else { return }
+        completingRunIDs.insert(runID)
+        activatePendingLiveTeamGoalAmendment()
+        updateRun(runID) {
+            $0.status = .routing
+            $0.relayError = nil
+            $0.coordinatorDecision = nil
+        }
+        record.activity?.liveTeam?.resumeCheckpoint = .routeCompletedRun(runID)
+        statusMessage = "Activating safe-boundary changes…"
+        do {
+            try await persist()
+        } catch {
+            completingRunIDs.remove(runID)
+            updateRun(runID) {
+                $0.status = .paused
+                $0.relayError = "The completed result could not be saved before work routing."
+            }
+            record.activity?.status = .paused
+            errorMessage = "Codeness did not route the completed result because it could not be saved: \(error.localizedDescription)"
+            try? await persist()
+            return
+        }
+
+        guard await activateBoardLiveTeamRevisionAtSafeBoundary() else {
+            completingRunIDs.remove(runID)
+            return
+        }
+        statusMessage = "Preparing handoff…"
+        routingTasks[runID] = Task { [weak self] in
+            await self?.routeLiveTeamRun(runID: runID, finalOutput: finalOutput)
+        }
+    }
+
+    private func routeLiveTeamRun(runID: UUID, finalOutput: String) async {
+        defer {
+            completingRunIDs.remove(runID)
+            routingTasks.removeValue(forKey: runID)
+        }
+        guard let router = liveTeamCoordinatorRouter,
+              let activity = record.activity,
+              let state = activity.liveTeam,
+              let definition = state.currentDefinition,
+              let run = run(withID: runID),
+              let snapshot = run.liveTeamMember else { return }
+
+        var completedOnce = state.completedOnceMemberIDs
+        if snapshot.member.runPolicy == .once {
+            completedOnce.insert(snapshot.member.id)
+        }
+        let proposedCheckpoint = LiveTeamStateMachine.nextCheckpoint(
+            after: snapshot.member.id,
+            cycle: snapshot.cycle,
+            in: definition,
+            completedOnceMemberIDs: completedOnce
+        )
+        let context = LiveTeamCoordinatorContext(
+            workingGoal: definition.workingGoal,
+            definition: definition,
+            sourceMember: snapshot,
+            proposedNextMember: proposedCheckpoint.flatMap {
+                definition.member(id: $0.memberID)
+            },
+            previousHandoff: state.coordinatorHandoff,
+            recentDecisions: activity.runs.compactMap(\.coordinatorDecision).suffix(4),
+            sourceResult: finalOutput
+        )
+        do {
+            var decision = try await router.coordinate(
+                context,
+                configuration: definition.coordinator,
+                cwd: record.canonicalPath
+            )
+            guard !isClosing else { return }
+            decision.runLabel = normalizedRunLabel(
+                decision.runLabel,
+                fallback: snapshot.member.name
+            )
+            updateRun(runID) {
+                $0.coordinatorDecision = decision
+                $0.status = .completed
+                $0.relayError = nil
+            }
+            record.activity?.liveTeam?.coordinatorHandoff = decision.handoff
+            record.activity?.liveTeam?.lastCoordinatorDecision = decision
+            record.activity?.liveTeam?.resumeCheckpoint = .applyCoordinatorDecision(runID)
+            do {
+                try await persist()
+            } catch {
+                updateRun(runID) {
+                    $0.status = .paused
+                    $0.relayError = "The routing decision could not be saved."
+                }
+                pauseLiveTeamActivity(
+                    message: "The routing decision could not be saved: \(error.localizedDescription)"
+                )
+                try? await persist()
+                return
+            }
+            guard await releaseFreshLiveTeamSessionIfNeeded(for: runID) else {
+                return
+            }
+            await applyLiveTeamCoordinatorDecision(runID: runID, decision: decision)
+        } catch {
+            guard !isClosing else { return }
+            updateRun(runID) {
+                $0.status = .paused
+                $0.relayError = error.localizedDescription
+            }
+            record.activity?.liveTeam?.resumeCheckpoint = .routeCompletedRun(runID)
+            pauseLiveTeamActivity(message: "Handoff paused: \(error.localizedDescription)")
+            try? await persist()
+        }
+    }
+
+    private func applyLiveTeamCoordinatorDecision(
+        runID: UUID,
+        decision: LiveTeamCoordinatorDecision
+    ) async {
+        guard let run = run(withID: runID),
+              let snapshot = run.liveTeamMember,
+              var state = record.activity?.liveTeam,
+              let definition = state.currentDefinition else { return }
+
+        state.workerTurnsSinceStrategicReview += 1
+        if decision.progressEvidence.isDurable {
+            state.automaticRevisionsWithoutProgress = 0
+        }
+        state.lastCoordinatorDecision = decision
+        state.coordinatorHandoff = decision.handoff
+        record.activity?.liveTeam = state
+
+        switch decision.disposition {
+        case .retryCurrent:
+            let retryCount = state.localRetryMemberID == snapshot.member.id
+                ? state.localRetryCount
+                : 0
+            guard retryCount < 1,
+                  let currentMember = definition.member(id: snapshot.member.id) else {
+                await requestLiveTeamStrategicReview(
+                    reason: "Work routing requested another retry for \(snapshot.member.name), exceeding the one-retry local limit or referring to a removed agent.",
+                    automatic: true,
+                    continuation: nextLiveTeamCheckpoint(after: snapshot),
+                    unrunnable: true,
+                    sourceRunID: runID
+                )
+                return
+            }
+            record.activity?.liveTeam?.localRetryMemberID = snapshot.member.id
+            record.activity?.liveTeam?.localRetryCount = retryCount + 1
+            let checkpoint = LiveTeamCheckpoint(
+                memberID: currentMember.id,
+                cycle: snapshot.cycle,
+                revision: definition.revision
+            )
+            let retryPrompt = """
+            COORDINATOR RETRY
+
+            The Coordinator judged the preceding local result incomplete and permits one bounded retry. Inspect the repository's current state; do not blindly replay edits.
+
+            COORDINATOR HANDOFF
+            \(decision.handoff)
+
+            \(LiveTeamPromptBuilder.memberPrompt(
+                snapshot: LiveTeamMemberSnapshot(
+                    member: currentMember,
+                    workingGoal: definition.workingGoal,
+                    revision: definition.revision,
+                    cycle: snapshot.cycle,
+                    sessionSlotID: currentMember.sessionPolicy.persistentSlotID(
+                        memberID: currentMember.id
+                    ) ?? "fresh:\(currentMember.id):retry"
+                ),
+                handoff: decision.handoff
+            ))
+            """
+            await scheduleLiveTeamRun(
+                checkpoint,
+                afterRunID: runID,
+                promptOverride: retryPrompt
+            )
+
+        case .pause:
+            let failures = (state.memberFailureCounts[snapshot.member.id] ?? 0) + 1
+            record.activity?.liveTeam?.memberFailureCounts[snapshot.member.id] = failures
+            let failureThreshold = liveTeamRuntimeConfiguration?
+                .oversightPolicy.repeatedFailureThreshold ?? 2
+            if failures >= failureThreshold {
+                await requestLiveTeamStrategicReview(
+                    reason: "\(snapshot.member.name) has remained blocked \(failureThreshold) times.",
+                    automatic: true,
+                    continuation: nextLiveTeamCheckpoint(after: snapshot),
+                    unrunnable: true,
+                    sourceRunID: runID
+                )
+            } else {
+                let checkpoint = LiveTeamCheckpoint(
+                    memberID: snapshot.member.id,
+                    cycle: snapshot.cycle,
+                    revision: definition.revision
+                )
+                record.activity?.status = .paused
+                record.activity?.liveTeam?.checkpoint = checkpoint
+                record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+                updateRun(runID) {
+                    $0.status = .paused
+                    $0.relayError = decision.evidence.isEmpty
+                        ? "Work routing requested your direction."
+                        : decision.evidence
+                }
+                statusMessage = "Paused for your review"
+                try? await persist()
+            }
+
+        case .requestOversight:
+            markLiveTeamMemberComplete(snapshot)
+            await requestLiveTeamStrategicReview(
+                reason: decision.evidence.isEmpty
+                    ? "Work routing requested a strategy review."
+                    : decision.evidence,
+                automatic: true,
+                continuation: nextLiveTeamCheckpoint(after: snapshot),
+                unrunnable: false,
+                sourceRunID: runID
+            )
+
+        case .completionCandidate:
+            markLiveTeamMemberComplete(snapshot)
+            let request = LiveTeamOverseerRequest(
+                mode: .completionReview,
+                reason: decision.evidence.isEmpty
+                    ? "Work routing nominated the goal for completion review."
+                    : decision.evidence,
+                sourceRunID: runID,
+                continuation: nextLiveTeamCheckpoint(after: snapshot),
+                automatic: true
+            )
+            await invokeLiveTeamOverseer(request)
+
+        case .continueTeam:
+            markLiveTeamMemberComplete(snapshot)
+            record.activity?.liveTeam?.localRetryMemberID = nil
+            record.activity?.liveTeam?.localRetryCount = 0
+            let next = nextLiveTeamCheckpoint(after: snapshot)
+            guard let next else {
+                await requestLiveTeamStrategicReview(
+                    reason: "Work routing chose Continue, but no eligible agent remains.",
+                    automatic: true,
+                    continuation: nil,
+                    unrunnable: true,
+                    sourceRunID: runID
+                )
+                return
+            }
+            if next.cycle > snapshot.cycle {
+                record.activity?.liveTeam?.cyclesSinceStrategicReview += 1
+                record.activity?.liveTeam?.cyclesUnderCurrentRevision += 1
+            }
+            if var request = record.activity?.liveTeam?.strategicReviewAfterBoundary {
+                record.activity?.liveTeam?.strategicReviewAfterBoundary = nil
+                request.continuation = next
+                request.sourceRunID = runID
+                await invokeLiveTeamOverseer(request)
+                return
+            }
+            if record.activity?.liveTeam?.boardGoalAmendmentPendingReview == true {
+                record.activity?.liveTeam?.boardGoalAmendmentPendingReview = false
+                await requestLiveTeamStrategicReview(
+                    reason: "The user amended the goal.",
+                    automatic: false,
+                    continuation: next,
+                    unrunnable: false,
+                    sourceRunID: runID
+                )
+                return
+            }
+            if liveTeamPeriodicReviewIsDue {
+                await requestLiveTeamStrategicReview(
+                    reason: "Periodic control review reached its round or agent-turn limit.",
+                    automatic: true,
+                    continuation: next,
+                    unrunnable: false,
+                    sourceRunID: runID
+                )
+                return
+            }
+            await scheduleLiveTeamRun(next, afterRunID: runID)
+        }
+    }
+
+    private func markLiveTeamMemberComplete(_ snapshot: LiveTeamMemberSnapshot) {
+        guard snapshot.member.runPolicy == .once else { return }
+        record.activity?.liveTeam?.completedOnceMemberIDs.insert(snapshot.member.id)
+    }
+
+    private func nextLiveTeamCheckpoint(
+        after snapshot: LiveTeamMemberSnapshot
+    ) -> LiveTeamCheckpoint? {
+        guard let state = record.activity?.liveTeam,
+              let definition = state.currentDefinition else { return nil }
+        var completed = state.completedOnceMemberIDs
+        if snapshot.member.runPolicy == .once {
+            completed.insert(snapshot.member.id)
+        }
+        return LiveTeamStateMachine.nextCheckpoint(
+            after: snapshot.member.id,
+            cycle: snapshot.cycle,
+            in: definition,
+            completedOnceMemberIDs: completed,
+            preferredMemberID: state.pendingRevision?.preferredNextMemberID
+        )
+    }
+
+    private func scheduleLiveTeamRun(
+        _ checkpoint: LiveTeamCheckpoint,
+        afterRunID: UUID,
+        promptOverride: String? = nil
+    ) async {
+        record.activity?.liveTeam?.checkpoint = checkpoint
+        record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+        if pauseAfterCurrent || isClosing || record.activity?.status == .paused {
+            record.activity?.status = .paused
+            statusMessage = "Paused before \(liveTeamMemberName(at: checkpoint).lowercased())"
+            try? await persist()
+        } else {
+            await performLiveTeam(
+                checkpoint: checkpoint,
+                promptOverride: promptOverride
+            )
+        }
+        _ = afterRunID
+    }
+
+    private var liveTeamPeriodicReviewIsDue: Bool {
+        guard let state = record.activity?.liveTeam,
+              let runtime = liveTeamRuntimeConfiguration else { return false }
+        return runtime.oversightPolicy.periodicReviewIsDue(
+            roundsSinceReview: state.cyclesSinceStrategicReview,
+            workerTurnsSinceReview: state.workerTurnsSinceStrategicReview,
+            lastReviewAt: state.lastStrategicReviewAt
+        )
+    }
+
+    private func releaseFreshLiveTeamSessionIfNeeded(for runID: UUID) async -> Bool {
+        guard let run = run(withID: runID),
+              let snapshot = run.liveTeamMember,
+              snapshot.member.sessionPolicy == .freshEveryRun,
+              let session = record.activity?.stepSessions.removeValue(
+                  forKey: snapshot.sessionSlotID
+              ) else { return true }
+        guard let sessionID = session.providerSessionID else { return true }
+        do {
+            try await persist()
+        } catch {
+            record.activity?.stepSessions[snapshot.sessionSlotID] = session
+            pauseLiveTeamActivity(
+                message: "Fresh session cleanup paused before the next agent."
+            )
+            errorMessage = "Codeness kept the provider session because its removal could not be saved: \(error.localizedDescription)"
+            return false
+        }
+        await releaseProviderSessions([ProviderSessionReference(
+            providerID: session.target.providerID,
+            sessionID: sessionID
+        )])
+        return true
+    }
+
+    private func pauseLiveTeamActivity(message: String) {
+        record.activity?.status = .paused
+        statusMessage = message
+    }
+
+    private func liveTeamMemberName(at checkpoint: LiveTeamCheckpoint) -> String {
+        record.activity?.liveTeam?.currentDefinition?.member(id: checkpoint.memberID)?.name
+            ?? "agent"
+    }
+
+    private func requestLiveTeamStrategicReview(
+        reason: String,
+        automatic: Bool,
+        continuation: LiveTeamCheckpoint?,
+        unrunnable: Bool,
+        sourceRunID: UUID? = nil,
+        leavePaused: Bool = false
+    ) async {
+        let request = LiveTeamOverseerRequest(
+            mode: .strategicReview,
+            reason: unrunnable ? "UNRUNNABLE: \(reason)" : reason,
+            sourceRunID: sourceRunID,
+            continuation: continuation,
+            automatic: automatic,
+            leavePaused: leavePaused
+        )
+        await invokeLiveTeamOverseer(request)
+    }
+
+    private func invokeLiveTeamOverseer(_ request: LiveTeamOverseerRequest) async {
+        if let liveTeamRuntimeConfigurationProvider {
+            liveTeamRuntimeConfiguration = liveTeamRuntimeConfigurationProvider(record.settings)
+        }
+        guard !isClosing,
+              let router = liveTeamOverseerRouter,
+              let runtime = liveTeamRuntimeConfiguration,
+              let activity = record.activity,
+              var state = activity.liveTeam else {
+            pauseLiveTeamActivity(message: "Codeness cannot review the strategy right now.")
+            return
+        }
+        if request.automatic,
+           state.pendingRevision?.actor == .board {
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(request)
+            statusMessage = "Paused; your agent changes will apply before the next review"
+            try? await persist()
+            return
+        }
+        if request.mode == .bootstrap || request.mode == .strategicReview {
+            state.lastStrategicReviewAt = .now
+        }
+        liveTeamControlInvocationCount += 1
+        defer { liveTeamControlInvocationCount = max(0, liveTeamControlInvocationCount - 1) }
+        state.resumeCheckpoint = .invokeOverseer(request)
+        state.boardDirectionReason = nil
+        boardDirectionMessage = nil
+        record.activity?.liveTeam = state
+        record.activity?.status = .running
+        statusMessage = switch request.mode {
+        case .bootstrap: "Codeness · Preparing agents…"
+        case .strategicReview: "Codeness · Reviewing strategy…"
+        case .completionReview: "Codeness · Reviewing completion…"
+        case .migration: "Codeness · Preparing agents…"
+        }
+        do {
+            try await persist()
+        } catch {
+            pauseLiveTeamActivity(message: "Paused before review")
+            errorMessage = "Could not save the review point: \(error.localizedDescription)"
+            try? await persist()
+            return
+        }
+
+        let context = makeLiveTeamOverseerContext(reason: request.reason)
+        do {
+            switch request.mode {
+            case .bootstrap:
+                let definition = try await router.bootstrap(
+                    context,
+                    configuration: state.overseer,
+                    defaultCoordinator: runtime.defaultCoordinator,
+                    cwd: record.canonicalPath
+                )
+                guard !isClosing else { return }
+                try await installInitialLiveTeamDefinition(
+                    definition,
+                    actor: .overseer,
+                    reason: definition.strategicReason,
+                    evidence: "Codeness prepared the first agents."
+                )
+                guard let checkpoint = record.activity?.liveTeam?.checkpoint else {
+                    throw LiveTeamRevisionError.invalid(
+                        "The first setup has no eligible agent."
+                    )
+                }
+                if request.leavePaused {
+                    record.activity?.status = .paused
+                    record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+                    statusMessage = "Agents ready; paused for your review"
+                    try await persist()
+                } else {
+                    await performLiveTeam(checkpoint: checkpoint)
+                }
+
+            case .strategicReview:
+                let decision = try await router.reviewStrategy(
+                    context,
+                    configuration: state.overseer,
+                    cwd: record.canonicalPath
+                )
+                guard !isClosing else { return }
+                await applyLiveTeamStrategicDecision(decision, request: request)
+
+            case .completionReview:
+                let decision = try await router.reviewCompletion(
+                    context,
+                    configuration: state.overseer,
+                    cwd: record.canonicalPath
+                )
+                guard !isClosing else { return }
+                await applyLiveTeamCompletionDecision(decision, request: request)
+
+            case .migration:
+                throw AgentProviderError.invalidResponse(
+                    "earlier activity conversion does not resume through this checkpoint"
+                )
+            }
+        } catch {
+            guard !isClosing else { return }
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(request)
+            statusMessage = "Codeness needs attention during \(request.mode.displayName.lowercased())"
+            errorMessage = error.localizedDescription
+            try? await persist()
+        }
+    }
+
+    private func installInitialLiveTeamDefinition(
+        _ definition: LiveTeamDefinition,
+        actor: LiveTeamRevisionActor,
+        reason: String,
+        evidence: String
+    ) async throws {
+        guard definition.revision == 1,
+              definition.validationMessage == nil,
+              record.activity?.liveTeam?.currentDefinition == nil else {
+            throw LiveTeamRevisionError.invalid(
+                definition.validationMessage
+                    ?? "The initial agent setup is invalid."
+            )
+        }
+        guard let checkpoint = LiveTeamStateMachine.initialCheckpoint(for: definition) else {
+            throw LiveTeamRevisionError.invalid("The initial setup has no eligible agent.")
+        }
+        let previousActivity = record.activity
+        record.activity?.liveTeam?.currentDefinition = definition
+        record.activity?.liveTeam?.overseer.target = definition.overseerTarget
+        record.activity?.liveTeam?.checkpoint = checkpoint
+        record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+        record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
+            revision: 1,
+            actor: actor,
+            summary: "Prepared \(definition.members.count) agents",
+            reason: reason,
+            evidence: evidence
+        ))
+        do {
+            // This is the hard durability barrier before the first worker
+            // session is prepared.
+            try await persist()
+        } catch {
+            record.activity = previousActivity
+            throw error
+        }
+    }
+
+    private func applyLiveTeamStrategicDecision(
+        _ decision: LiveTeamStrategicDecision,
+        request: LiveTeamOverseerRequest
+    ) async {
+        guard let current = record.activity?.liveTeam?.currentDefinition else {
+            pauseLiveTeamActivity(message: "Strategic review has no current agents.")
+            return
+        }
+        switch decision.action {
+        case .keep:
+            let continuation = preferredLiveTeamContinuation(
+                requested: request.continuation,
+                preferredMemberID: nil
+            )
+            record.activity?.liveTeam?.workerTurnsSinceStrategicReview = 0
+            record.activity?.liveTeam?.cyclesSinceStrategicReview = 0
+            record.activity?.liveTeam?.resumeCheckpoint = continuation.map {
+                .perform($0)
+            }
+            if request.leavePaused || pauseAfterCurrent {
+                record.activity?.status = .paused
+                statusMessage = "Strategy reviewed; current agents retained"
+                try? await persist()
+            } else if let continuation {
+                await performLiveTeam(checkpoint: continuation)
+            } else {
+                record.activity?.status = .paused
+                statusMessage = "Strategy reviewed; no eligible next agent"
+                try? await persist()
+            }
+
+        case .pause:
+            let continuation = preferredLiveTeamContinuation(
+                requested: request.continuation,
+                preferredMemberID: nil
+            )
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = continuation.map {
+                .perform($0)
+            }
+            record.activity?.liveTeam?.boardDirectionReason = decision.reason
+            record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
+                revision: current.revision,
+                actor: .overseer,
+                summary: "Paused for your direction",
+                reason: decision.reason,
+                evidence: decision.evidence
+            ))
+            statusMessage = "Paused for your direction"
+            errorMessage = nil
+            boardDirectionMessage = decision.reason
+            try? await persist()
+
+        case .revise:
+            guard let proposed = decision.proposedDefinition else {
+                pauseLiveTeamActivity(message: "Codeness proposed no replacement agents.")
+                return
+            }
+            let isUnrunnable = request.reason.hasPrefix("UNRUNNABLE:")
+            if request.automatic,
+               record.activity?.liveTeam?.cyclesUnderCurrentRevision == 0,
+               current.revision > 1,
+               !isUnrunnable {
+                record.activity?.liveTeam?.workerTurnsSinceStrategicReview = 0
+                record.activity?.liveTeam?.cyclesSinceStrategicReview = 0
+                if let continuation = request.continuation {
+                    await scheduleLiveTeamRun(
+                        continuation,
+                        afterRunID: request.sourceRunID ?? UUID()
+                    )
+                } else {
+                    pauseLiveTeamActivity(
+                        message: "Agent changes deferred until one round runs under the current strategy"
+                    )
+                    try? await persist()
+                }
+                return
+            }
+
+            do {
+                let pending = try LiveTeamStateMachine.pendingRevision(
+                    definition: proposed,
+                    baseRevision: current.revision,
+                    actor: .overseer,
+                    reason: decision.reason,
+                    evidence: decision.evidence,
+                    preferredNextMemberID: decision.preferredNextMemberID,
+                    currentDefinition: current,
+                    existingPending: record.activity?.liveTeam?.pendingRevision
+                )
+                record.activity?.liveTeam?.pendingRevision = pending
+                record.activity?.liveTeam?.resumeCheckpoint = request.continuation.map {
+                    .perform($0)
+                }
+                if record.activity?.liveTeam?.reviewAutomaticChangesFirst == true {
+                    record.activity?.status = .paused
+                    statusMessage = "Agent changes await your review"
+                    try await persist()
+                    return
+                }
+                guard await activatePendingLiveTeamRevision() else { return }
+                record.activity?.liveTeam?.workerTurnsSinceStrategicReview = 0
+                record.activity?.liveTeam?.cyclesSinceStrategicReview = 0
+                record.activity?.liveTeam?.cyclesUnderCurrentRevision = 0
+                if request.automatic {
+                    record.activity?.liveTeam?.automaticRevisionsWithoutProgress += 1
+                }
+                let limit = liveTeamRuntimeConfiguration?
+                    .oversightPolicy.automaticChangeLimitWithoutProgress ?? 3
+                if request.automatic,
+                   (record.activity?.liveTeam?.automaticRevisionsWithoutProgress ?? 0) >= limit {
+                    record.activity?.status = .paused
+                    statusMessage = "Paused after \(limit) automatic agent changes without durable progress"
+                    try? await persist()
+                    return
+                }
+                let continuation = preferredLiveTeamContinuation(
+                    requested: request.continuation,
+                    preferredMemberID: decision.preferredNextMemberID
+                )
+                if request.leavePaused || pauseAfterCurrent {
+                    record.activity?.status = .paused
+                    record.activity?.liveTeam?.resumeCheckpoint = continuation.map { .perform($0) }
+                    statusMessage = "Agent changes applied; paused for your review"
+                    try? await persist()
+                } else if let continuation {
+                    await performLiveTeam(checkpoint: continuation)
+                } else {
+                    pauseLiveTeamActivity(message: "The changed setup has no eligible agent.")
+                    try? await persist()
+                }
+            } catch {
+                record.activity?.status = .paused
+                record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(request)
+                errorMessage = error.localizedDescription
+                statusMessage = "Agent changes could not be applied"
+                try? await persist()
+            }
+        }
+    }
+
+    private func applyLiveTeamCompletionDecision(
+        _ decision: LiveTeamCompletionDecision,
+        request: LiveTeamOverseerRequest
+    ) async {
+        switch decision.outcome {
+        case .complete:
+            let revision = record.activity?.liveTeam?.currentDefinition?.revision ?? 1
+            record.activity?.status = .completed
+            record.activity?.completedAt = .now
+            record.activity?.liveTeam?.checkpoint = nil
+            record.activity?.liveTeam?.resumeCheckpoint = nil
+            record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
+                revision: revision,
+                actor: .overseer,
+                summary: "Confirmed goal complete",
+                reason: decision.reason,
+                evidence: decision.evidence
+            ))
+            statusMessage = "Activity complete"
+            pauseAfterCurrent = false
+            viewState.pauseAfterCurrent = false
+            scheduleViewStateSave()
+            await persistCompletedActivityAndDetachSessions()
+
+        case .continueWork:
+            await requestLiveTeamStrategicReview(
+                reason: "Completion review found remaining work: \(decision.reason)",
+                automatic: true,
+                continuation: request.continuation,
+                unrunnable: false,
+                sourceRunID: request.sourceRunID
+            )
+
+        case .pause:
+            let revision = record.activity?.liveTeam?.currentDefinition?.revision ?? 1
+            let continuation = preferredLiveTeamContinuation(
+                requested: request.continuation,
+                preferredMemberID: nil
+            )
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = continuation.map {
+                .perform($0)
+            }
+            record.activity?.liveTeam?.boardDirectionReason = decision.reason
+            record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
+                revision: revision,
+                actor: .overseer,
+                summary: "Completion needs your direction",
+                reason: decision.reason,
+                evidence: decision.evidence
+            ))
+            statusMessage = "Completion review needs your direction"
+            errorMessage = nil
+            boardDirectionMessage = decision.reason
+            try? await persist()
+        }
+    }
+
+    private func makeLiveTeamOverseerContext(reason: String) -> LiveTeamOverseerContext {
+        let activity = record.activity
+        let evidence = activity?.runs.suffix(12).map { run in
+            LiveTeamEvidenceItem(
+                sequence: run.sequence,
+                memberName: run.liveTeamMember?.member.name
+                    ?? run.workflowStep?.name
+                    ?? run.displayName,
+                status: run.status,
+                result: run.finalOutput
+                    ?? run.coordinatorDecision?.handoff
+                    ?? run.workflowHandoff?.text
+                    ?? run.relayError
+                    ?? "No result recorded.",
+                coordinatorEvidence: run.coordinatorDecision?.evidence
+                    ?? run.workflowHandoff?.text
+                    ?? ""
+            )
+        } ?? []
+        var targetOptions = liveTeamRuntimeConfiguration?.targetOptions ?? []
+        let existingTargets = (activity?.liveTeam?.currentDefinition?.members.map(\.target) ?? [])
+            + [activity?.liveTeam?.currentDefinition?.coordinator.target].compactMap { $0 }
+            + [activity?.liveTeam?.currentDefinition?.overseerTarget].compactMap { $0 }
+            + (activity?.workflow?.steps.map(\.target) ?? [])
+            + [activity?.workflow?.coordinator.target].compactMap { $0 }
+        for target in existingTargets where !targetOptions.contains(where: { $0.target == target }) {
+            targetOptions.append(LiveTeamTargetOption(
+                id: "existing-\(targetOptions.count + 1)",
+                label: "Existing \(target.providerID.rawValue) \(target.model)",
+                target: target
+            ))
+        }
+        return LiveTeamOverseerContext(
+            userGoal: activity?.goal ?? "",
+            currentDefinition: activity?.liveTeam?.currentDefinition,
+            coordinatorHandoff: activity?.liveTeam?.coordinatorHandoff,
+            recentEvidence: Array(evidence),
+            editHistory: Array(activity?.liveTeam?.editHistory.suffix(12) ?? []),
+            targetOptions: targetOptions,
+            triggerReason: reason,
+            legacyWorkflow: activity?.workflow,
+            legacyCursor: activity?.workflowCursor,
+            legacySessions: activity?.stepSessions ?? [:]
+        )
+    }
+
+    private func preferredLiveTeamContinuation(
+        requested: LiveTeamCheckpoint?,
+        preferredMemberID: String?
+    ) -> LiveTeamCheckpoint? {
+        guard let state = record.activity?.liveTeam,
+              let definition = state.currentDefinition else { return nil }
+        if let preferredMemberID,
+           let member = definition.member(id: preferredMemberID),
+           member.runPolicy == .everyCycle
+                || !state.completedOnceMemberIDs.contains(member.id) {
+            return LiveTeamCheckpoint(
+                memberID: member.id,
+                cycle: requested?.cycle ?? state.checkpoint?.cycle ?? 1,
+                revision: definition.revision
+            )
+        }
+        return LiveTeamStateMachine.checkpoint(
+            reconciling: requested,
+            in: definition,
+            completedOnceMemberIDs: state.completedOnceMemberIDs
+        )
+    }
+
+    private func activateBoardLiveTeamRevisionAtSafeBoundary() async -> Bool {
+        guard record.activity?.liveTeam?.pendingRevision?.actor == .board else {
+            return true
+        }
+        return await activatePendingLiveTeamRevision()
+    }
+
+    private func activatePendingLiveTeamRevision() async -> Bool {
+        guard let activity = record.activity,
+              let oldDefinition = activity.liveTeam?.currentDefinition,
+              let pending = activity.liveTeam?.pendingRevision,
+              pending.baseRevision == oldDefinition.revision else {
+            errorMessage = LiveTeamRevisionError.stale(
+                base: record.activity?.liveTeam?.pendingRevision?.baseRevision ?? 0,
+                current: record.activity?.liveTeam?.currentDefinition?.revision ?? 0
+            ).localizedDescription
+            return false
+        }
+        let newDefinition = pending.definition
+        guard newDefinition.validationMessage == nil else {
+            errorMessage = newDefinition.validationMessage
+            return false
+        }
+        let previousActivity = activity
+        let protectedFreshSlot = activity.runs.last(where: {
+            $0.liveTeamMember?.member.sessionPolicy == .freshEveryRun
+                && [.routing, .completed, .paused].contains($0.status)
+        })?.liveTeamMember?.sessionSlotID
+        let reconciliation = reconciledLiveTeamSessions(
+            oldDefinition: oldDefinition,
+            newDefinition: newDefinition,
+            existing: activity.stepSessions,
+            protectedSlotID: protectedFreshSlot
+        )
+        record.activity?.stepSessions = reconciliation.sessions
+        record.activity?.liveTeam?.previousDefinition = oldDefinition
+        record.activity?.liveTeam?.currentDefinition = newDefinition
+        record.activity?.liveTeam?.overseer.target = newDefinition.overseerTarget
+        record.activity?.liveTeam?.pendingRevision = nil
+        record.activity?.liveTeam?.cyclesUnderCurrentRevision = 0
+        record.activity?.liveTeam?.completedOnceMemberIDs =
+            LiveTeamStateMachine.reconciledCompletedOnceMemberIDs(
+                activity.liveTeam?.completedOnceMemberIDs ?? [],
+                from: oldDefinition,
+                to: newDefinition
+            )
+        record.activity?.liveTeam?.editHistory.append(LiveTeamEditRecord(
+            revision: newDefinition.revision,
+            actor: pending.actor,
+            summary: LiveTeamStateMachine.activationSummary(
+                from: oldDefinition,
+                to: newDefinition
+            ),
+            reason: pending.reason,
+            evidence: pending.evidence
+        ))
+        let completedOnceMemberIDs = record.activity?.liveTeam?.completedOnceMemberIDs ?? []
+        if let checkpoint = record.activity?.liveTeam?.checkpoint {
+            record.activity?.liveTeam?.checkpoint = LiveTeamStateMachine.checkpoint(
+                reconciling: checkpoint,
+                in: newDefinition,
+                completedOnceMemberIDs: completedOnceMemberIDs
+            )
+        }
+        do {
+            try await persist()
+        } catch {
+            record.activity = previousActivity
+            errorMessage = "Could not apply the agent changes: \(error.localizedDescription)"
+            pauseLiveTeamActivity(message: "Pending agent changes could not be applied")
+            return false
+        }
+        await releaseProviderSessions(reconciliation.supersededSessions)
+        cancelWorkOverviewSummaryRequest()
+        return true
+    }
+
+    private func reconciledLiveTeamSessions(
+        oldDefinition: LiveTeamDefinition,
+        newDefinition: LiveTeamDefinition,
+        existing: [String: WorkflowSessionState],
+        protectedSlotID: String?
+    ) -> (
+        sessions: [String: WorkflowSessionState],
+        supersededSessions: Set<ProviderSessionReference>
+    ) {
+        let oldMembersBySlot = Dictionary(grouping: oldDefinition.members.compactMap { member in
+            member.sessionPolicy.persistentSlotID(memberID: member.id).map {
+                ($0, member)
+            }
+        }, by: \.0)
+        let newMembersBySlot = Dictionary(grouping: newDefinition.members.compactMap { member in
+            member.sessionPolicy.persistentSlotID(memberID: member.id).map {
+                ($0, member)
+            }
+        }, by: \.0)
+        var sessions: [String: WorkflowSessionState] = [:]
+        var superseded: Set<ProviderSessionReference> = []
+
+        for (slotID, entries) in newMembersBySlot {
+            guard let representative = entries.first?.1 else { continue }
+            let previousEntries = oldMembersBySlot[slotID] ?? []
+            let previousSession = existing[slotID]
+            let preservesHistory: Bool
+            if slotID.hasPrefix("member:"),
+               let oldMember = previousEntries.first?.1,
+               entries.count == 1,
+               oldMember.id == representative.id {
+                preservesHistory = oldMember.instructions == representative.instructions
+                    && !Self.requiresNewLineage(
+                        from: oldMember.target,
+                        to: representative.target
+                    )
+            } else if slotID.hasPrefix("shared:"), !previousEntries.isEmpty {
+                preservesHistory = previousEntries.allSatisfy { oldEntry in
+                    guard let newEntry = entries.first(where: {
+                        $0.1.id == oldEntry.1.id
+                    }) else { return true }
+                    return oldEntry.1.instructions == newEntry.1.instructions
+                        && !Self.requiresNewLineage(
+                            from: oldEntry.1.target,
+                            to: newEntry.1.target
+                        )
+                }
+            } else {
+                preservesHistory = false
+            }
+
+            if var previousSession, preservesHistory {
+                previousSession.target = representative.target
+                sessions[slotID] = previousSession
+            } else {
+                if let previousSession,
+                   let sessionID = previousSession.providerSessionID {
+                    superseded.insert(ProviderSessionReference(
+                        providerID: previousSession.target.providerID,
+                        sessionID: sessionID
+                    ))
+                }
+                sessions[slotID] = WorkflowSessionState(
+                    stepID: slotID,
+                    lineage: (previousSession?.lineage ?? 0) + 1,
+                    target: representative.target
+                )
+            }
+        }
+
+        for (slotID, previousSession) in existing where sessions[slotID] == nil {
+            if slotID == protectedSlotID {
+                sessions[slotID] = previousSession
+            } else if let sessionID = previousSession.providerSessionID {
+                superseded.insert(ProviderSessionReference(
+                    providerID: previousSession.target.providerID,
+                    sessionID: sessionID
+                ))
+            }
+        }
+        return (sessions, superseded)
+    }
+
+    private func noteLiveTeamFailureAndReviewIfRepeated(runID: UUID) async {
+        guard let memberID = run(withID: runID)?.liveTeamMember?.member.id else { return }
+        let count = (record.activity?.liveTeam?.memberFailureCounts[memberID] ?? 0) + 1
+        record.activity?.liveTeam?.memberFailureCounts[memberID] = count
+        let failureThreshold = liveTeamRuntimeConfiguration?
+            .oversightPolicy.repeatedFailureThreshold ?? 2
+        guard count >= failureThreshold, !isClosing else { return }
+        let continuation = run(withID: runID)?.liveTeamMember.map {
+            LiveTeamCheckpoint(
+                memberID: $0.member.id,
+                cycle: $0.cycle,
+                revision: record.activity?.liveTeam?.currentDefinition?.revision
+                    ?? $0.revision
+            )
+        }
+        record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(
+            LiveTeamOverseerRequest(
+                mode: .strategicReview,
+                reason: "UNRUNNABLE: \(memberID) failed \(failureThreshold) times.",
+                sourceRunID: runID,
+                continuation: continuation,
+                automatic: true
+            )
+        )
+        statusMessage = "Repeated agent failure requires a strategy review"
+    }
+
+    private func recoverInterruptedLiveTeamState() {
+        guard record.activity?.status == .running else { return }
+        record.activity?.status = .paused
+        guard let index = record.activity?.runs.indices.last else {
+            if let checkpoint = record.activity?.liveTeam?.checkpoint {
+                record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+            } else if record.activity?.liveTeam?.currentDefinition == nil {
+                record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(
+                    LiveTeamOverseerRequest(
+                        mode: .bootstrap,
+                        reason: "Recover interrupted initial setup.",
+                        automatic: false
+                    )
+                )
+            }
+            return
+        }
+        let run = record.activity?.runs[index]
+        if let status = run?.status,
+           [.queued, .running, .awaitingApproval].contains(status),
+           let runID = run?.id {
+            record.activity?.runs[index].status = .interrupted
+            record.activity?.runs[index].completedAt = .now
+            record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(runID)
+        } else if run?.status == .routing,
+                  let runID = run?.id,
+                  run?.finalOutput?.isEmpty == false {
+            record.activity?.liveTeam?.resumeCheckpoint = .routeCompletedRun(runID)
+        } else if let runID = run?.id,
+                  run?.coordinatorDecision != nil {
+            record.activity?.liveTeam?.resumeCheckpoint = .applyCoordinatorDecision(runID)
+        }
+    }
+
     private func resumeGeneric() async {
         guard let activity = record.activity,
               let workflow = activity.workflow else { return }
@@ -3216,6 +5409,7 @@ public final class RepositoryCoordinator {
         case .started(let executionID):
             guard !transcriptBackpressureRunIDs.contains(runID) else { return }
             genericSessionFallbacks.removeValue(forKey: runID)
+            liveTeamSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.turnID = executionID
                 $0.status = .running
@@ -3253,6 +5447,7 @@ public final class RepositoryCoordinator {
                 return
             }
             genericSessionFallbacks.removeValue(forKey: runID)
+            liveTeamSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.finalOutput = output
                 $0.durationMilliseconds = duration
@@ -3263,13 +5458,24 @@ public final class RepositoryCoordinator {
             if let usage {
                 await appendTokenUsage(usage, runID: runID)
             }
-            activatePendingGoalAmendment()
-            if isClosing {
-                record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
-                pauseGenericActivity(message: "Paused before preparing the handoff")
-                await completeCloseAfterTerminalEvent()
+            if run.liveTeamMember != nil {
+                activatePendingLiveTeamGoalAmendment()
+                if isClosing {
+                    record.activity?.liveTeam?.resumeCheckpoint = .routeCompletedRun(runID)
+                    pauseLiveTeamActivity(message: "Paused before work routing")
+                    await completeCloseAfterTerminalEvent()
+                } else {
+                    await beginLiveTeamRouting(runID: runID, finalOutput: output)
+                }
             } else {
-                await beginGenericRouting(runID: runID, finalOutput: output)
+                activatePendingGoalAmendment()
+                if isClosing {
+                    record.activity?.workflowResumeCheckpoint = .routeCompletedRun(runID)
+                    pauseGenericActivity(message: "Paused before preparing the handoff")
+                    await completeCloseAfterTerminalEvent()
+                } else {
+                    await beginGenericRouting(runID: runID, finalOutput: output)
+                }
             }
 
         case .interrupted(let detail):
@@ -3279,6 +5485,7 @@ public final class RepositoryCoordinator {
                 return
             }
             genericSessionFallbacks.removeValue(forKey: runID)
+            liveTeamSessionFallbacks.removeValue(forKey: runID)
             updateRun(runID) {
                 $0.status = .interrupted
                 $0.completedAt = .now
@@ -3286,9 +5493,15 @@ public final class RepositoryCoordinator {
                     $0.relayError = detail
                 }
             }
-            activatePendingGoalAmendment()
-            record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
-            pauseGenericActivity(message: detail ?? "\(run.displayName) was interrupted.")
+            if run.liveTeamMember != nil {
+                activatePendingLiveTeamGoalAmendment()
+                record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(runID)
+                pauseLiveTeamActivity(message: detail ?? "\(run.displayName) was interrupted.")
+            } else {
+                activatePendingGoalAmendment()
+                record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
+                pauseGenericActivity(message: detail ?? "\(run.displayName) was interrupted.")
+            }
             if isClosing {
                 await completeCloseAfterTerminalEvent()
             } else {
@@ -3301,11 +5514,19 @@ public final class RepositoryCoordinator {
                 await finishBackpressuredRunAfterTerminalEvent(runID: runID)
                 return
             }
-            await failGenericRunFromEvent(
-                runID: runID,
-                detail: detail,
-                allowsSessionFallback: true
-            )
+            if run.liveTeamMember != nil {
+                await failLiveTeamRunFromEvent(
+                    runID: runID,
+                    detail: detail,
+                    allowsSessionFallback: true
+                )
+            } else {
+                await failGenericRunFromEvent(
+                    runID: runID,
+                    detail: detail,
+                    allowsSessionFallback: true
+                )
+            }
 
         case .failed(let detail):
             if await finishInteractionSafetyStopIfNeeded(runID: runID) { return }
@@ -3313,11 +5534,85 @@ public final class RepositoryCoordinator {
                 await finishBackpressuredRunAfterTerminalEvent(runID: runID)
                 return
             }
-            await failGenericRunFromEvent(
+            if run.liveTeamMember != nil {
+                await failLiveTeamRunFromEvent(
+                    runID: runID,
+                    detail: detail,
+                    allowsSessionFallback: false
+                )
+            } else {
+                await failGenericRunFromEvent(
+                    runID: runID,
+                    detail: detail,
+                    allowsSessionFallback: false
+                )
+            }
+        }
+    }
+
+    private func failLiveTeamRunFromEvent(
+        runID: UUID,
+        detail: String,
+        allowsSessionFallback: Bool
+    ) async {
+        guard let run = run(withID: runID),
+              let snapshot = run.liveTeamMember else { return }
+        let sessionFallback = allowsSessionFallback && run.turnID == nil
+            ? liveTeamSessionFallbacks.removeValue(forKey: runID)
+            : nil
+        if sessionFallback == nil {
+            liveTeamSessionFallbacks.removeValue(forKey: runID)
+        }
+        updateRun(runID) {
+            $0.status = .failed
+            $0.completedAt = .now
+            $0.relayError = detail
+        }
+        activatePendingLiveTeamGoalAmendment()
+        record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(runID)
+        pauseLiveTeamActivity(message: detail)
+        await noteLiveTeamFailureAndReviewIfRepeated(runID: runID)
+        if isClosing {
+            await completeCloseAfterTerminalEvent()
+        } else {
+            try? await persist()
+        }
+        if let sessionFallback, !isClosing {
+            let previousActivity = record.activity
+            var sessionState = record.activity?.stepSessions[snapshot.sessionSlotID]
+                ?? WorkflowSessionState(
+                    stepID: snapshot.sessionSlotID,
+                    target: snapshot.member.target
+                )
+            if let sessionID = sessionState.providerSessionID {
+                await releaseProviderSessions([ProviderSessionReference(
+                    providerID: sessionState.target.providerID,
+                    sessionID: sessionID
+                )])
+            }
+            sessionState = advanceLiveTeamSessionLineage(
+                sessionState,
+                snapshot: snapshot,
                 runID: runID,
-                detail: detail,
-                allowsSessionFallback: false
+                updatesRun: false
             )
+            record.activity?.stepSessions[snapshot.sessionSlotID] = sessionState
+            record.activity?.status = .running
+            record.activity?.liveTeam?.resumeCheckpoint = .perform(
+                sessionFallback.checkpoint
+            )
+            do {
+                try await persist()
+                await performLiveTeam(
+                    checkpoint: sessionFallback.checkpoint,
+                    promptOverride: sessionFallback.prompt,
+                    snapshotOverride: snapshot,
+                    allowsSessionFallback: false
+                )
+            } catch {
+                record.activity = previousActivity
+                errorMessage = "Could not save the fresh-session fallback: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -3735,6 +6030,72 @@ public final class RepositoryCoordinator {
     private func finishGenericInteraction(presentationKey: String) async {
         genericInteractionRoutes.removeValue(forKey: presentationKey)
         await finishInteraction(id: .string(presentationKey))
+    }
+
+    private func prepareLiveTeamForClose(
+        strategy: DocumentPauseStrategy
+    ) async -> DocumentClosePreparationResult {
+        guard record.activity?.status == .running else {
+            return await finishCloseWithoutActiveTurn()
+        }
+        guard let run = activeRun else {
+            record.activity?.status = .paused
+            if let checkpoint = record.activity?.liveTeam?.checkpoint {
+                record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+            }
+            return await finishCloseWithoutActiveTurn()
+        }
+        switch run.status {
+        case .routing:
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = .routeCompletedRun(run.id)
+            statusMessage = "Paused before work routing"
+            return await finishCloseWithoutActiveTurn()
+        case .queued where genericRunTasks[run.id] == nil:
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(run.id)
+            return await finishCloseWithoutActiveTurn()
+        case .queued, .running, .awaitingApproval:
+            guard let target = run.agentTarget, let agentProviders else {
+                return failClose("The active agent provider is unavailable.")
+            }
+            do {
+                if strategy == .graceful, run.status == .running {
+                    pauseState = .requestingCheckpoint
+                    statusMessage = "Asking \(run.displayName.lowercased()) to stop coherently…"
+                    try await agentProviders.steer(
+                        providerID: target.providerID,
+                        runID: run.id,
+                        message: Self.gracefulPausePrompt
+                    )
+                    pauseState = .waitingForTurn
+                } else {
+                    pauseState = .interrupting
+                    statusMessage = "Stopping \(run.displayName.lowercased())…"
+                    try await agentProviders.interrupt(
+                        providerID: target.providerID,
+                        runID: run.id
+                    )
+                }
+                return await waitForCloseCompletion()
+            } catch {
+                return await reconcileCloseControlFailure(error.localizedDescription)
+            }
+        case .paused, .interrupted, .failed:
+            record.activity?.status = .paused
+            record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(run.id)
+            return await finishCloseWithoutActiveTurn()
+        case .completed:
+            record.activity?.status = .paused
+            if run.coordinatorDecision != nil {
+                record.activity?.liveTeam?.resumeCheckpoint = .applyCoordinatorDecision(run.id)
+            } else if run.finalOutput?.isEmpty == false {
+                record.activity?.liveTeam?.resumeCheckpoint = .routeCompletedRun(run.id)
+            } else {
+                record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(run.id)
+            }
+            return await finishCloseWithoutActiveTurn()
+        }
     }
 
     private func prepareGenericWorkflowForClose(
@@ -4377,6 +6738,15 @@ public final class RepositoryCoordinator {
                 break
             }
         }
+        if let checkpoint = activity.liveTeam?.resumeCheckpoint {
+            switch checkpoint {
+            case .recoverRun(let runID), .routeCompletedRun(let runID),
+                    .applyCoordinatorDecision(let runID):
+                runIDs.insert(runID)
+            case .invokeOverseer, .perform:
+                break
+            }
+        }
         for runID in runIDs {
             try await recoverRunPayload(runID: runID, loadGeneration: loadGeneration)
         }
@@ -4422,6 +6792,15 @@ public final class RepositoryCoordinator {
             case .recoverRun(let runID), .routeCompletedRun(let runID):
                 retainedRunIDs.insert(runID)
             case .perform:
+                break
+            }
+        }
+        if let checkpoint = activity.liveTeam?.resumeCheckpoint {
+            switch checkpoint {
+            case .recoverRun(let runID), .routeCompletedRun(let runID),
+                    .applyCoordinatorDecision(let runID):
+                retainedRunIDs.insert(runID)
+            case .invokeOverseer, .perform:
                 break
             }
         }
@@ -4581,7 +6960,10 @@ public final class RepositoryCoordinator {
             $0.completedAt = $0.completedAt ?? .now
             $0.relayError = detail
         }
-        if record.activity?.workflow != nil {
+        if record.activity?.liveTeam != nil {
+            record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(runID)
+            pauseLiveTeamActivity(message: detail)
+        } else if record.activity?.workflow != nil {
             record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
             pauseGenericActivity(message: detail)
         } else {
@@ -5219,9 +7601,11 @@ public final class RepositoryCoordinator {
               let runIndex = activity.runs.firstIndex(where: { $0.id == id }) else { return }
         let previousHandoff = activity.runs[runIndex].handoff
         let previousWorkflowHandoff = activity.runs[runIndex].workflowHandoff
+        let previousCoordinatorDecision = activity.runs[runIndex].coordinatorDecision
         update(&activity.runs[runIndex])
         let workSummarySourceChanged = previousHandoff != activity.runs[runIndex].handoff
             || previousWorkflowHandoff != activity.runs[runIndex].workflowHandoff
+            || previousCoordinatorDecision != activity.runs[runIndex].coordinatorDecision
         record.activity = activity
         record.updatedAt = .now
         if workSummarySourceChanged {
@@ -5235,8 +7619,139 @@ public final class RepositoryCoordinator {
         statusMessage = message
     }
 
+    private func restoreBoardDirectionPresentationIfNeeded() {
+        guard record.activity?.status == .paused,
+              record.activity?.liveTeam != nil else {
+            boardDirectionMessage = nil
+            return
+        }
+        if let index = record.activity?.liveTeam?.editHistory.indices.last,
+           let edit = record.activity?.liveTeam?.editHistory[index] {
+            let normalizedSummary: String? = switch edit.summary {
+            case "Paused for Board direction": "Paused for your direction"
+            case "Completion needs Board direction": "Completion needs your direction"
+            default: nil
+            }
+            if let normalizedSummary {
+                record.activity?.liveTeam?.editHistory[index] = LiveTeamEditRecord(
+                    id: edit.id,
+                    revision: edit.revision,
+                    actor: edit.actor,
+                    summary: normalizedSummary,
+                    reason: edit.reason,
+                    evidence: edit.evidence,
+                    createdAt: edit.createdAt
+                )
+            }
+        }
+        if record.activity?.liveTeam?.boardDirectionReason == nil,
+           let lastEdit = record.activity?.liveTeam?.editHistory.last,
+           [
+               "Paused for your direction",
+               "Completion needs your direction"
+           ]
+            .contains(lastEdit.summary) {
+            record.activity?.liveTeam?.boardDirectionReason = lastEdit.reason
+        }
+        if record.activity?.liveTeam?.boardDirectionReason != nil,
+           let resumeCheckpoint = record.activity?.liveTeam?.resumeCheckpoint,
+           case .perform(let checkpoint) = resumeCheckpoint {
+            let continuation = preferredLiveTeamContinuation(
+                requested: checkpoint,
+                preferredMemberID: nil
+            )
+            record.activity?.liveTeam?.resumeCheckpoint = continuation.map { .perform($0) }
+        }
+        boardDirectionMessage = record.activity?.liveTeam?.boardDirectionReason
+    }
+
+    private func normalizeLiveTeamProductLanguageIfNeeded() {
+        if var activity = record.activity, activity.liveTeam != nil {
+            LiveTeamProductLanguage.normalizePersistedControlText(in: &activity)
+            record.activity = activity
+        }
+        if let summary = viewState.workOverviewSummary {
+            viewState.workOverviewSummary = WorkOverviewSummaryCache(
+                sourceSignature: summary.sourceSignature,
+                text: LiveTeamProductLanguage.workSummary(summary.text),
+                generatedAt: summary.generatedAt
+            )
+        }
+    }
+
+    /// Codex Plan mode can end a turn with a `plan` item instead of an
+    /// `agentMessage`. Earlier builds displayed that valid terminal output but
+    /// classified the turn as failed. Repair only that exact persisted shape;
+    /// ordinary failures remain failures.
+    private func repairCompletedPlanTurnIfNeeded() {
+        guard var activity = record.activity,
+              activity.status == .paused,
+              activity.liveTeam != nil,
+              case .recoverRun(let runID)? = activity.liveTeam?.resumeCheckpoint,
+              let runIndex = activity.runs.firstIndex(where: { $0.id == runID }),
+              runIndex == activity.runs.count - 1,
+              activity.runs[runIndex].status == .failed,
+              activity.runs[runIndex].relayError == "Codex turn ended with status completed.",
+              activity.runs[runIndex].finalOutput?.isEmpty != false,
+              activity.runs[runIndex].agentTarget?.options.mode == .plan,
+              let output = Self.terminalPlanOutput(from: activity.runs[runIndex]),
+              let memberID = activity.runs[runIndex].liveTeamMember?.member.id else {
+            return
+        }
+
+        activity.runs[runIndex].finalOutput = output
+        activity.runs[runIndex].relayError = nil
+        activity.runs[runIndex].status = .routing
+        activity.runs[runIndex].completedAt = activity.runs[runIndex].completedAt ?? .now
+        activity.liveTeam?.resumeCheckpoint = .routeCompletedRun(runID)
+        if let failures = activity.liveTeam?.memberFailureCounts[memberID] {
+            if failures <= 1 {
+                activity.liveTeam?.memberFailureCounts.removeValue(forKey: memberID)
+            } else {
+                activity.liveTeam?.memberFailureCounts[memberID] = failures - 1
+            }
+        }
+        record.activity = activity
+    }
+
+    private static func terminalPlanOutput(from run: RunRecord) -> String? {
+        let transcript = RunTranscriptPresentation.text(
+            for: run,
+            separatesRuns: true,
+            visibility: .all
+        )
+        let marker = "\nPlan\n"
+        let output: Substring
+        if let range = transcript.range(of: marker, options: .backwards) {
+            output = transcript[range.upperBound...]
+        } else if transcript.hasPrefix("Plan\n") {
+            output = transcript.dropFirst("Plan\n".count)
+        } else {
+            return nil
+        }
+        let clean = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? nil : clean
+    }
+
     private var pausedStatusMessage: String {
         guard let activity = record.activity else { return "Paused" }
+        if activity.liveTeam?.boardDirectionReason != nil {
+            return "Paused for your direction"
+        }
+        if let checkpoint = activity.liveTeam?.resumeCheckpoint {
+            switch checkpoint {
+            case .invokeOverseer(let request):
+                return "Paused before \(request.mode.displayName.lowercased())"
+            case .recoverRun:
+                return "Interrupted; inspect the repository before resuming"
+            case .routeCompletedRun:
+                return "Handoff pending; resume without replaying the agent"
+            case .applyCoordinatorDecision:
+                return "Routing decision saved; resume local flow"
+            case .perform(let checkpoint):
+                return "Paused before \(liveTeamMemberName(at: checkpoint))"
+            }
+        }
         if let checkpoint = activity.workflowResumeCheckpoint {
             switch checkpoint {
             case .recoverRun:
@@ -5581,7 +8096,9 @@ public final class RepositoryCoordinator {
             $0.relayError = message
         }
         record.activity?.status = .paused
-        if record.activity?.workflow != nil {
+        if record.activity?.liveTeam != nil {
+            record.activity?.liveTeam?.resumeCheckpoint = .recoverRun(runID)
+        } else if record.activity?.workflow != nil {
             record.activity?.workflowResumeCheckpoint = .recoverRun(runID)
         } else {
             record.activity?.resumeCheckpoint = .recoverRun(runID)
@@ -5713,6 +8230,21 @@ public final class RepositoryCoordinator {
     private func makeWorkSummaryContext() -> WorkSummaryContext? {
         guard let activity = record.activity else { return nil }
         let handoffs = activity.runs.compactMap { run -> WorkSummaryHandoff? in
+            if let decision = run.coordinatorDecision {
+                let disposition: SourceDisposition = switch decision.disposition {
+                case .continueTeam, .retryCurrent: .implementationCheckpoint
+                case .completionCandidate: .implementationComplete
+                case .pause, .requestOversight: .blocked
+                }
+                return WorkSummaryHandoff(
+                    runID: run.id,
+                    sequence: run.sequence,
+                    kind: run.kind,
+                    label: decision.runLabel,
+                    disposition: disposition,
+                    text: decision.handoff
+                )
+            }
             if let handoff = run.workflowHandoff {
                 let disposition: SourceDisposition = switch handoff.outcome {
                 case .continueWorkflow: .implementationCheckpoint
@@ -5741,7 +8273,10 @@ public final class RepositoryCoordinator {
             )
         }
         guard !handoffs.isEmpty else { return nil }
-        return WorkSummaryContext(goal: activity.goal, handoffs: handoffs)
+        return WorkSummaryContext(
+            goal: activity.liveTeam?.currentDefinition?.workingGoal ?? activity.goal,
+            handoffs: handoffs
+        )
     }
 
     private func cancelWorkOverviewSummaryRequest() {
@@ -5771,7 +8306,12 @@ public final class RepositoryCoordinator {
         }
         if record.activity?.status == .running {
             record.activity?.status = .paused
-            if record.activity?.workflow != nil {
+            if record.activity?.liveTeam != nil {
+                if record.activity?.liveTeam?.resumeCheckpoint == nil,
+                   let checkpoint = record.activity?.liveTeam?.checkpoint {
+                    record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
+                }
+            } else if record.activity?.workflow != nil {
                 if record.activity?.workflowResumeCheckpoint == nil,
                    let cursor = record.activity?.workflowCursor {
                     record.activity?.workflowResumeCheckpoint = .perform(cursor)

@@ -39,6 +39,9 @@ struct WorkOverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 overviewHeader(activity: activity)
+                if let liveTeam = activity.liveTeam {
+                    liveTeamOverview(activity: activity, state: liveTeam)
+                }
                 compactSummary(metrics)
                 workSummary
                 goal(activity.goal)
@@ -73,10 +76,10 @@ struct WorkOverviewView: View {
                     Button("Retry Summary") {
                         coordinator.requestWorkOverviewSummary(force: true)
                     }
-                    .help("Ask the configured workflow coordinator to generate the work overview again")
+                    .help("Ask Codeness to generate the work overview again")
                 } else {
                     Label(
-                        "A narrative summary will appear after the first completed handoff.",
+                        "A work summary will appear after the first completed handoff.",
                         systemImage: "text.badge.plus"
                     )
                     .foregroundStyle(.secondary)
@@ -85,7 +88,7 @@ struct WorkOverviewView: View {
             .padding(8)
         } label: {
             HStack {
-                Label("Work so far", systemImage: "text.document")
+                Label("Work Summary", systemImage: "text.document")
                     .font(.headline)
                 Spacer()
                 if let generatedAt = coordinator.workOverviewSummaryGeneratedAt {
@@ -110,7 +113,7 @@ struct WorkOverviewView: View {
 
     private var handoffCountText: String {
         let count = record.activity?.runs.count(where: {
-            $0.handoff != nil || $0.workflowHandoff != nil
+            $0.handoff != nil || $0.workflowHandoff != nil || $0.coordinatorDecision != nil
         }) ?? 0
         return count == 1 ? "handoff" : "\(count) handoffs"
     }
@@ -158,15 +161,127 @@ struct WorkOverviewView: View {
         }
     }
 
+    private func liveTeamOverview(
+        activity: ActivityRecord,
+        state: LiveTeamState
+    ) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 14) {
+                if let definition = state.currentDefinition {
+                    Text(definition.strategicReason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(definition.members) { member in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(member.name)
+                                    .fontWeight(.medium)
+                                Text(member.runPolicy.displayName)
+                                    .font(.caption)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(.quaternary, in: Capsule())
+                                Text(member.sessionPolicy.displayName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        Button("Review Strategy Now") {
+                            Task { await coordinator.reviewLiveTeamStrategyNow() }
+                        }
+                        .help("Ask Codeness to review the strategy between agent turns")
+
+                        Toggle(
+                            "Review changes before Codeness applies them",
+                            isOn: Binding(
+                                get: { state.reviewAutomaticChangesFirst },
+                                set: { enabled in
+                                    Task {
+                                        _ = await coordinator
+                                            .setReviewAutomaticLiveTeamChangesFirst(enabled)
+                                    }
+                                }
+                            )
+                        )
+                        .toggleStyle(.checkbox)
+
+                        Spacer()
+
+                        if state.previousDefinition != nil {
+                            Button("Undo Last Agent Change") {
+                                Task { _ = await coordinator.undoLastLiveTeamRevision() }
+                            }
+                            .help("Restore the preceding agents; released conversation histories cannot be restored")
+                        }
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        if activity.status == .running {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text("Codeness is preparing the agents.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let pending = state.pendingRevision {
+                    Divider()
+                    pendingRevisionView(pending, activityStatus: activity.status)
+                }
+            }
+            .padding(8)
+        } label: {
+            Label("Agents", systemImage: "person.3.sequence.fill")
+                .font(.headline)
+        }
+    }
+
+    private func pendingRevisionView(
+        _ pending: LiveTeamPendingRevision,
+        activityStatus: ActivityStatus
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(
+                pending.actor == .board
+                    ? "Your agent changes are saved and will take effect between turns."
+                    : "Codeness has proposed agent changes for you to review.",
+                systemImage: "clock.badge.exclamationmark"
+            )
+            .foregroundStyle(pending.actor == .board ? Color.secondary : Color.orange)
+            Text(pending.reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if pending.actor == .overseer, activityStatus == .paused {
+                HStack {
+                    Button("Accept Changes") {
+                        Task { _ = await coordinator.acceptPendingOverseerRevision() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Discard") {
+                        Task { _ = await coordinator.discardPendingOverseerRevision() }
+                    }
+                }
+            }
+        }
+    }
+
     private func compactSummary(_ metrics: WorkOverviewMetrics) -> some View {
         HStack(spacing: 10) {
             compactSummaryItem(
-                "\(metrics.totalRunCount) \(metrics.totalRunCount == 1 ? "run" : "runs")",
+                "\(metrics.totalRunCount) \(metrics.totalRunCount == 1 ? "turn" : "turns")",
                 symbol: "terminal"
             )
             compactSummaryDivider
             compactSummaryItem(
-                "\(metrics.workUnitCount) \(metrics.usesGenericWorkflow ? "cycle" : "work unit")\(metrics.workUnitCount == 1 ? "" : "s")",
+                "\(metrics.workUnitCount) \(metrics.usesGenericWorkflow || metrics.usesLiveTeam ? "round" : "work unit")\(metrics.workUnitCount == 1 ? "" : "s")",
                 symbol: "square.stack.3d.up"
             )
             compactSummaryDivider
@@ -228,7 +343,7 @@ struct WorkOverviewView: View {
                 Label("Time by Phase", systemImage: "chart.bar.xaxis")
                     .font(.headline)
                 Spacer(minLength: 16)
-                Text("Runs")
+                Text("Turns")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(width: 68, alignment: .trailing)
@@ -277,7 +392,7 @@ struct WorkOverviewView: View {
                 if let usage = metrics.totalTokenUsage {
                     Text(
                         "Cached input: \(WorkOverviewFormatting.tokens(usage.cachedInputTokens))"
-                            + "  ·  Recorded for \(metrics.recordedTokenRunCount) of \(metrics.totalRunCount) runs"
+                            + "  ·  Recorded for \(metrics.recordedTokenRunCount) of \(metrics.totalRunCount) turns"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -285,7 +400,7 @@ struct WorkOverviewView: View {
                         "\(WorkOverviewFormatting.tokenDetail(usage.cachedInputTokens)) cached input tokens"
                     )
                 } else {
-                    Text("Token usage has not been recorded for these runs.")
+                    Text("Token usage has not been recorded for these turns.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -329,7 +444,7 @@ struct WorkOverviewView: View {
         ) {
             OverviewInfoCard(title: "Activity", symbol: "calendar") {
                 if let workflow = activity.workflow {
-                    OverviewInfoRow(title: "Workflow", value: workflow.name)
+                    OverviewInfoRow(title: "Earlier activity", value: workflow.name)
                 }
                 OverviewInfoRow(
                     title: "Started",
@@ -348,7 +463,19 @@ struct WorkOverviewView: View {
             }
 
             OverviewInfoCard(title: "Sessions", symbol: "person.2") {
-                if let workflow = activity.workflow {
+                if let definition = activity.liveTeam?.currentDefinition {
+                    ForEach(definition.members) { member in
+                        let slotID = member.sessionPolicy.persistentSlotID(
+                            memberID: member.id
+                        )
+                        OverviewInfoRow(
+                            title: member.name,
+                            value: slotID.map {
+                                sessionDescription(activity.stepSessions[$0])
+                            } ?? "Fresh each turn"
+                        )
+                    }
+                } else if let workflow = activity.workflow {
                     ForEach(workflow.steps) { step in
                         let session = activity.stepSessions[step.id]
                         OverviewInfoRow(
@@ -358,12 +485,8 @@ struct WorkOverviewView: View {
                     }
                 } else {
                     OverviewInfoRow(
-                        title: "Implementer",
-                        value: record.implementerThreadID == nil ? "Not created" : "Ready"
-                    )
-                    OverviewInfoRow(
-                        title: "Reviewer",
-                        value: record.reviewerThreadID == nil ? "Not created" : "Ready"
+                        title: "Agent sessions",
+                        value: "Created when work starts"
                     )
                 }
                 OverviewInfoRow(
@@ -372,8 +495,25 @@ struct WorkOverviewView: View {
                 )
             }
 
-            OverviewInfoCard(title: "Models", symbol: "cpu") {
-                if let workflow = activity.workflow {
+            OverviewInfoCard(title: "Agent targets", symbol: "cpu") {
+                if let definition = activity.liveTeam?.currentDefinition {
+                    ForEach(definition.members) { member in
+                        OverviewInfoRow(
+                            title: member.name,
+                            value: targetDescription(member.target)
+                        )
+                    }
+                    OverviewInfoRow(
+                        title: "Work routing",
+                        value: targetDescription(definition.coordinator.target)
+                    )
+                    if let overseer = activity.liveTeam?.overseer {
+                        OverviewInfoRow(
+                            title: "Strategy reviews",
+                            value: targetDescription(overseer.target)
+                        )
+                    }
+                } else if let workflow = activity.workflow {
                     ForEach(workflow.steps) { step in
                         OverviewInfoRow(
                             title: step.name,
@@ -381,33 +521,17 @@ struct WorkOverviewView: View {
                         )
                     }
                     OverviewInfoRow(
-                        title: "Coordinator",
+                        title: "Work routing",
                         value: targetDescription(workflow.coordinator.target)
                     )
                 } else {
                     OverviewInfoRow(
-                        title: "Implement",
-                        value: modelDescription(record.settings.implementer)
-                    )
-                    OverviewInfoRow(
-                        title: "Review",
-                        value: modelDescription(record.settings.reviewer)
-                    )
-                    OverviewInfoRow(
-                        title: "Fix",
-                        value: modelDescription(record.settings.fixer)
-                    )
-                    OverviewInfoRow(
-                        title: "Handoff",
-                        value: modelDescription(record.settings.relay.selection)
+                        title: "Agents",
+                        value: "Chosen from your goal"
                     )
                 }
             }
         }
-    }
-
-    private func modelDescription(_ selection: ModelSelection) -> String {
-        "\(selection.model) \(selection.effort)"
     }
 
     private func targetDescription(_ target: AgentTarget) -> String {
@@ -503,13 +627,29 @@ struct WorkOverviewMetrics: Equatable {
     let recordedTokenRunCount: Int
     let totalTokenUsage: RunTokenUsage?
     let usesGenericWorkflow: Bool
+    let usesLiveTeam: Bool
 
     init(
         activity: ActivityRecord,
         repositoryUpdatedAt: Date,
         now: Date
     ) {
-        if let workflow = activity.workflow {
+        if let definition = activity.liveTeam?.currentDefinition {
+            phases = definition.members.map { member in
+                Self.phase(
+                    id: member.id,
+                    name: member.name,
+                    kind: nil,
+                    section: nil,
+                    runs: activity.runs.filter {
+                        $0.liveTeamMember?.member.id == member.id
+                    },
+                    now: now
+                )
+            }
+            usesGenericWorkflow = false
+            usesLiveTeam = true
+        } else if let workflow = activity.workflow {
             phases = workflow.steps.map { step in
                 Self.phase(
                     id: step.id,
@@ -521,6 +661,7 @@ struct WorkOverviewMetrics: Equatable {
                 )
             }
             usesGenericWorkflow = true
+            usesLiveTeam = false
         } else {
             phases = [
                 RunKind.implementation,
@@ -537,10 +678,15 @@ struct WorkOverviewMetrics: Equatable {
                 )
             }
             usesGenericWorkflow = false
+            usesLiveTeam = false
         }
         totalRunCount = activity.runs.count
         completedRunCount = activity.runs.count(where: { $0.status == .completed })
-        workUnitCount = RunGroupingPolicy.loopIterationCount(for: activity.runs)
+        if usesLiveTeam {
+            workUnitCount = activity.runs.compactMap(\.liveTeamMember?.cycle).max() ?? 0
+        } else {
+            workUnitCount = RunGroupingPolicy.loopIterationCount(for: activity.runs)
+        }
         totalRunMilliseconds = phases.reduce(0) { $0 + $1.durationMilliseconds }
         let endDate = activity.completedAt ?? now
         elapsedMilliseconds = Self.milliseconds(from: activity.createdAt, to: endDate)

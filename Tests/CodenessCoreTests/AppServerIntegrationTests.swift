@@ -378,6 +378,7 @@ struct AppServerIntegrationTests {
             Issue.record("Expected the utility turn failure")
         } catch {
             #expect(error.localizedDescription.contains("status failed"))
+            #expect(error.localizedDescription.contains("injected turn failure"))
             #expect(!error.localizedDescription.contains("unsubscribe failure"))
         }
 
@@ -3839,7 +3840,7 @@ for line in sys.stdin:
             continue
         elif should_fail:
             seed_background_terminals(thread_id, turn_id)
-            emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": "failed"}}})
+            emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": "failed", "error": {"message": "injected turn failure"}}}})
         else:
             text = "x" * utility_output_bytes if utility_output_bytes > 0 else "utility complete"
             item = {"id": "item-" + str(turn_count), "type": "agentMessage", "phase": "final_answer", "text": text}

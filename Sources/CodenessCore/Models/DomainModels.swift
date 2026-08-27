@@ -257,48 +257,6 @@ public struct ModelSelection: Codable, Sendable, Equatable {
     }
 }
 
-public struct RepositoryModelDefaults: Codable, Sendable, Equatable {
-    public static let builtInDefaults = RepositoryModelDefaults(
-        implementer: .init(model: "gpt-5.6-sol", effort: "high"),
-        reviewer: .init(model: "gpt-5.6-sol", effort: "max"),
-        fixer: .init(model: "gpt-5.6-sol", effort: "high"),
-        handoff: .init(model: "gpt-5.6-luna", effort: "low")
-    )
-
-    public var implementer: ModelSelection
-    public var reviewer: ModelSelection
-    public var fixer: ModelSelection
-    public var handoff: ModelSelection
-
-    public init(
-        implementer: ModelSelection,
-        reviewer: ModelSelection,
-        fixer: ModelSelection,
-        handoff: ModelSelection
-    ) {
-        self.implementer = implementer
-        self.reviewer = reviewer
-        self.fixer = fixer
-        self.handoff = handoff
-    }
-
-    public init(settings: RepositorySettings) {
-        implementer = settings.implementer
-        reviewer = settings.reviewer
-        fixer = settings.fixer
-        handoff = settings.relay.selection
-    }
-
-    public func applying(to settings: RepositorySettings) -> RepositorySettings {
-        var result = settings
-        result.implementer = implementer
-        result.reviewer = reviewer
-        result.fixer = fixer
-        result.relay.selection = handoff
-        return result
-    }
-}
-
 public struct RelaySettings: Codable, Sendable, Equatable {
     public var apiKeyFile: String
     public var apiKeyName: String
@@ -653,6 +611,8 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
     public var agentTarget: AgentTarget?
     public var sessionLineage: Int?
     public var workflowHandoff: WorkflowHandoff?
+    public var liveTeamMember: LiveTeamMemberSnapshot?
+    public var coordinatorDecision: LiveTeamCoordinatorDecision?
     /// True when the full prompt and final output are stored in the per-run
     /// payload file instead of inline in workspace.json.
     public var externalPayload: Bool?
@@ -680,6 +640,8 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         agentTarget: AgentTarget? = nil,
         sessionLineage: Int? = nil,
         workflowHandoff: WorkflowHandoff? = nil,
+        liveTeamMember: LiveTeamMemberSnapshot? = nil,
+        coordinatorDecision: LiveTeamCoordinatorDecision? = nil,
         externalPayload: Bool? = nil
     ) {
         self.id = id
@@ -704,11 +666,14 @@ public struct RunRecord: Codable, Sendable, Equatable, Identifiable {
         self.agentTarget = agentTarget
         self.sessionLineage = sessionLineage
         self.workflowHandoff = workflowHandoff
+        self.liveTeamMember = liveTeamMember
+        self.coordinatorDecision = coordinatorDecision
         self.externalPayload = externalPayload
     }
 
     public var displayName: String {
-        workflowHandoff?.runLabel
+        coordinatorDecision?.runLabel
+            ?? workflowHandoff?.runLabel
             ?? workflowStep?.name
             ?? handoff?.runLabel
             ?? kind.displayName
@@ -749,6 +714,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
     public var workflowCursor: WorkflowCursor?
     public var workflowResumeCheckpoint: WorkflowResumeCheckpoint?
     public var stepSessions: [String: WorkflowSessionState]
+    public var liveTeam: LiveTeamState?
     public let createdAt: Date
     public var completedAt: Date?
 
@@ -767,6 +733,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         workflowCursor: WorkflowCursor? = nil,
         workflowResumeCheckpoint: WorkflowResumeCheckpoint? = nil,
         stepSessions: [String: WorkflowSessionState] = [:],
+        liveTeam: LiveTeamState? = nil,
         createdAt: Date = .now,
         completedAt: Date? = nil
     ) {
@@ -784,6 +751,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         self.workflowCursor = workflowCursor
         self.workflowResumeCheckpoint = workflowResumeCheckpoint
         self.stepSessions = stepSessions
+        self.liveTeam = liveTeam
         self.createdAt = createdAt
         self.completedAt = completedAt
     }
@@ -803,6 +771,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         case workflowCursor
         case workflowResumeCheckpoint
         case stepSessions
+        case liveTeam
         case createdAt
         case completedAt
     }
@@ -811,7 +780,10 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         goal = try container.decode(String.self, forKey: .goal)
-        prompts = try container.decode(ActivityPrompts.self, forKey: .prompts)
+        prompts = try container.decodeIfPresent(
+            ActivityPrompts.self,
+            forKey: .prompts
+        ) ?? .builtInDefaults
         status = try container.decodeIfPresent(ActivityStatus.self, forKey: .status) ?? .paused
         runs = try container.decodeIfPresent([RunRecord].self, forKey: .runs) ?? []
         pendingAction = try container.decodeIfPresent(PendingAction.self, forKey: .pendingAction)
@@ -838,6 +810,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
             [String: WorkflowSessionState].self,
             forKey: .stepSessions
         ) ?? [:]
+        liveTeam = try container.decodeIfPresent(LiveTeamState.self, forKey: .liveTeam)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
         completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
     }
@@ -846,12 +819,16 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(goal, forKey: .goal)
-        try container.encode(prompts, forKey: .prompts)
+        if liveTeam == nil || prompts != .builtInDefaults {
+            try container.encode(prompts, forKey: .prompts)
+        }
         try container.encode(status, forKey: .status)
         try container.encode(runs, forKey: .runs)
         try container.encodeIfPresent(pendingAction, forKey: .pendingAction)
         try container.encodeIfPresent(resumeCheckpoint, forKey: .resumeCheckpoint)
-        try container.encode(implementationClaimedComplete, forKey: .implementationClaimedComplete)
+        if implementationClaimedComplete {
+            try container.encode(true, forKey: .implementationClaimedComplete)
+        }
         if !goalAmendments.isEmpty {
             try container.encode(goalAmendments, forKey: .goalAmendments)
         }
@@ -862,6 +839,7 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
         if !stepSessions.isEmpty {
             try container.encode(stepSessions, forKey: .stepSessions)
         }
+        try container.encodeIfPresent(liveTeam, forKey: .liveTeam)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
     }
@@ -885,6 +863,36 @@ public struct ActivityConfigurationDraft: Codable, Sendable, Equatable {
         self.goal = goal
         self.prompts = prompts
         self.workflow = workflow
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case goal
+        case prompts
+        case workflow
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            goal: try container.decode(String.self, forKey: .goal),
+            prompts: try container.decodeIfPresent(
+                ActivityPrompts.self,
+                forKey: .prompts
+            ) ?? .builtInDefaults,
+            workflow: try container.decodeIfPresent(
+                WorkflowTemplate.self,
+                forKey: .workflow
+            )
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(goal, forKey: .goal)
+        if prompts != .builtInDefaults {
+            try container.encode(prompts, forKey: .prompts)
+        }
+        try container.encodeIfPresent(workflow, forKey: .workflow)
     }
 }
 
@@ -967,7 +975,9 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
         try container.encode(canonicalPath, forKey: .canonicalPath)
         try container.encodeIfPresent(implementerThreadID, forKey: .implementerThreadID)
         try container.encodeIfPresent(reviewerThreadID, forKey: .reviewerThreadID)
-        try container.encode(settings, forKey: .settings)
+        if settings != RepositorySettings() {
+            try container.encode(settings, forKey: .settings)
+        }
         try container.encodeIfPresent(activityDraft, forKey: .activityDraft)
         try container.encodeIfPresent(activity, forKey: .activity)
         if !legacyTasks.isEmpty {
@@ -986,7 +996,7 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
             if importedActivity.status == .running {
                 importedActivity.status = .paused
             }
-            if importedActivity.workflow != nil {
+            if importedActivity.workflow != nil || importedActivity.liveTeam != nil {
                 for stepID in importedActivity.stepSessions.keys {
                     guard var session = importedActivity.stepSessions[stepID] else { continue }
                     if session.providerSessionID != nil {
@@ -1012,6 +1022,7 @@ public struct RepositoryRecord: Codable, Sendable, Equatable, Identifiable {
         )
         relocated.legacyTasks = legacyTasks
         relocated.requiresFreshProviderSessions = relocatedActivity?.workflow == nil
+            && relocatedActivity?.liveTeam == nil
             && relocatedActivity.map {
                 $0.status == .running || $0.status == .paused
             } == true

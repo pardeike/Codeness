@@ -21,6 +21,62 @@ struct RunRecoveryPresentation: Equatable {
         guard let activity else { return nil }
 
         let message = Self.message(for: run)
+        if let liveTeam = activity.liveTeam {
+            let nextMemberName = liveTeam.checkpoint.flatMap {
+                liveTeam.currentDefinition?.member(id: $0.memberID)?.name
+            }
+            switch liveTeam.resumeCheckpoint {
+            case .recoverRun(let runID)? where runID == run.id:
+                guard activity.status == .paused else { return nil }
+                self.init(
+                    kind: .stepStopped,
+                    message: message,
+                    handoffText: nil,
+                    nextStepName: nextMemberName,
+                    isGenericWorkflow: false,
+                    canFinishWorkflow: false,
+                    isActionable: true
+                )
+            case .routeCompletedRun(let runID)? where runID == run.id:
+                guard activity.status == .paused else { return nil }
+                guard run.relayError?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                else { return nil }
+                self.init(
+                    kind: run.coordinatorDecision == nil ? .handoffFailed : .workflowPaused,
+                    message: message,
+                    handoffText: run.coordinatorDecision?.handoff,
+                    nextStepName: nextMemberName,
+                    isGenericWorkflow: false,
+                    canFinishWorkflow: false,
+                    isActionable: true
+                )
+            case .applyCoordinatorDecision(let runID)? where runID == run.id:
+                guard activity.status == .paused,
+                      let decision = run.coordinatorDecision else { return nil }
+                self.init(
+                    kind: .workflowPaused,
+                    message: message,
+                    handoffText: decision.handoff,
+                    nextStepName: nextMemberName,
+                    isGenericWorkflow: false,
+                    canFinishWorkflow: false,
+                    isActionable: true
+                )
+            default:
+                guard run.relayError?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                else { return nil }
+                self.init(
+                    kind: .historical,
+                    message: message,
+                    handoffText: nil,
+                    nextStepName: nil,
+                    isGenericWorkflow: false,
+                    canFinishWorkflow: false,
+                    isActionable: false
+                )
+            }
+            return
+        }
         if activity.workflow != nil {
             let context = Self.genericContext(activity: activity)
             switch activity.workflowResumeCheckpoint {
@@ -222,11 +278,11 @@ struct RunRecoveryPresentation: Equatable {
         }
         switch run.status {
         case .interrupted:
-            return "The step was stopped before it finished."
+            return "The turn was stopped before it finished."
         case .failed:
-            return "The step did not finish."
+            return "The turn did not finish."
         default:
-            return "The workflow needs attention before it can continue."
+            return "The activity needs attention before it can continue."
         }
     }
 }

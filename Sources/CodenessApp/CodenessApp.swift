@@ -112,7 +112,7 @@ private struct RepositoryWindowCommands: Commands {
             .disabled(!canChooseDetailLayout)
         }
 
-        CommandMenu("Workflow") {
+        CommandMenu("Activity") {
             Button(resumeOrPauseTitle) {
                 guard let coordinator = state.currentCoordinator,
                       let transport = workflowControls.transport else { return }
@@ -143,7 +143,7 @@ private struct RepositoryWindowCommands: Commands {
 
             Divider()
 
-            Button("Amend Goal…") {
+            Button("Change Goal…") {
                 state.requestGoalAmendment()
             }
             .disabled(state.currentCoordinator?.canAmendGoal != true)
@@ -153,12 +153,12 @@ private struct RepositoryWindowCommands: Commands {
             }
             .disabled(state.currentCoordinator?.canStartOver != true)
             .help(
-                "Archive the current activity and return to its editable Goal and workflow"
+                "Archive the current activity and return to its editable goal"
             )
 
             Divider()
 
-            Button("Show Current Run") {
+            Button("Show Current Turn") {
                 state.currentCoordinator?.selectLiveRun()
             }
             .keyboardShortcut("l", modifiers: [.command, .option])

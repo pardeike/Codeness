@@ -33,7 +33,7 @@ struct RunLiveStatusPresentationTests {
             )
         )
 
-        #expect(presentation.text == "Finishing this step, then pausing")
+        #expect(presentation.text == "Finishing this turn, then pausing")
         #expect(presentation.showsProgress)
         #expect(presentation.tone == .attention)
     }

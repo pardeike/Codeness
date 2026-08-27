@@ -39,7 +39,7 @@ struct RunLiveStatusPresentation: Equatable {
             tone = .active
         case .running where pauseAfterCurrent:
             text = WorkflowTransportControl.keepRunning.pauseNotice
-                ?? "Finishing this step, then pausing"
+                ?? "Finishing this turn, then pausing"
             showsProgress = true
             systemImage = nil
             tone = .attention

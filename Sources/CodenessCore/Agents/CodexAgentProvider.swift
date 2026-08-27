@@ -1264,7 +1264,22 @@ public actor CodexAgentProvider: AgentProviding {
                 } else if status == "interrupted" {
                     terminalEvent = .interrupted(nil)
                 } else {
-                    terminalEvent = .failed("Codex turn ended with status \(status).")
+                    let error = turn["error"]
+                    let message = error?["message"]?.stringValue?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let additionalDetails = error?["additionalDetails"]?.stringValue?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let details = [message, additionalDetails]
+                        .compactMap { detail in
+                            guard let detail, !detail.isEmpty else { return nil }
+                            return detail
+                        }
+                        .joined(separator: " ")
+                    terminalEvent = .failed(
+                        details.isEmpty
+                            ? "Codex turn ended with status \(status)."
+                            : "Codex turn ended with status \(status): \(details)"
+                    )
                 }
                 let wasCancelling = interruptionDebts[runID] != nil
                 let cancelledUtilitySession = wasCancelling

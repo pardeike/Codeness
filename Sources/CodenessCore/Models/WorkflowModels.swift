@@ -402,26 +402,6 @@ public struct WorkflowTemplate: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-public struct WorkflowCatalog: Codable, Equatable, Sendable {
-    public let schemaVersion: Int
-    public let defaultTemplateID: String
-    public let templates: [WorkflowTemplate]
-
-    public init(schemaVersion: Int, defaultTemplateID: String, templates: [WorkflowTemplate]) {
-        self.schemaVersion = schemaVersion
-        self.defaultTemplateID = defaultTemplateID
-        self.templates = templates
-    }
-
-    public var defaultTemplate: WorkflowTemplate? {
-        templates.first { $0.id == defaultTemplateID } ?? templates.first
-    }
-
-    public func template(id: String) -> WorkflowTemplate? {
-        templates.first { $0.id == id }
-    }
-}
-
 public struct WorkflowCursor: Codable, Equatable, Sendable {
     public var section: WorkflowSection
     public var stepIndex: Int
@@ -500,22 +480,5 @@ public struct WorkflowStepSnapshot: Codable, Equatable, Sendable {
         name = step.name
         section = step.section
         self.loopIteration = max(loopIteration, 1)
-    }
-}
-
-public enum WorkflowCatalogError: LocalizedError, Sendable {
-    case missingResource(String)
-    case unsupportedSchema(resource: String, version: Int)
-    case invalidCatalog(resource: String, detail: String)
-
-    public var errorDescription: String? {
-        switch self {
-        case .missingResource(let resource):
-            "Codeness could not find its bundled \(resource) resource."
-        case .unsupportedSchema(let resource, let version):
-            "\(resource) uses unsupported schema version \(version)."
-        case .invalidCatalog(let resource, let detail):
-            "\(resource) is invalid: \(detail)"
-        }
     }
 }

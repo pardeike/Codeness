@@ -40,7 +40,8 @@ struct RunDetailView: View {
     }
 
     private var recoveryPresentation: RunRecoveryPresentation? {
-        RunRecoveryPresentation(activity: coordinator.activity, run: run)
+        guard !coordinator.requiresLegacyConversion else { return nil }
+        return RunRecoveryPresentation(activity: coordinator.activity, run: run)
     }
 
     private var liveStatusPresentation: RunLiveStatusPresentation? {
@@ -55,12 +56,16 @@ struct RunDetailView: View {
     private var pausedWorkflowMessage: String? {
         guard let activity = coordinator.activity,
               activity.status == .paused,
-              activity.runs.last?.id == run.id,
-              case .perform? = activity.workflowResumeCheckpoint
-        else {
+              activity.runs.last?.id == run.id else {
             return nil
         }
-        return coordinator.statusMessage
+        if case .perform? = activity.liveTeam?.resumeCheckpoint {
+            return coordinator.statusMessage
+        }
+        if case .perform? = activity.workflowResumeCheckpoint {
+            return coordinator.statusMessage
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -118,8 +123,9 @@ struct RunDetailView: View {
                 coordinator.stopFollowingActiveProgress(for: run.id)
             }
         )
-        .accessibilityLabel("Run transcript")
-        .help("Select or scroll this run transcript; press Command-F to search it")
+        .modifier(TranscriptTopEdgeProtection())
+        .accessibilityLabel("Turn transcript")
+        .help("Select or scroll this turn transcript; press Command-F to search it")
     }
 
     private var effectiveScrollToEndRequest: Int {
@@ -193,10 +199,10 @@ struct RunDetailView: View {
             }
             .disabled(isAtBottom)
         } label: {
-            Label("Run Actions", systemImage: "ellipsis.circle")
+            Label("Turn Actions", systemImage: "ellipsis.circle")
         }
         .menuStyle(.borderlessButton)
-        .help("Choose transcript visibility and run actions")
+        .help("Choose transcript visibility and turn actions")
     }
 
     private var visibilityMenu: some View {
@@ -205,7 +211,7 @@ struct RunDetailView: View {
         } label: {
             Label("Show", systemImage: "line.3.horizontal.decrease.circle")
         }
-        .help("Choose which kinds of run history appear in every run detail")
+        .help("Choose which kinds of history appear in every turn detail")
     }
 
     @ViewBuilder
@@ -264,11 +270,24 @@ struct RunDetailView: View {
         if let effort = target.options.effort, !effort.isEmpty {
             values.append("\(effort.capitalized) effort")
         }
-        values.append(target.options.mode.displayName)
+        if target.options.mode != .standard {
+            values.append(target.options.mode.displayName)
+        }
         if target.options.speed == .fast {
             values.append("Fast")
         }
         return values.joined(separator: " · ") + durationText
+    }
+}
+
+private struct TranscriptTopEdgeProtection: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectStyle(.hard, for: .top)
+        } else {
+            content
+        }
     }
 }
 
@@ -458,7 +477,7 @@ private struct RunRecoveryView: View {
                 .buttonStyle(.borderedProminent)
                 .help(
                     presentation.isGenericWorkflow
-                        ? "Rerun this step in its existing agent session, falling back to a fresh session if needed"
+                        ? "Rerun this turn in its existing agent session, falling back to a fresh session if needed"
                         : "Prepare the handoff again"
                 )
                 Button("Continue Anyway…") {
@@ -480,10 +499,10 @@ private struct RunRecoveryView: View {
             if let nextStepName = presentation.nextStepName {
                 "Couldn’t prepare \(nextStepName)"
             } else {
-                "Couldn’t prepare the next step"
+                "Couldn’t prepare the next agent"
             }
         case .workflowPaused:
-            "Workflow needs attention"
+            "Activity needs attention"
         }
     }
 
@@ -493,7 +512,8 @@ private struct RunRecoveryView: View {
 
     private var manualHandoffText: String {
         (
-            run.workflowHandoff?.text
+            run.coordinatorDecision?.handoff
+                ?? run.workflowHandoff?.text
                 ?? run.handoff?.handoffText
                 ?? run.finalOutput
                 ?? ""
@@ -536,8 +556,8 @@ private struct ManualHandoffSheet: View {
 
             if presentation.isGenericWorkflow, presentation.canFinishWorkflow {
                 Picker("", selection: $completesWorkflow) {
-                    Text("Another Cycle").tag(false)
-                    Text("Finish Workflow").tag(true)
+                    Text("Another Round").tag(false)
+                    Text("Finish Activity").tag(true)
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
@@ -618,7 +638,8 @@ private struct ManualHandoffSheet: View {
 
     private func submit() {
         let text = handoffText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let label = run.workflowHandoff?.runLabel
+        let label = run.coordinatorDecision?.runLabel
+            ?? run.workflowHandoff?.runLabel
             ?? run.handoff?.runLabel
             ?? run.workflowStep?.name
             ?? run.kind.displayName
@@ -665,7 +686,7 @@ private struct RestartWorkflowStepButton: View {
             Label("Restart…", systemImage: "arrow.counterclockwise.circle")
         }
         .help(
-            "Rerun \(stepName) in a fresh agent session while preserving the repository and previous run history"
+            "Run \(stepName) again in a fresh agent session while preserving the repository and previous turn history"
         )
         .confirmationDialog(
             "Restart \(stepName) in a Fresh Session?",
@@ -680,7 +701,7 @@ private struct RestartWorkflowStepButton: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "The previous run and transcript remain in history. Repository files are not reverted; the fresh agent will inspect their current state before continuing."
+                "The previous turn and transcript remain in history. Repository files are not reverted; the fresh agent will inspect their current state before continuing."
             )
         }
     }

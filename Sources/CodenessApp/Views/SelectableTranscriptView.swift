@@ -35,7 +35,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
         textView.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
         textView.textColor = .textColor
         textView.backgroundColor = .textBackgroundColor
-        textView.toolTip = "Select or scroll this run transcript; press Command-F to search it"
+        textView.toolTip = "Select or scroll this turn transcript; press Command-F to search it"
         textView.textContainerInset = NSSize(width: 14, height: 12)
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true

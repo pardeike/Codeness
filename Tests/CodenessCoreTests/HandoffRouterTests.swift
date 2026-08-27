@@ -78,6 +78,8 @@ struct HandoffRouterTests {
         #expect(inputText.contains("Never return prose paragraphs or a single wall of text."))
         #expect(inputText.contains("at or below 120 words"))
         #expect(inputText.contains("each bullet at or below 20 words"))
+        #expect(inputText.contains("Handoffs are agent reports"))
+        #expect(inputText.contains("Attribute claims that a prohibited action did not occur"))
     }
 
     @Test
@@ -135,7 +137,7 @@ struct HandoffRouterTests {
         #expect(first.sourceSignature != revised.sourceSignature)
         #expect(
             first.sourceSignature
-                == "3cee7b5097313ce5343a6797f4d95fefa9b5fe96604b980c6c860a3e6dccc7af"
+                == "27a677e77c83c0839bce8a6a3eec302eea2faaf498730619e2c15f935b23c9f9"
         )
     }
 

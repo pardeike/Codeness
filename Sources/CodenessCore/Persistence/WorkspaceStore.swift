@@ -1180,7 +1180,19 @@ public actor WorkspaceStore: RepositoryWorkspaceStoring {
 
     private static func defaultRootURL() -> URL {
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return applicationSupport.appendingPathComponent("Codeness", isDirectory: true)
+        let configuredName = (Bundle.main.object(
+            forInfoDictionaryKey: "CodenessApplicationSupportDirectory"
+        ) as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = configuredName.flatMap { name -> String? in
+            guard !name.isEmpty,
+                  name != ".",
+                  name != "..",
+                  !name.contains("/"),
+                  !name.contains(":") else { return nil }
+            return name
+        } ?? "Codeness"
+        return applicationSupport.appendingPathComponent(safeName, isDirectory: true)
     }
 }
 

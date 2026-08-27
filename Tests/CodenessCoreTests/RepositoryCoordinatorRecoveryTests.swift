@@ -110,6 +110,99 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func completedPlanOutputIsRecoveredWithoutReplayingTheAgent() async throws {
+        let planTarget = AgentTarget(
+            providerID: .codex,
+            model: "gpt-5.6-sol",
+            options: .init(effort: "high", mode: .plan)
+        )
+        let member = LiveTeamMember(
+            id: "review",
+            name: "Review",
+            instructions: "Review without editing.",
+            target: planTarget,
+            runPolicy: .everyCycle,
+            sessionPolicy: .freshEveryRun
+        )
+        let definition = LiveTeamDefinition(
+            revision: 1,
+            workingGoal: "Deliver a verified app.",
+            members: [member],
+            coordinator: .init(target: planTarget, instructions: "Route local work."),
+            strategicReason: "Independent review is required."
+        )
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: 1,
+            cycle: 1,
+            sessionSlotID: "fresh:review:one"
+        )
+        let failedRun = RunRecord(
+            sequence: 1,
+            role: .reviewer,
+            kind: .review,
+            status: .failed,
+            threadID: "plan-thread",
+            turnID: "plan-turn",
+            model: planTarget.model,
+            effort: "high",
+            prompt: "Review the current app.",
+            transcript: RunTranscriptPresentation.storedText(
+                "\n\nPlan\nFix the disconnected objective, then refresh runtime evidence.\n",
+                section: .reasoning
+            ),
+            relayError: "Codex turn ended with status completed.",
+            completedAt: .now,
+            agentTarget: planTarget,
+            liveTeamMember: snapshot
+        )
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-plan-recovery-\(UUID().uuidString)",
+            activity: ActivityRecord(
+                goal: "Build the app.",
+                prompts: .builtInDefaults,
+                status: .paused,
+                runs: [failedRun],
+                stepSessions: [
+                    snapshot.sessionSlotID: WorkflowSessionState(
+                        stepID: snapshot.sessionSlotID,
+                        target: planTarget,
+                        providerSessionID: "plan-thread"
+                    )
+                ],
+                liveTeam: LiveTeamState(
+                    overseer: .init(target: planTarget, instructions: "Review strategy."),
+                    currentDefinition: definition,
+                    resumeCheckpoint: .recoverRun(failedRun.id),
+                    memberFailureCounts: [member.id: 1]
+                )
+            )
+        )
+        let harness = try await CoordinatorHarness(record: record)
+        defer { harness.remove() }
+
+        let recovered = try #require(harness.coordinator.record.activity)
+        let recoveredRun = try #require(recovered.runs.last)
+        #expect(recovered.status == .paused)
+        #expect(recoveredRun.status == .routing)
+        #expect(
+            recoveredRun.finalOutput
+                == "Fix the disconnected objective, then refresh runtime evidence."
+        )
+        #expect(recoveredRun.relayError == nil)
+        #expect(recovered.liveTeam?.resumeCheckpoint == .routeCompletedRun(failedRun.id))
+        #expect(recovered.liveTeam?.memberFailureCounts[member.id] == nil)
+        #expect(recovered.liveTeam?.overseer.target.options.mode == .standard)
+        #expect(recovered.liveTeam?.currentDefinition?.members.first?.target.options.mode == .standard)
+        #expect(recoveredRun.liveTeamMember?.member.target.options.mode == .standard)
+        #expect(recoveredRun.agentTarget?.options.mode == .plan)
+        #expect(recovered.stepSessions[snapshot.sessionSlotID]?.target.options.mode == .standard)
+        #expect(recovered.stepSessions[snapshot.sessionSlotID]?.providerSessionID == nil)
+        #expect(harness.coordinator.canResume)
+    }
+
+    @Test
     func workOverviewSummaryIsGeneratedOnceAndDurablyCachedForItsHandoffs() async throws {
         var completedRun = run(status: .completed, finalOutput: "Implemented parser")
         completedRun.handoff = HandoffEnvelope(

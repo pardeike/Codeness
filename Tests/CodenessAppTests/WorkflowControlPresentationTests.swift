@@ -13,7 +13,7 @@ struct WorkflowControlPresentationTests {
         #expect(WorkflowTransportControl.keepRunning.emphasis == .proceed)
         #expect(
             WorkflowTransportControl.keepRunning.pauseNotice
-                == "Finishing this step, then pausing"
+                == "Finishing this turn, then pausing"
         )
         #expect(WorkflowImmediateControl.stopCurrentStep.buttonTitle == "Stop Now")
     }

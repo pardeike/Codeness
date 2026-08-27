@@ -1,569 +1,245 @@
-# Live team redesign
+# Goal-directed orchestration
 
-Status: design proposal, not implemented
+Status: implemented in the isolated prototype; not deployed to `/Applications/Codeness.app`
 
-Origin: UnityBridge workflow intervention and follow-up review, 2026-08-27
-
-## Terms
-
-- **User goal:** The Board's fixed statement of success and authority.
-- **Working goal:** The Overseer's stable brief for the current strategic phase.
-- **Revision:** One saved version of the working goal, team, and session choices.
-- **Safe boundary:** The point after an active agent turn is durably finished and before another one starts.
-- **Session lineage:** The provider conversation history retained for future turns.
+Origin: UnityBridge intervention, 2026-08-27
 
 ## Decision
 
-Codeness should stop treating a workflow template as a frozen runtime program. A new activity starts with a user
-goal and no predefined steps. A strategic Overseer inspects the goal, repository, available agents, and Codeness
-state, then creates the first working goal and team.
+Codeness starts from one user goal instead of a predefined process. It prepares a working goal, chooses an ordered set of agents and their memory policies, routes each completed turn, reviews strategy periodically, and checks completion against the original goal.
 
-The operating model is deliberately similar to a small company:
+The user configures no template, role preset, or per-repository model matrix. Provider, model, cost, memory, and authority restrictions belong in the goal.
 
-```text
-Board                  Overseer                    Coordinator                  Team
-User goal and       -> Strategy, working goal,  -> Local flow, handoffs,    -> Step work
-authority              team, sessions, control     escalation                  and evidence
-```
+## Product language
 
-- The user is the Board. The user owns the fixed goal and grants authority.
-- The Overseer is the CEO and Controller. It sees the user goal, sets strategy, designs the team, chooses session
-  policy, audits progress, and confirms completion.
-- The Coordinator is the team's manager. It runs after each worker, evaluates local results, prepares handoffs,
-  and escalates strategic questions. It cannot redefine the work.
-- Each step is a team member with a bounded responsibility.
+The interface uses five connected terms:
 
-The user and Overseer can add, remove, move, or edit team members while work is paused or running. An active turn
-keeps the exact revision it started with. A new revision takes effect only at a safe boundary.
+- **Goal:** the user's definition of success, restrictions, and authority.
+- **Agents:** the editable set of bounded responsibilities Codeness prepared.
+- **Turn:** one agent execution.
+- **Round:** one pass through every recurring agent.
+- **Memory:** the provider conversation an agent retains, shares, or recreates.
 
-New activities do not use templates or presets. The legacy decoder and template UI remain temporarily so existing
-activities can recover and perform a one-time migration.
+The interface says **agent change**, not revision. It does not expose the internal strategic or local-routing roles. Codeness is the subject in explanations: “Codeness reviews the strategy,” “Codeness prepares the next handoff,” and “Codeness needs your direction.”
 
-This is a major persisted-workflow redesign. It should reuse existing providers, run records, routing,
-interruption, and recovery mechanisms, but it must not be implemented as one large replacement.
+Older source types retain names such as `LiveTeam*`, `member`, `cycle`, and `revision` for persisted compatibility. They are implementation vocabulary, not product copy. Old fixed-process types remain only to decode and adapt saved documents.
 
-## Why change it
+## Internal architecture
 
-The current template system starts workflows well and evolves them poorly.
+Two control agents have deliberately different authority. Their source names are retained here because this is an engineering document:
 
-A generic activity stores a complete `WorkflowTemplate`. Its cursor uses a section and array index. Codeness
-permits instruction and target changes only while paused, and `RepositoryCoordinator.updateWorkflowPreferences`
-rejects changes to workflow identity, names, sections, order, or membership through
-`sameFrozenWorkflowTopology`. These restrictions make an index-based scheduler recoverable, but they preserve an
-early organizational guess for the life of the activity.
-
-The UnityBridge activity showed the cost. It reached 515 runs with persistent Prepare, Plan, Code, and Review
-sessions. Product work was progressing, but repeated loops began improving a disposable audit verifier instead of
-UnityBridge. Useful progress resumed only after an external intervention:
-
-1. Pause at a durable checkpoint and quit Codeness.
-2. Edit `workspace.json` directly.
-3. Replace Prepare, Plan, Code, and Review with Deliver and Review.
-4. Assign new step IDs and clear the old session map.
-5. Compact the goal and repository state.
-6. Reopen while paused, verify recovery, and resume.
-
-The restart was safe, but the repair required knowledge of Codeness's private persistence format. Codeness should
-make the same strategic intervention ordinary, visible, and recoverable.
-
-Useful existing foundations include stable step IDs, explicit provider lineage, immutable run snapshots, durable
-recovery checkpoints, the pre-start workflow editor, and the paused workflow preference editor. The redesign
-changes ownership and scheduling identity around those foundations.
-
-## Authority model
-
-| Role | Sees | May decide | Must not decide |
+| Internal role | Responsibility | May change strategy? | Sees the user goal? |
 | --- | --- | --- | --- |
-| Board | Everything | User goal, authority, manual changes, approval policy | Agent implementation details unless desired |
-| Overseer | User goal, working goal, team, sessions, bounded evidence | Strategy, team structure, session policy, strategic revisions, completion | User-goal amendments or new external authority |
-| Coordinator | Working goal, current team, completed result, local history | Result label, next handoff, local retry or pause request, Overseer escalation | User goal, working-goal changes, team changes, session policy, completion |
-| Team member | Working goal, own instructions, current handoff | Work and evidence within its responsibility | Strategy, team design, or overall completion |
+| Overseer | Creates the working goal and agents, reviews strategy, audits completion | Yes | Yes |
+| Coordinator | Evaluates one completed turn and prepares the next local action | No | No |
+| Agent | Performs one bounded responsibility | No | No |
 
-Codeness enforces these boundaries through separate request and response schemas. Prompt wording alone is not an
-authority boundary.
+The Overseer acts like the strategic controller. It may change the working goal, agent order and responsibilities, targets, schedules, and memory policies. It cannot change the user goal or invent authority absent from it.
 
-The Overseer and Coordinator are separate invocations with separate prompts. Neither is a visible loop step. The
-Coordinator runs frequently. The Overseer intervenes at strategic boundaries.
+The Coordinator is the local manager. It receives the working goal, the completed result, bounded recent handoffs, and the proposed next agent. It may continue, retry once, pause, request a strategy review, or nominate completion. Its response schema contains no strategy edit or final-completion field.
 
-## Goals and prompt visibility
+This separation is the main feedback-loop control. Frequent local handoffs cannot repeatedly reinterpret the task. Strategy changes happen only in the less frequent control path that can compare evidence with the original goal.
 
-The user goal states what success means and what the activity is allowed to do. Agents cannot edit it. A user
-change creates a recorded Board amendment and triggers Overseer review before work continues.
+## Start
 
-Among agents, only the Overseer sees the full user goal. It creates a compact working goal that carries the current
-scope, success condition, priorities, and every task-specific authority boundary needed by the team. The Board can
-inspect the working goal and pin important constraints that the Overseer may not remove.
+The first screen contains one question, one goal editor, and Start. A short caption reminds the user to include provider, model, cost, or memory limits.
 
-The working goal is intentionally stable. The Coordinator cannot edit it. The Overseer normally changes it only
-when it changes the team, when the Board amends the user goal, or when a strategic milestone makes the old brief
-obsolete. A goal-only change is allowed, but it requires an explicit strategic reason and creates a revision.
+After Start:
 
-A team member receives:
+1. Codeness saves the goal.
+2. The Overseer creates the first working goal and smallest useful agent setup.
+3. Codeness validates and saves that entire setup before creating an agent session.
+4. The first eligible agent begins.
+
+Malformed control output leaves the activity paused with the goal intact. Codeness does not invent a fallback setup.
+
+The first control turn must choose a target before any model can interpret the goal. Codeness recognizes one unambiguous, non-negated provider or exact model identifier and uses it for that first turn. Otherwise it uses the first ready target. This is intentionally a small convenience, not a general language-policy parser.
+
+## Agent setup
+
+Each saved setup contains:
+
+- one working goal;
+- an ordered list of agents;
+- one target and bounded responsibility per agent;
+- a target and policy for local work routing;
+- a target for future strategy and completion reviews;
+- one schedule and one memory policy per agent;
+- a reason for the strategy; and
+- an identity-based checkpoint naming the next agent.
+
+Schedules are:
+
+- **Once:** retire after one accepted turn.
+- **Every round:** remain eligible on each subsequent pass.
+
+A completed Once agent becomes eligible again only if its own responsibility or the working goal changes. Unrelated agent changes do not replay it.
+
+## Normal operation
+
+After each agent turn, Codeness saves the result before asking for the next handoff. The local-routing decision is then saved before Codeness starts another turn. These are separate durability barriers.
+
+The normal path is:
 
 ```text
-WORKING GOAL
-The stable scope, success condition, and authority for this strategic phase.
-
-YOUR RESPONSIBILITY
-The step's instructions and stopping condition.
-
-HANDOFF
-The Coordinator's current local direction.
+agent turn
+    |
+    v
+saved result
+    |
+    v
+local routing: continue, retry, pause, strategy review, or completion check
+    |
+    v
+saved routing decision
+    |
+    v
+next agent turn or control review
 ```
 
-The Coordinator receives the working goal, team, active revision, completed result, bounded local history, and
-the next scheduled member. It never receives the user goal.
+One local retry is allowed. Repeated failure becomes strategy evidence rather than an unlimited retry loop.
 
-The Overseer receives the user goal, working goal, team, session state, bounded Coordinator decisions, durable
-work evidence, Board steering, and the strategic edit record. It judges strategy and completion against the user
-goal, not against its own working goal.
+## Strategy cadence and feedback limits
 
-## Starting without templates
+Strategy review occurs:
 
-Creating an activity asks for the user goal and starts with no working goal or team members. The Board does not
-choose a template.
+- at initial setup;
+- after the user changes the goal;
+- when the user requests it;
+- when local routing requests it;
+- after two failures by the same agent;
+- when no agent can run;
+- after three rounds or twelve agent turns, whichever comes first, provided ten minutes have passed since the previous strategy review; and
+- before completion.
 
-The Overseer runs in Bootstrap mode. It must return:
+Automatic strategy changes apply only between turns. A running turn retains the exact assignment, working goal, and memory binding it started with.
 
-- a nonempty working goal;
-- the smallest team that can make useful progress;
-- a Coordinator target and narrow local operating policy;
-- a bounded responsibility and stopping condition for each member;
-- whether each member runs once or every cycle;
-- an agent target and session policy for each member; and
-- a short explanation visible to the Board.
+Elapsed time is a cooldown, never a trigger. Codeness has no strategy-review timer. Fast rounds keep accumulating until the next turn boundary after the cooldown expires. A user request, goal change, repeated failure, unrunnable setup, or completion claim bypasses the periodic cooldown because waiting cannot improve those decisions. The round limit, turn limit, cooldown, repeated-failure threshold, and automatic-change limit are separate values in the internal orchestration policy; they are not another user-facing settings form.
 
-Codeness validates and saves that result as revision 1 before creating a worker session. Invalid output leaves the
-goal-only activity paused with Retry Overseer and Edit User Goal. There is no partial team or hidden fallback
-template.
+Codeness pauses after three automatic agent changes without durable progress. Durable progress currently means a repository change, accepted validation, a resolved blocker, or explicit user acknowledgment. These values are initial guardrails and should change only from observed activity data.
 
-The product ships one general Overseer policy rather than a catalog of workflow prompts. New activities may
-produce different teams because their goals and repositories differ. The saved revision and explanation make the
-decision inspectable and reproducible as activity history.
+A user edit always wins over an automatic proposal. Stale edits are rejected against the saved change sequence. The interface hides that sequence because users need the conflict behavior, not its storage mechanism.
 
-## Live team model
+## Memory choices
 
-An activity owns:
+| Product choice | Behavior | Normal use |
+| --- | --- | --- |
+| Own memory | Reuse one private provider conversation | Long-running implementation or specialist work |
+| Fresh every turn | Start a new conversation each time | Independent review or audit |
+| Shared memory | Reuse one conversation across compatible agents | Closely coupled responsibilities that benefit from shared context |
 
-- the versioned user goal;
-- any Board-pinned constraints that the working goal must preserve;
-- the current working goal;
-- one ordered list of team members;
-- one Coordinator target and narrow operating policy;
-- one Overseer target and strategic policy;
-- a session policy for every team member;
-- a current revision and at most one pending revision;
-- an identity-based scheduling checkpoint;
-- persistent and run-owned session slots; and
-- run and edit history recording what each agent actually saw.
+Shared memory requires the same provider and model. Autonomous agents always use normal execution mode because independent reviewers still need test, shell, and desktop-tool access. Codeness never merges, clones, or forks provider histories. Moving an agent into a shared group adopts that group's conversation. Moving it out starts a new private conversation.
 
-There are no Before Loop, Repeating Loop, or After Completion sections. Every member instead has one small run
-policy:
+Session-level instructions are role-neutral because several compatible agents may use one shared conversation. Every turn supplies the current agent name, responsibility, working goal, round, and handoff. Implementation and independent review do not share by default.
 
-```swift
-enum StepRunPolicy: Codable, Equatable {
-    case once
-    case everyCycle
-}
-```
-
-A Plan member can run once. Implement and Review can run every cycle. When final reporting becomes necessary, the
-Overseer can insert a one-time Finalize member. This preserves useful one-time work without restoring workflow
-sections or requiring the Overseer to remove a completed planning step.
-
-One illustrative persisted shape is:
-
-```swift
-struct LiveTeamDefinition: Codable, Equatable {
-    var revision: Int
-    var workingGoal: String
-    var members: [LiveTeamMember]
-}
-
-struct LiveTeamMember: Codable, Equatable, Identifiable {
-    let id: String
-    var name: String
-    var instructions: String
-    var target: AgentTarget
-    var runPolicy: StepRunPolicy
-    var sessionPolicy: SessionPolicy
-}
-
-enum SessionPolicy: Codable, Equatable {
-    case ownMemory
-    case sharedMemory(groupID: String)
-    case freshEveryRun
-}
-
-struct LiveTeamCheckpoint: Codable, Equatable {
-    var memberID: String
-    var cycle: Int
-    var revision: Int
-}
-```
-
-The names are illustrative. The contracts matter more than these exact types.
-
-## Normal operating cycle
-
-The Coordinator, not the Overseer, manages ordinary flow.
-
-1. Codeness launches the scheduled team member with the current durable revision.
-2. The member works and returns a local result with evidence.
-3. Codeness persists the completed run against its launch revision.
-4. Any accepted Board revision activates at the safe boundary.
-5. The Coordinator evaluates the result under the current working goal and team.
-6. The Coordinator returns a label, bounded handoff, and local disposition.
-7. Codeness either schedules the next eligible member, retries or pauses within policy, or invokes the Overseer.
-
-The Coordinator response is narrow:
-
-```swift
-enum CoordinatorDisposition: Codable, Equatable {
-    case continueTeam
-    case retryCurrent
-    case pause
-    case requestOversight
-    case completionCandidate
-}
-
-struct CoordinatorDecision: Codable, Equatable {
-    var handoff: String
-    var runLabel: String
-    var disposition: CoordinatorDisposition
-    var evidence: String
-}
-```
-
-The Coordinator may judge whether one member fulfilled its responsibility. It may request one bounded retry when
-the result is locally incomplete. It may pause on failure or ambiguity. It may signal that strategy should be
-reviewed or that the working goal appears complete.
-
-The Coordinator cannot return a working-goal update, team patch, session change, or final completion result. The
-schema rejects those fields. This keeps frequent local coordination from becoming frequent strategic mutation.
-
-## Overseer responsibilities
-
-The Overseer is the strategic control agent. It runs in a fresh, bounded invocation and reads durable Codeness
-state rather than accumulating an unbounded provider conversation.
-
-It runs:
-
-- once to Bootstrap a goal-only activity;
-- once to Migrate an older template activity;
-- after a Board amendment;
-- when the Board selects Review Strategy Now;
-- when the Coordinator requests oversight;
-- at a periodic control review;
-- when repeated failures or an unavailable agent make the team ineffective; and
-- whenever the Coordinator reports a completion candidate.
-
-In Strategic Review mode it may:
-
-- keep the current strategy unchanged;
-- update the working goal with a recorded reason;
-- add, remove, reorder, or rewrite team members;
-- change the Coordinator target or narrow local policy;
-- change run or session policy;
-- reset a session lineage;
-- insert a one-time member for a required milestone;
-- pause for Board direction; or
-- send the unchanged team back to the Coordinator.
-
-Each revision includes the problem observed, concrete evidence, expected improvement, and the revision it was
-based on. Codeness validates it through the same transaction used for Board edits.
-
-The Overseer policy is general:
-
-- create the smallest team that can make useful progress;
-- keep the working goal stable until strategy actually changes;
-- give every member one bounded responsibility and stopping condition;
-- preserve every user requirement and authority boundary;
-- use one-time members for one-time work;
-- remove or rewrite members whose output no longer changes a decision;
-- choose the least shared session policy that preserves useful context;
-- add a specialist only for a demonstrated missing responsibility;
-- judge completion only against the user goal and durable evidence; and
-- return no revision when the current team is working.
-
-The UnityBridge acceptance case is a strategic review. The Overseer should have recognized repeated
-procedure-only Review failures, replaced Prepare, Plan, Code, and Review with Deliver and Review, reset both
-lineages, compacted the working goal, and selected the reusable audit runner as the next bounded milestone. The
-Coordinator would then manage ordinary Deliver and Review handoffs without changing that strategy.
-
-## Intervention cadence
-
-The Coordinator runs after every worker. The Overseer does not.
-
-Codeness controls when automatic strategic changes are legal. The initial policy is intentionally small:
-
-- Run a periodic control review after three complete cycles or 12 worker turns without Overseer review, whichever
-  comes first.
-- Review earlier when the same member fails or remains blocked twice, an agent target becomes unavailable, the
-  Coordinator requests oversight, or a completion candidate appears.
-- Apply at most one automatic strategic revision per Overseer decision.
-- Require one complete cycle under a strategic revision before another automatic revision, unless the team is
-  unrunnable.
-- After three automatic strategic revisions without durable progress evidence, pause for the Board.
-- Allow Board edits and Review Strategy Now at any time.
-
-These numbers are provisional product defaults, not proven truths. Codeness should record review frequency,
-accepted and rejected proposals, undo rate, session resets, completion reversals, time, and token use. Real
-activities should determine whether the defaults change.
-
-A narrative claim by an agent is not enough to reset the no-progress counter. Codeness records the evidence used,
-such as a durable repository change, accepted validation, resolved blocker, or explicit Board acknowledgment.
-
-The first implementation does not need a semantic oscillation detector. The stable working goal, one-cycle
-minimum, three-revision ceiling, visible history, and Board undo provide understandable limits without another
-classifier.
+The two control roles use fresh bounded invocations. Their durable memory is Codeness state, not a long provider conversation.
 
 ## Completion
 
-The Coordinator cannot complete an activity. It can only report `completionCandidate`.
+Local routing can only nominate completion. Codeness then uses a fresh control invocation with the original goal and bounded durable evidence.
 
-Codeness then invokes the Overseer in fresh Completion Review mode. It receives the user goal, current strategy,
-bounded run evidence, repository status, known validation, unresolved blockers, and Coordinator rationale. It
-cannot modify the team during this invocation.
+The completion audit may:
 
-The Completion Review returns one of:
+- complete the activity;
+- continue work, which triggers a strategy review; or
+- pause for user direction.
 
-- `complete`, with evidence mapped to the user goal;
-- `continue`, which returns control to Strategic Review if the team needs adjustment; or
-- `pause`, when the Board must decide.
+The completion audit cannot edit the agents in the same response. This keeps “is the goal complete?” separate from “what setup should work next?”
 
-If completion requires a final report, cleanup, or release step, the Overseer does not weaken the goal or claim
-completion. It returns `continue`, then Strategic Review inserts the required one-time member. A later completion
-candidate starts a new fresh Completion Review.
+## Existing documents
 
-This separates team management, strategy, and acceptance. The same configured provider may fill these roles, but
-their prompts, state, and allowed responses remain distinct.
+Active documents from the fixed-process version adapt automatically on open:
 
-## Live edits and conflicts
+1. Codeness pauses scheduling.
+2. The old configuration, cursor, sessions, goal, and bounded evidence are supplied once to the strategic control path.
+3. Codeness validates and saves the resulting agents.
+4. The old active configuration fields are removed.
+5. The document remains paused for review or Resume.
 
-The Board can edit the live team at any time. The Overseer can propose changes only during its allowed modes. An
-active provider turn remains immutable.
+There is no migration choice, offer, or button. If no usable goal exists, Codeness asks only for the goal. A failed attempt preserves the old paused activity and Resume retries adaptation; it never falls back to new work through the old engine.
 
-Every edit contains a base revision. Codeness accepts it only when that base is still current. A stale edit is
-rejected and shown against the newer revision instead of being silently merged.
+An old conversation is retained only when the agent identity, responsibility, target, and Own-memory policy remain compatible. Completed and cancelled old activities remain readable history.
 
-Only one pending revision is stored, with these precedence rules:
+## Removed product surface
 
-- A Board edit may replace the Board's own pending edit after explicit confirmation.
-- An automatic Overseer proposal never replaces a pending Board edit.
-- If a Board edit arrives while an automatic proposal is pending, the Board chooses whether to discard or inspect
-  the proposal.
-- An automatic proposal based on an old revision is rejected.
-- Codeness never merges two provider histories or two structural patches.
+The prototype deletes:
 
-When a worker finishes, Codeness durably activates the accepted pending revision before asking the Coordinator to
-route the result. The Coordinator receives the completed run's immutable member snapshot and the active revision.
-If Strategic Review changes the team after that routing decision, Codeness asks the Coordinator to reconcile the
-handoff under the new revision before launching another worker.
+- built-in process JSON and its catalog loader;
+- process and prompt-template editors;
+- restore-built-in controls;
+- repository role/model presets;
+- process choice at activity start; and
+- migration buttons and persisted migration-request flags.
 
-Edit effects are explicit:
-
-| Edit | Active turn | Next safe boundary | Session effect |
-| --- | --- | --- | --- |
-| Rename or move member | Unchanged | Uses new definition | Preserved |
-| Change effort or speed | Unchanged | Uses new target | Preserved when supported |
-| Change instructions | Unchanged | Uses new instructions | Fresh lineage |
-| Change provider, model, or mode | Unchanged | Uses new target | Fresh lineage |
-| Change run or session policy | Unchanged | Uses new policy | Follows session rules |
-| Add member | Unchanged | Becomes eligible | Created when first used |
-| Remove inactive member | Unchanged | Removed | Released when no durable reference remains |
-| Remove active member | Allowed to finish | Scheduling restarts at first eligible member | Released after run and routing finish |
-
-## Session strategies
-
-Session persistence is a strategic choice for each team member:
-
-| Product name | Behavior | Typical use |
-| --- | --- | --- |
-| Own memory | One private persistent session across cycles | Stable implementer or specialist |
-| Shared memory | Several compatible members use one persistent session | Closely coupled work that repeatedly reconstructs the same context |
-| Fresh every run | Each execution starts without earlier provider conversation | Independent review, audit, or work biased by stale assumptions |
-
-Today's behavior maps to Own memory for every member. Fully independent persistent members each use Own memory.
-All members can share by joining one Shared-memory group.
-
-Persistent state belongs to session slots rather than directly to member IDs. An Own-memory slot derives from one
-member ID. A Shared-memory slot has a stable Codeness-generated group ID. A Fresh execution owns temporary session
-state long enough to support interruption and crash recovery, then releases it after its run and Coordinator
-handoff are durable.
-
-The hard rules are:
-
-- Shared members must use a compatible provider, model, and mode.
-- Creating a shared group starts fresh. Codeness never merges existing histories.
-- Joining an existing group adopts its lineage at the next execution.
-- Leaving a group starts a fresh private lineage. Codeness never pretends to fork a conversation.
-- Changing instructions or execution identity resets the affected Own lineage.
-- Changing one Shared member's instructions resets the shared lineage unless the same revision first moves that
-  member out of the group.
-- Removing one member does not release a shared slot while another member or recoverable run references it.
-- Import preserves member IDs, group IDs, policies, and revisions but clears machine-local provider session IDs.
-- Loaded-session admission counts distinct persistent slots plus an active Fresh slot, not team members.
-
-Own memory is the default. Fresh every run should be the normal choice for independent Review. The Overseer may
-choose Shared memory only when roles are compatible and repeated evidence shows that context reconstruction is
-wasteful. It must not automatically share implementation and independent Review.
-
-The persisted model should support all three strategies, but delivery should be staged. Own and Fresh come first.
-Shared memory remains manual or experimental until provider-specific tests prove reliable role switching.
-
-The Overseer and Coordinator use fresh bounded control invocations in the first design. Codeness's durable state is
-their memory. A persistent Coordinator session can be considered later only if real usage shows that reconstructing
-local flow is costly.
+The Settings window now contains only agent-provider discovery, the optional OpenAI-compatible endpoint, and transcript presentation.
 
 ## Persistence and recovery
 
-The redesign must preserve these guarantees:
+- A turn owns an immutable launch setup, agent snapshot, working goal, and memory binding.
+- A pending user or automatic change becomes authoritative only after it is saved.
+- A crash during a turn recovers against that turn's launch snapshot.
+- A removed active agent may finish because its running turn owns the old snapshot.
+- Provider sessions are released only when no saved turn, checkpoint, or agent references them.
+- Codeness never silently combines two saved setups or provider histories.
+- Reopening active work pauses it until the user resumes.
 
-- A run owns an immutable member snapshot, session binding, working goal, and launch revision.
-- Codeness acknowledges an edit only after the pending revision is durable.
-- A crash before revision persistence leaves the previous revision authoritative.
-- A crash during a run recovers that run against its launch revision.
-- A pending revision remains pending until the run reaches a terminal state.
-- A removed active member can recover because the run owns its snapshot.
-- A Coordinator retry uses the revision that was active at its routing boundary.
-- Strategic Review rerouting cannot reuse a stale Coordinator handoff.
-- Provider sessions are released only after no durable run, checkpoint, or member references them.
-- One-step undo restores the previous definition, not a provider conversation already released under its rules.
+New goal-only records omit irrelevant legacy prompt defaults and false completion fields. Existing saved control text is normalized on load so old internal role names do not leak back into the interface. User goals and agent results are never rewritten.
 
-Keep a small append-only edit record with revision, time, actor, operation summary, evidence, and reason. Actors
-are `board`, `overseer`, and `migration`. Run history records the exact definition each agent saw. Do not create a
-general event-sourcing system or store a full team copy for every run.
+## Isolated prototype
 
-## User interface
+The development build is deliberately separate from production:
 
-The activity window should make the hierarchy visible without turning it into an organization chart.
+- app: `/Applications/Codeness Prototype.app`;
+- bundle ID: `ap.codeness.prototype`;
+- state: `/Users/ap/Library/Application Support/Codeness Prototype`; and
+- no `.codeness` document registration.
 
-Show:
+The prototype build script refuses to replace the app while it is running. The production app and `/Users/ap/Library/Application Support/Codeness` were not rebuilt, quit, edited, or relaunched during prototype work.
 
-- the Board's user goal;
-- the Overseer's current working goal and last strategic reason;
-- the ordered team with once or every-cycle policy;
-- the Coordinator and current local handoff;
-- each member's target and Own, Shared, or Fresh session choice;
-- active and pending revision state;
-- Review Strategy Now and Review Changes First controls;
-- one-step undo; and
-- compact strategic edit history.
+## Demo evidence
 
-Ordinary users should see a simple team list. Run and session policy live in an advanced disclosure.
+The first goal-only demo asked for a native Go maze-chase game while leaving the graphics library open and restricting every Codeness agent to Codex `gpt-5.6-terra`.
 
-Saving during a run should say which revision the active member keeps and when the pending revision starts.
-Removing the active member should say that its current turn finishes and scheduling restarts at the first eligible
-member. Joining or resetting a Shared-memory group must name every affected member and whether existing context is
-released.
+The builder selected Ebitengine, implemented the app and deterministic logic tests, built a native Apple-silicon bundle, and launched it. A fresh reviewer found a real defect the builder missed: one enemy started inside a wall. It fixed the start tile, added a regression test, reran focused and full Go tests, rebuilt, and relaunched the app. Local routing nominated completion and a fresh completion audit accepted it.
 
-## Migration
+The automated evidence was independently rechecked: `go test ./...`, race detection, `go vet`, and `make build` passed. A native 640×682 macOS window was observed and then quit. Keyboard movement and complete win, loss, and restart interaction were not manually proved.
 
-Migration is one Overseer intervention, not a fixed mapping from old sections to new members.
+The test found four important weaknesses:
 
-At a durable paused boundary, Codeness invokes Migrate mode once with:
+1. The initial structured-output schema made a nullable field optional instead of required-with-null. Codex rejected it correctly. The schema and error propagation are fixed and tested.
+2. The first prototype had a hidden Terra preference for the initial control turn. Every saved target happened to use Terra, but that did not prove the goal caused the choice. The hidden default was removed and explicit, negated, and absent-model cases are tested.
+3. The builder contacted the public Go module proxy despite “do not use external services” and omitted that fact from its report. Prompts now demand disclosure and positive evidence for prohibitions, but this remains soft enforcement.
+4. A later read-only compliance agent could not inspect Codeness's own target and session records. It correctly refused to certify Terra-only history or absence of publication. A bounded read-only control-evidence surface remains future work.
 
-- the user goal and amendments;
-- old template, cursor, and recovery checkpoint;
-- step IDs, targets, lineages, and established sessions;
-- bounded recent runs, handoffs, failures, steering, and usage;
-- repository and activity status; and
-- pending Board changes.
+A manual strategy review then replaced the completed builder and reviewer with one fresh compliance agent, proving that the agent setup can change substantially without a template. That review also found and fixed a decoding issue: Keep and Pause now ignore stray strategy fields; only an explicit strategy-change action can alter the setup.
 
-The Overseer returns a working goal and complete live team revision. It may preserve an old step ID and Own-memory
-lineage only when responsibility and execution identity remain compatible. Combining, splitting, rewriting, or
-forming a new shared group starts fresh lineages. Migration never merges provider sessions.
+A second demo deliberately reused the same 2D repository with a new, ambiguous “make it 3D” goal. Codeness expanded the goal into genuine real-time 3D acceptance criteria and chose a persistent build agent plus a fresh independent reviewer. The builder replaced the flat presentation with a perspective renderer, built a native bundle, and successfully used BrrainzTools to launch and interact with it. This proves that ordinary prototype agent sessions received the expected shell environment and desktop tooling.
 
-Codeness validates the answer, maps the identity-based checkpoint, writes one migration record, and swaps runtime
-state in one transaction. Existing runs and transcripts remain unchanged. Failure leaves the old activity paused
-and authoritative.
+The independent reviewer then exposed two Codeness defects. It was assigned Codex Plan mode, which made the turn read-only and prevented Go from creating work directories, GUI launch from obtaining a usable window context, and `command -v brrainztools` from finding the desktop tool. This was not a shell-setup regression: the prototype App Server had `/Users/ap/Scripts` on `PATH`, and the standard-mode builder used the same BrrainzTools executable successfully. Autonomous target selection and editing now omit Plan mode, saved active Plan targets normalize to Standard, and their read-only provider sessions are discarded before reuse.
 
-A running activity offers Convert After Current. A paused activity offers Convert Now. Start Over creates a new
-goal-only activity and lets Bootstrap design it. The legacy catalog can be deleted after migrated activity recovery
-and retained legacy fixtures no longer require it.
+Codex nevertheless completed the review as a `plan` item and found a concrete unreachable objective tile. Codeness had accepted only final agent messages, so it displayed the completed review as Failed with “Codex turn ended with status completed.” Plan items are now accepted as terminal output when no agent message exists. The exact persisted failure shape repairs on open to a paused, handoff-pending result without replaying the reviewer or hiding the finding.
 
-## Honest risks and deliberate choices
+The user's pause did succeed: the activity and pause flag were durable and no turn remained active. The misleading Failed badge came from terminal-output classification, not from continued work. The 3D goal remains incomplete because the review found a real game defect and current-bundle interaction evidence was stale. That is a valid review outcome, not a failed review turn.
 
-This design is better suited to long autonomous work than frozen templates, but it is more powerful and less
-predictable. Its safeguards must live in Codeness, not only in prompts.
+## Honest assessment
 
-The main risks are:
+Removing predefined processes is the right product direction. It makes Codeness simpler to start, lets long work adapt, and turns the successful UnityBridge intervention into a normal capability. Separating strategic control from local routing is essential; without it, every handoff could rewrite strategy and create a feedback loop.
 
-- The Overseer can translate the user goal poorly. Stable working goals, Board-visible constraints, fresh
-  Completion Review, and manual override reduce this risk but do not eliminate it.
-- Automatic strategy can churn. Separate Coordinator and Overseer roles, revision conflicts, one-cycle minimum,
-  and a three-revision ceiling bound the damage.
-- Shared context can erase independent judgment. Own and Fresh are safe defaults; Shared is staged and never the
-  automatic Implement plus Review choice.
-- Bootstrap is nondeterministic. Saved revisions make decisions inspectable, but identical goals may produce
-  different teams.
-- Migration and live editing touch persistence, recovery, sessions, and UI. This is a major rewrite and must ship
-  in recoverable slices.
+The current prototype is not ready to replace production without further work:
 
-The design deliberately keeps one ordered team instead of adding branches, dependencies, nested loops, parallel
-execution, or a visual graph. A one-time run policy covers setup and finalization without recreating workflow
-sections.
+- Model, authority, and action restrictions are mostly natural-language policy. The first-target selector handles only one clear provider or exact model. Important prohibitions still need independently observable evidence or hard enforcement.
+- An ambiguous goal can be expanded aggressively. The 3D demo working goal added audio, settings, menus, icon, packaging, and exhaustive interaction checks from “everything such an app should have.” That may be sensible, but it also shows how easily Codeness can manufacture scope.
+- A poor strategic controller can choose too many agents, the wrong working goal, or needless reviews. Change history and churn limits make this visible but do not remove judgment risk.
+- Round-based review can still be too frequent when agents finish almost instantly. A ten-minute cooldown now rate-limits only automatic periodic review; the useful value needs measurement from real runs.
+- Control invocations add cost even for one-agent tasks.
+- The first demo's two worker sessions reported roughly 902,000 and 579,000 cumulative tokens. Much of that is provider-global context, skills, and tool history rather than Codeness handoffs. Dynamic agents do not solve provider-level context loading.
+- Saved decisions improve explainability, but the same goal can still produce a different setup on another run.
+- Shared memory weakens independence and should remain rare.
+- `RepositoryCoordinator.swift` has absorbed too much live-orchestration logic. The prototype works, but this file should be split by responsibility before production adoption.
+- The UI overlap reported on the second demo came from the transcript's macOS scroll-edge material covering its header. The isolated prototype now applies a hard top edge, matching the sidebar. Live capture of the rebuilt app shows the complete turn header unobscured, while the repaired review appears as a paused, handoff-pending result rather than a failure.
 
-## Implementation sequence
-
-1. Add pure models and transition tests for user goal, working goal, live team revision, run policy, identity-based
-   checkpoint, and stale-edit rejection. Keep existing activities unchanged.
-2. Split Coordinator and Overseer request and response schemas. Prove that only the Overseer receives the user goal
-   and that the Coordinator cannot return strategic fields.
-3. Add goal-only Bootstrap and Board-visible revision 1. Keep automatic strategic editing off.
-4. Add identity-based scheduling, once and every-cycle members, safe live Board edits, human precedence, recovery,
-   and Coordinator rerouting after a revision.
-5. Add Own memory, Fresh every run, explicit reset, slot admission, and delayed release.
-6. Add completion candidates and fresh Completion Review.
-7. Add automatic Strategic Review with the small cadence limits and Review Changes First.
-8. Add one-shot migration for legacy activities and stop offering templates for new activities.
-9. Add Shared memory as a manual experiment, then allow Overseer selection only after provider-specific evidence.
-10. Remove legacy catalog code after migration and retained recovery fixtures no longer need it.
-
-Each stage must survive focused interruption, persistence failure, routing retry, restart, and export or import
-tests before the next stage changes authority.
-
-## Acceptance scenarios
-
-Focused tests must prove at least these cases:
-
-- Bootstrap a goal-only activity. Only the Overseer request contains the user goal. Revision 1 is durable before a
-  worker session exists.
-- Reject invalid Bootstrap output without creating a partial team or session.
-- Run several Coordinator handoffs without changing the working goal or revision.
-- Reject a Coordinator response containing a working goal, team patch, session change, or final completion.
-- Accept a Board edit while a worker runs. The active run stays unchanged and the new revision activates before
-  the Coordinator routes it.
-- Reject a stale Overseer proposal and never replace a pending Board revision automatically.
-- Run a one-time Plan member once while repeating members continue across cycles.
-- Remove the active member, quit during execution, recover, route under the active revision, and continue at the
-  first eligible member.
-- Report a completion candidate. A fresh Completion Review checks the user goal and either completes, continues,
-  or pauses.
-- Run Own-memory and Fresh-every-run members through interruption and restart without leaking or losing the active
-  lineage.
-- Form a compatible Shared group without selecting either prior history as its seed. Reject incompatible members.
-- Change one Shared member's instructions and reset the full group unless the revision first moves it out.
-- Reach periodic and early Strategic Review. Apply at most one revision and pause after the configured no-progress
-  ceiling.
-- Migrate an old activity from its old configuration and bounded overall state exactly once. Failure leaves the old
-  paused state authoritative.
-- Reproduce the UnityBridge four-member to two-member intervention without editing private files or losing its 515
-  prior runs.
+The highest-value next work is not more configuration. It is better evidence: a small read-only activity record for audit agents, measured strategy-review outcomes, and hard enforcement only for restrictions that repeatedly prove too important for prompt interpretation.
 
 ## Non-goals
 
-Do not add a workflow graph, arbitrary conditions, nested loops, parallel execution, a prompt language, or
-arbitrary agent code execution as part of this redesign.
-
-Do not let the Coordinator make strategic changes or let the Overseer manage every handoff.
-
-Do not mutate a provider turn already in flight. Editable while running means a revision can be saved immediately
-with a clear activation boundary.
-
-Do not merge, clone, or fork provider histories. Transcripts remain the durable evidence used to rebuild context
-when a new lineage starts.
-
-Do not present the cadence constants as permanent truths. They are safe initial limits to be revised from real
-activity evidence.
+This prototype does not add parallel agents, branches, dependency graphs, nested loops, a visual graph editor, a prompt language, or arbitrary agent code. One ordered set of agents with Once and Every-round schedules is enough to test the core design.

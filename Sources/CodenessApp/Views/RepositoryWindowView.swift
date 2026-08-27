@@ -71,8 +71,13 @@ struct RepositoryWindowView: View {
         .toolbar { toolbarContent }
         .toolbar(removing: .sidebarToggle)
         .sheet(isPresented: $showsSettings) {
-            RepositorySettingsSheet(coordinator: coordinator)
+            if let definition = coordinator.liveTeamDefinition {
+                LiveTeamEditorSheet(
+                    coordinator: coordinator,
+                    definition: definition
+                )
                 .environment(application)
+            }
         }
         .sheet(isPresented: $showsGoalAmendment) {
             GoalAmendmentSheet(coordinator: coordinator)
@@ -82,6 +87,12 @@ struct RepositoryWindowView: View {
                 ServerInteractionSheet(coordinator: coordinator, interaction: interaction)
                     .id(interaction.id.encodedString())
             }
+        }
+        .alert("Direction Required", isPresented: boardDirectionBinding) {
+            Button("OK") { coordinator.clearBoardDirectionMessage() }
+                .help("Dismiss this request")
+        } message: {
+            Text(coordinator.boardDirectionMessage ?? "Codeness needs your direction.")
         }
         .alert("Repository Error", isPresented: coordinatorErrorBinding) {
             Button("OK") { coordinator.clearError() }
@@ -103,9 +114,7 @@ struct RepositoryWindowView: View {
             }
             .help("Archive the current Codeness activity and return to editable configuration")
         } message: {
-            Text(
-                "Codeness will archive the current activity under Application Support, copy its goal and workflow into editable fields, and discard its old agent sessions. Repository files will not be changed."
-            )
+            Text(startOverExplanation)
         }
         .onChange(of: commandState.steerFocusRequest) {
             guard commandState.steerFocusTargetPath == coordinator.record.canonicalPath,
@@ -124,23 +133,17 @@ struct RepositoryWindowView: View {
         }
     }
 
+    private var startOverExplanation: String {
+        "Codeness will archive the current activity under Application Support, keep its goal as the next editable draft, and discard its old agent sessions. Repository files will not be changed."
+    }
+
     @ViewBuilder
     private var detailContent: some View {
         if coordinator.activity == nil {
-            if let workflow = coordinator.record.activityDraft?.workflow
-                ?? application.workflowCatalog.defaultTemplate {
-                ActivityConfigurationView(
-                    coordinator: coordinator,
-                    suggestedGoal: coordinator.record.activityDraft?.goal ?? "",
-                    suggestedWorkflow: workflow
-                )
-            } else {
-                ContentUnavailableView(
-                    "Workflows Unavailable",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text("Restore the bundled workflow resources, then reopen this repository.")
-                )
-            }
+            ActivityConfigurationView(
+                coordinator: coordinator,
+                suggestedGoal: coordinator.record.activityDraft?.goal ?? ""
+            )
         } else if let run = coordinator.selectedRun {
             RunDetailView(coordinator: coordinator, run: run)
                 .id(run.id)
@@ -202,8 +205,8 @@ struct RepositoryWindowView: View {
                                     .tag(run.id)
                                     .id(run.id)
                                     .help(
-                                        "Show \(run.displayName) "
-                                            + "(\(run.status.displayName.lowercased())) transcript"
+                                        "Show the \(run.displayName) turn "
+                                            + "(\(run.status.displayName.lowercased()))"
                                     )
                                 }
                             } header: {
@@ -357,21 +360,23 @@ struct RepositoryWindowView: View {
                     columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
                 } label: {
                     Label(
-                        columnVisibility == .detailOnly ? "Show Run List" : "Hide Run List",
+                        columnVisibility == .detailOnly ? "Show Turn List" : "Hide Turn List",
                         systemImage: "list.bullet"
                     )
                 }
-                .help(columnVisibility == .detailOnly ? "Show run list" : "Hide run list")
+                .help(columnVisibility == .detailOnly ? "Show turn list" : "Hide turn list")
             }
         }
 
-        ToolbarItem(placement: .navigation) {
-            Button {
-                showsSettings = true
-            } label: {
-                Label("Workflow Preferences", systemImage: "gearshape")
+        if coordinator.liveTeamDefinition != nil {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    showsSettings = true
+                } label: {
+                    Label("Edit Agents", systemImage: "person.3.sequence")
+                }
+                .help("Inspect or change the working goal, agents, and memory policies")
             }
-            .help("Configure agent targets for future workflow steps")
         }
     }
 
@@ -380,9 +385,9 @@ struct RepositoryWindowView: View {
             Circle()
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
-                .help("Workflow status: \(coordinator.statusMessage)")
+                .help("Activity status: \(coordinator.statusMessage)")
             Text(coordinator.statusMessage)
-                .help("Workflow status: \(coordinator.statusMessage)")
+                .help("Activity status: \(coordinator.statusMessage)")
             Spacer()
             Text("Codex: \(application.serverState.label)")
                 .help("Codex status: \(application.serverState.label)")
@@ -420,6 +425,13 @@ struct RepositoryWindowView: View {
         Binding(
             get: { coordinator.errorMessage != nil },
             set: { if !$0 { coordinator.clearError() } }
+        )
+    }
+
+    private var boardDirectionBinding: Binding<Bool> {
+        Binding(
+            get: { coordinator.boardDirectionMessage != nil },
+            set: { if !$0 { coordinator.clearBoardDirectionMessage() } }
         )
     }
 
@@ -556,8 +568,8 @@ private struct RunRow: View {
                     if isActive {
                         ProgressView()
                             .controlSize(.mini)
-                            .accessibilityLabel("Active run")
-                            .help("This is the currently active run")
+                            .accessibilityLabel("Active turn")
+                            .help("This is the currently active turn")
                     }
                 }
                 HStack(spacing: 5) {

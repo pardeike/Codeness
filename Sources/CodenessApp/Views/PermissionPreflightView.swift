@@ -140,7 +140,7 @@ struct PermissionPreflightView: View {
             .foregroundStyle(.secondary)
 
             Label(
-                "If System Settings asks to reopen Codeness, do that before starting an unsupervised workflow.",
+                "If System Settings asks to reopen Codeness, do that before starting an unsupervised activity.",
                 systemImage: "arrow.clockwise"
             )
             .font(.callout)

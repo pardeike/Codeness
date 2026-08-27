@@ -140,7 +140,7 @@ private final class SettingsWindowDelegateProxy: NSObject, NSWindowDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Save changes before closing Settings?"
-        alert.informativeText = "Your workflow, transcript, and executable-path changes have not been saved."
+        alert.informativeText = "Your provider and transcript changes have not been saved."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Discard Changes")
         alert.addButton(withTitle: "Cancel")

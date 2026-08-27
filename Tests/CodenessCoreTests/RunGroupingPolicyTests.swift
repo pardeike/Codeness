@@ -43,8 +43,8 @@ struct RunGroupingPolicyTests {
 
         #expect(groups.map(\.title) == [
             "Before Loop",
-            "Cycle 1",
-            "Cycle 2",
+            "Round 1",
+            "Round 2",
             "After Completion"
         ])
         #expect(groups.map { $0.runs.map(\.sequence) } == [

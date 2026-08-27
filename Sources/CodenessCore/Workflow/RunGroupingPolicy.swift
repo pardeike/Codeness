@@ -27,7 +27,7 @@ public struct RunWorkUnit: Sendable, Equatable, Identifiable {
         case .prefix:
             "Before Loop"
         case .loop(let iteration):
-            "Cycle \(iteration)"
+            "Round \(iteration)"
         case .postfix:
             "After Completion"
         }

@@ -1771,33 +1771,6 @@ struct WorkspaceStoreTests {
     }
 
     @Test
-    func newWorkspaceUsesProvidedModelDefaultsWithoutReplacingOtherSettings() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = WorkspaceStore(rootURL: root)
-        let defaults = RepositoryModelDefaults(
-            implementer: .init(model: "implement-model", effort: "medium"),
-            reviewer: .init(model: "review-model", effort: "max"),
-            fixer: .init(model: "fix-model", effort: "high"),
-            handoff: .init(model: "handoff-model", effort: "low")
-        )
-        let base = RepositorySettings(
-            relay: RelaySettings(apiKeyFile: "/keys.json", apiKeyName: "KEY")
-        )
-        let expected = defaults.applying(to: base)
-
-        let loaded = try await store.load(
-            canonicalPath: "/tmp/new-repository",
-            defaultSettings: expected
-        )
-
-        #expect(loaded.settings == expected)
-        #expect(loaded.settings.relay.apiKeyFile == "/keys.json")
-        #expect(loaded.settings.relay.apiKeyName == "KEY")
-    }
-
-    @Test
     func persistedWorkspaceSettingsWinOverChangedGlobalDefaults() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

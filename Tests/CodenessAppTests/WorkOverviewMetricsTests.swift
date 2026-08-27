@@ -5,6 +5,87 @@ import CodenessCore
 
 struct WorkOverviewMetricsTests {
     @Test
+    func liveTeamMetricsAggregateByMemberIdentityAndCountCycles() throws {
+        let startedAt = Date(timeIntervalSince1970: 30_000)
+        let target = AgentTarget(providerID: .codex, model: "gpt-live")
+        let deliver = LiveTeamMember(
+            id: "deliver",
+            name: "Deliver",
+            instructions: "Deliver a bounded unit.",
+            target: target,
+            runPolicy: .everyCycle,
+            sessionPolicy: .ownMemory
+        )
+        let review = LiveTeamMember(
+            id: "review",
+            name: "Review",
+            instructions: "Review independently.",
+            target: target,
+            runPolicy: .everyCycle,
+            sessionPolicy: .freshEveryRun
+        )
+        let definition = LiveTeamDefinition(
+            revision: 2,
+            workingGoal: "Deliver and review the bounded result.",
+            members: [deliver, review],
+            coordinator: .init(target: target, instructions: "Route local work."),
+            strategicReason: "Delivery and independent review are both required."
+        )
+        let liveRun: (Int, LiveTeamMember, Int) -> RunRecord = { sequence, member, cycle in
+            RunRecord(
+                sequence: sequence,
+                role: member.id == "review" ? .reviewer : .implementer,
+                kind: member.id == "review" ? .review : .implementation,
+                status: .completed,
+                threadID: "session-\(sequence)",
+                model: target.model,
+                effort: "high",
+                prompt: member.instructions,
+                startedAt: startedAt,
+                durationMilliseconds: 1_000,
+                tokenUsage: .init(totalTokens: 10, inputTokens: 8, outputTokens: 2),
+                liveTeamMember: .init(
+                    member: member,
+                    workingGoal: definition.workingGoal,
+                    revision: definition.revision,
+                    cycle: cycle,
+                    sessionSlotID: member.sessionPolicy.persistentSlotID(memberID: member.id)
+                        ?? "fresh:\(member.id):\(sequence)"
+                )
+            )
+        }
+        let activity = ActivityRecord(
+            goal: "Board goal",
+            prompts: .builtInDefaults,
+            status: .running,
+            runs: [
+                liveRun(1, deliver, 1),
+                liveRun(2, review, 1),
+                liveRun(3, deliver, 2)
+            ],
+            liveTeam: LiveTeamState(
+                overseer: .init(target: target, instructions: "Control strategy."),
+                currentDefinition: definition
+            ),
+            createdAt: startedAt
+        )
+
+        let metrics = WorkOverviewMetrics(
+            activity: activity,
+            repositoryUpdatedAt: startedAt,
+            now: startedAt.addingTimeInterval(10)
+        )
+
+        #expect(metrics.usesLiveTeam)
+        #expect(!metrics.usesGenericWorkflow)
+        #expect(metrics.workUnitCount == 2)
+        #expect(metrics.phases.map(\.name) == ["Deliver", "Review"])
+        #expect(try #require(metrics.phases.first { $0.id == "deliver" }).runCount == 2)
+        #expect(try #require(metrics.phases.first { $0.id == "review" }).runCount == 1)
+        #expect(metrics.totalTokenUsage?.totalTokens == 30)
+    }
+
+    @Test
     func aggregatesRunTimeAndActivityContextAcrossWorkflowPhases() throws {
         let startedAt = Date(timeIntervalSince1970: 10_000)
         let now = startedAt.addingTimeInterval(3_600)

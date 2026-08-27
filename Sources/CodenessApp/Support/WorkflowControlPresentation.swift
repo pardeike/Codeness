@@ -26,9 +26,9 @@ enum WorkflowTransportControl: Equatable {
         case .resume:
             "Resume from the saved checkpoint and continue subsequent phases automatically"
         case .pauseAfterCurrent:
-            "Pause the workflow after the current run reaches a safe stopping point"
+            "Pause the activity after the current turn reaches a safe stopping point"
         case .keepRunning:
-            "Cancel the pending pause and continue automatically after this run"
+            "Cancel the pending pause and continue automatically after this turn"
         }
     }
 
@@ -41,7 +41,7 @@ enum WorkflowTransportControl: Equatable {
 
     var pauseNotice: String? {
         self == .keepRunning
-            ? "Finishing this step, then pausing"
+            ? "Finishing this turn, then pausing"
             : nil
     }
 
@@ -59,15 +59,15 @@ enum WorkflowImmediateControl: Equatable {
     }
 
     var menuTitle: String {
-        "Stop Current Step"
+        "Stop Current Turn"
     }
 
     var accessibilityLabel: String {
-        "Stop Current Step Now"
+        "Stop Current Turn Now"
     }
 
     var help: String {
-        "Stop the current agent now. You can resume or restart this step afterward."
+        "Stop the current agent now. You can resume or restart this turn afterward."
     }
 }
 

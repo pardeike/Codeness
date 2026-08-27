@@ -241,12 +241,12 @@ struct PermissionPreflightTests {
             info["NSAudioCaptureUsageDescription"] as? String
         )
         #expect(audioDescription.contains("system audio"))
-        #expect(audioDescription.contains("workflow"))
+        #expect(audioDescription.contains("activity"))
         let appManagementDescription = try #require(
             info["NSAppBundlesUsageDescription"] as? String
         )
         #expect(appManagementDescription.contains("update or remove apps"))
-        #expect(appManagementDescription.contains("workflow"))
+        #expect(appManagementDescription.contains("activity"))
 
         let prohibitedUsageKeys = [
             "NSMicrophoneUsageDescription",

@@ -23,6 +23,75 @@ struct TranscriptFormatterTests {
     }
 
     @Test
+    func acceptsACompletedPlanAsTheTurnOutput() {
+        let planItem: JSONValue = .object([
+            "id": .string("plan-1"),
+            "type": .string("plan"),
+            "text": .string("Fix the disconnected objective, then refresh runtime evidence.")
+        ])
+        let turn: JSONValue = .object([
+            "items": .array([planItem])
+        ])
+        let completed: JSONValue = .object([
+            "item": planItem
+        ])
+
+        #expect(
+            TranscriptFormatter.finalOutput(from: turn)
+                == "Fix the disconnected objective, then refresh runtime evidence."
+        )
+        let update = TranscriptFormatter.update(
+            method: "item/completed",
+            params: completed,
+            itemsWithDeltas: []
+        )
+        #expect(update.finalOutput == "Fix the disconnected objective, then refresh runtime evidence.")
+        #expect(update.section == .result)
+        #expect(update.text.contains("Plan\nFix the disconnected objective"))
+    }
+
+    @Test
+    func agentMessagesRemainPreferredOverPlanItems() {
+        let turn: JSONValue = .object([
+            "items": .array([
+                .object([
+                    "type": .string("plan"),
+                    "text": .string("Earlier plan")
+                ]),
+                .object([
+                    "type": .string("agentMessage"),
+                    "phase": .string("final_answer"),
+                    "text": .string("Final answer")
+                ])
+            ])
+        ])
+
+        #expect(TranscriptFormatter.finalOutput(from: turn) == "Final answer")
+    }
+
+    @Test
+    func terminalPlanIsPreferredOverEarlierCommentary() {
+        let turn: JSONValue = .object([
+            "items": .array([
+                .object([
+                    "type": .string("agentMessage"),
+                    "phase": .string("commentary"),
+                    "text": .string("I am reviewing the evidence.")
+                ]),
+                .object([
+                    "type": .string("plan"),
+                    "text": .string("Repair the objective layout before acceptance.")
+                ])
+            ])
+        ])
+
+        #expect(
+            TranscriptFormatter.finalOutput(from: turn)
+                == "Repair the objective layout before acceptance."
+        )
+    }
+
+    @Test
     func rendersOnlyACompactCommandAndSuppressesSuccessfulOutput() {
         let started: JSONValue = .object([
             "item": .object([

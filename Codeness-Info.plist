@@ -6,6 +6,8 @@
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
 	<string>Codeness</string>
+	<key>CodenessApplicationSupportDirectory</key>
+	<string>$(CODENESS_APPLICATION_SUPPORT_DIRECTORY)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -44,11 +46,11 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Codeness may send Apple events to apps you choose when an agent workflow automates those apps.</string>
+	<string>Codeness may send Apple events to apps you choose when an agent activity automates those apps.</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>Codeness may record system audio when an agent workflow you choose captures an app or the screen with audio.</string>
+	<string>Codeness may record system audio when an agent activity captures an app or the screen with audio.</string>
 	<key>NSAppBundlesUsageDescription</key>
-	<string>Codeness may update or remove apps when an agent workflow you choose performs app-management work.</string>
+	<string>Codeness may update or remove apps when an agent activity performs app-management work.</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

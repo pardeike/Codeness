@@ -153,7 +153,7 @@ struct PermissionPreflightSummary: Equatable, Sendable {
         if verifiedCount == verifiableCount {
             "The permissions macOS lets Codeness check are currently available."
         } else {
-            "Review the remaining checkable permissions if a workflow needs those capabilities."
+            "Review the remaining checkable permissions if an activity needs those capabilities."
         }
     }
 
@@ -346,42 +346,42 @@ final class PermissionPreflightModel {
                 id: .accessibility,
                 status: accessibilityIsAllowed ? .allowed : .notAllowed,
                 verification: .preciseSystemAPI,
-                detail: "Needed only when a workflow controls another app through Accessibility. macOS reports this status precisely.",
+                detail: "Needed only when an activity controls another app through Accessibility. macOS reports this status precisely.",
                 action: accessibilityIsAllowed ? .granted : .requestAccess
             ),
             PermissionPreflightRow(
                 id: .screenRecording,
                 status: screenRecordingIsAllowed ? .allowed : .notAllowed,
                 verification: .preciseSystemAPI,
-                detail: "Needed only when a workflow captures the screen. macOS reports this grant precisely; system-audio recording is a separate permission.",
+                detail: "Needed only when an activity captures the screen. macOS reports this grant precisely; system-audio recording is a separate permission.",
                 action: screenRecordingIsAllowed ? .granted : .requestAccess
             ),
             PermissionPreflightRow(
                 id: .systemAudioRecording,
                 status: .verifyInSettings,
                 verification: .settingsOnly,
-                detail: "Needed only when a workflow records audio from running apps. macOS manages this separately from screen recording and does not provide Codeness with a public preflight or generic request API.",
+                detail: "Needed only when an activity records audio from running apps. macOS manages this separately from screen recording and does not provide Codeness with a public preflight or generic request API.",
                 action: .openSettings
             ),
             PermissionPreflightRow(
                 id: .automation,
                 status: .managedPerApp,
                 verification: .perApplication,
-                detail: "Apple-event access is granted separately for each target app when a workflow first tries to automate it.",
+                detail: "Apple-event access is granted separately for each target app when an activity first tries to automate it.",
                 action: .openSettings
             ),
             PermissionPreflightRow(
                 id: .developerTools,
                 status: .verifyInSettings,
                 verification: .settingsOnly,
-                detail: "Some development workflows may require this access. macOS does not provide Codeness with a public status API for it.",
+                detail: "Some development activities may require this access. macOS does not provide Codeness with a public status API for it.",
                 action: .openSettings
             ),
             PermissionPreflightRow(
                 id: .appManagement,
                 status: .verifyInSettings,
                 verification: .settingsOnly,
-                detail: "Some workflows that update or remove other apps may require this access. Verify it in System Settings when relevant.",
+                detail: "Some activities that update or remove other apps may require this access. Verify it in System Settings when relevant.",
                 action: .openSettings
             )
         ]

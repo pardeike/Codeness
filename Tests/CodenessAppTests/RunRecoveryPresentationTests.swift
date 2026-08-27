@@ -4,6 +4,135 @@ import Testing
 
 struct RunRecoveryPresentationTests {
     @Test
+    func interruptedLiveTeamMemberUsesItsIdentityCheckpoint() throws {
+        let target = AgentTarget(providerID: .codex, model: "model")
+        let member = LiveTeamMember(
+            id: "deliver",
+            name: "Deliver",
+            instructions: "Deliver one bounded result.",
+            target: target,
+            runPolicy: .everyCycle,
+            sessionPolicy: .ownMemory
+        )
+        let definition = LiveTeamDefinition(
+            revision: 1,
+            workingGoal: "Deliver the bounded result.",
+            members: [member],
+            coordinator: .init(target: target, instructions: "Route local work."),
+            strategicReason: "One member is sufficient."
+        )
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: 1,
+            cycle: 3,
+            sessionSlotID: "member:deliver"
+        )
+        let run = RunRecord(
+            sequence: 5,
+            role: .implementer,
+            kind: .implementation,
+            status: .interrupted,
+            threadID: "session",
+            model: target.model,
+            effort: "high",
+            prompt: member.instructions,
+            relayError: "The member stopped unexpectedly.",
+            liveTeamMember: snapshot
+        )
+        let activity = ActivityRecord(
+            goal: "Board goal",
+            prompts: .builtInDefaults,
+            status: .paused,
+            runs: [run],
+            liveTeam: LiveTeamState(
+                overseer: .init(target: target, instructions: "Control strategy."),
+                currentDefinition: definition,
+                checkpoint: .init(memberID: member.id, cycle: 3, revision: 1),
+                resumeCheckpoint: .recoverRun(run.id)
+            )
+        )
+
+        let presentation = try #require(
+            RunRecoveryPresentation(activity: activity, run: run)
+        )
+
+        #expect(presentation.kind == .stepStopped)
+        #expect(presentation.nextStepName == member.name)
+        #expect(presentation.message == "The member stopped unexpectedly.")
+        #expect(!presentation.isGenericWorkflow)
+        #expect(!presentation.canFinishWorkflow)
+        #expect(presentation.isActionable)
+    }
+
+    @Test
+    func pausedLiveTeamCoordinatorDecisionShowsItsHandoff() throws {
+        let target = AgentTarget(providerID: .codex, model: "model")
+        let member = LiveTeamMember(
+            id: "review",
+            name: "Review",
+            instructions: "Review independently.",
+            target: target,
+            runPolicy: .everyCycle,
+            sessionPolicy: .freshEveryRun
+        )
+        let definition = LiveTeamDefinition(
+            revision: 2,
+            workingGoal: "Validate the current result.",
+            members: [member],
+            coordinator: .init(target: target, instructions: "Route local work."),
+            strategicReason: "Independent review is required."
+        )
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: 2,
+            cycle: 4,
+            sessionSlotID: "fresh:review:test"
+        )
+        let decision = LiveTeamCoordinatorDecision(
+            handoff: "Inspect the reproducible failure before continuing.",
+            runLabel: "Blocked review",
+            disposition: .pause,
+            evidence: "The acceptance test failed."
+        )
+        let run = RunRecord(
+            sequence: 8,
+            role: .reviewer,
+            kind: .review,
+            status: .paused,
+            threadID: "session",
+            model: target.model,
+            effort: "high",
+            prompt: member.instructions,
+            relayError: decision.evidence,
+            liveTeamMember: snapshot,
+            coordinatorDecision: decision
+        )
+        let activity = ActivityRecord(
+            goal: "Board goal",
+            prompts: .builtInDefaults,
+            status: .paused,
+            runs: [run],
+            liveTeam: LiveTeamState(
+                overseer: .init(target: target, instructions: "Control strategy."),
+                currentDefinition: definition,
+                checkpoint: .init(memberID: member.id, cycle: 4, revision: 2),
+                resumeCheckpoint: .applyCoordinatorDecision(run.id)
+            )
+        )
+
+        let presentation = try #require(
+            RunRecoveryPresentation(activity: activity, run: run)
+        )
+
+        #expect(presentation.kind == .workflowPaused)
+        #expect(presentation.handoffText == decision.handoff)
+        #expect(presentation.nextStepName == member.name)
+        #expect(presentation.isActionable)
+    }
+
+    @Test
     func failedCurrentStepShowsOnlyStepRecovery() throws {
         let workflow = workflow()
         let run = run(
