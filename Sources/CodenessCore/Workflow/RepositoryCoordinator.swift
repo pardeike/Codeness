@@ -4114,6 +4114,9 @@ public final class RepositoryCoordinator {
             pauseLiveTeamActivity(message: "Codeness cannot review the strategy right now.")
             return
         }
+        var overseerConfiguration = runtime.overseer
+        overseerConfiguration.target = state.overseer.target
+        state.overseer = overseerConfiguration
         if pauseAfterCurrent {
             state.resumeCheckpoint = .invokeOverseer(request)
             state.boardDirectionReason = nil
@@ -4153,7 +4156,7 @@ public final class RepositoryCoordinator {
             case .bootstrap:
                 let definition = try await router.bootstrap(
                     context,
-                    configuration: state.overseer,
+                    configuration: overseerConfiguration,
                     defaultCoordinator: runtime.defaultCoordinator,
                     cwd: record.canonicalPath
                 )
@@ -4181,7 +4184,7 @@ public final class RepositoryCoordinator {
             case .strategicReview:
                 let decision = try await router.reviewStrategy(
                     context,
-                    configuration: state.overseer,
+                    configuration: overseerConfiguration,
                     cwd: record.canonicalPath
                 )
                 guard !isClosing else { return }
@@ -4190,7 +4193,7 @@ public final class RepositoryCoordinator {
             case .completionReview:
                 let decision = try await router.reviewCompletion(
                     context,
-                    configuration: state.overseer,
+                    configuration: overseerConfiguration,
                     cwd: record.canonicalPath
                 )
                 guard !isClosing else { return }

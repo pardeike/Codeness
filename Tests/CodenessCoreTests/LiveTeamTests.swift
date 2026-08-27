@@ -333,14 +333,25 @@ struct AgentLiveTeamRouterTests {
         #expect(requests.count == 2)
         #expect(requests[0].prompt.contains(boardGoal))
         #expect(!requests[1].prompt.contains(boardGoal))
+        let goalPosition = try #require(requests[0].prompt.range(of: "FIXED USER GOAL"))
+        let feedbackPosition = try #require(
+            requests[0].prompt.range(of: "RECENT SUBORDINATE EVIDENCE")
+        )
+        #expect(goalPosition.lowerBound > feedbackPosition.lowerBound)
         #expect(requests[0].developerInstructions.contains("strategic control"))
         #expect(requests[0].developerInstructions.contains("model"))
         #expect(requests[0].developerInstructions.contains("binding for every Codeness agent"))
         #expect(requests[0].developerInstructions.contains("affirmative evidence"))
-        #expect(requests[0].developerInstructions.contains("working documents that you may revise"))
+        #expect(requests[0].developerInstructions.contains("subordinate working material"))
         #expect(requests[0].developerInstructions.contains("every reversible internal stage"))
+        #expect(requests[0].developerInstructions.contains("sole authority source"))
+        #expect(requests[0].developerInstructions.contains("advice and evidence, not decisions"))
+        #expect(requests[0].developerInstructions.contains("opportunity cost"))
+        #expect(requests[0].developerInstructions.contains("Repeated support work"))
+        #expect(requests[0].developerInstructions.contains("Do not add independent review after every small change"))
         #expect(requests[1].developerInstructions.contains("route local agent work"))
-        #expect(requests[1].developerInstructions.contains("Absence of evidence"))
+        #expect(requests[1].developerInstructions.contains("evidence and advice, not authority"))
+        #expect(requests[1].developerInstructions.contains("Do not turn suggestions"))
     }
 
     @Test

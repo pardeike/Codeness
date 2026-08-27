@@ -72,6 +72,84 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
+    func existingActivityUsesCurrentOverseerPolicyWithItsChosenTarget() async throws {
+        let fixture = try makeFixture(goal: "Keep executive control current.")
+        defer { fixture.remove() }
+        var deliver = liveMember(id: "deliver", sessionPolicy: .ownMemory)
+        deliver.runPolicy = .once
+        let definition = liveDefinition(members: [deliver])
+        let checkpoint = try #require(LiveTeamStateMachine.initialCheckpoint(for: definition))
+        let staleTarget = liveTarget(model: "stale-overseer-model")
+        let reviewRequest = LiveTeamOverseerRequest(
+            mode: .strategicReview,
+            reason: "Resume with the installed executive policy.",
+            continuation: checkpoint,
+            automatic: false
+        )
+        var record = RepositoryRecord(canonicalPath: fixture.canonicalPath)
+        record.activity = ActivityRecord(
+            goal: fixture.goal,
+            prompts: .builtInDefaults,
+            status: .paused,
+            liveTeam: LiveTeamState(
+                overseer: LiveTeamOverseerConfiguration(
+                    target: staleTarget,
+                    instructions: "Obsolete saved policy that asks the user for permission."
+                ),
+                currentDefinition: definition,
+                checkpoint: checkpoint,
+                resumeCheckpoint: .invokeOverseer(reviewRequest)
+            )
+        )
+        try await fixture.store.save(record)
+
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.completionCandidate)
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal
+        )
+        let runtime: LiveTeamRuntimeConfiguration = {
+            var configuration = liveRuntimeConfiguration(model: "current-default-model")
+            configuration.overseer.instructions = "Current decisive executive policy."
+            return configuration
+        }()
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer,
+            runtimeProvider: { _ in runtime }
+        )
+
+        await coordinator.load()
+        await coordinator.resume()
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+
+        let configurations = await overseer.strategicConfigurations()
+        #expect(configurations.count == 2)
+        #expect(configurations.allSatisfy {
+            $0.instructions == "Current decisive executive policy."
+                && $0.target == staleTarget
+        })
+        let persisted = try await fixture.store.load(canonicalPath: fixture.canonicalPath)
+        #expect(
+            persisted.activity?.liveTeam?.overseer
+                == LiveTeamOverseerConfiguration(
+                    target: staleTarget,
+                    instructions: "Current decisive executive policy."
+                )
+        )
+    }
+
+    @Test
     func goalOnlyBootstrapPersistsBothDurabilityBarriersAndRequiresOverseerCompletion() async throws {
         let fixture = try makeFixture(goal: "Board-only goal: ship the durable result.")
         defer { fixture.remove() }
@@ -1357,6 +1435,7 @@ private actor RecordingLiveTeamOverseer: LiveTeamOverseerRouting {
     private var durableGoalOnlyBootstrap = false
     private var bootstrapContexts: [LiveTeamOverseerContext] = []
     private var usedBootstrapConfigurations: [LiveTeamOverseerConfiguration] = []
+    private var usedStrategicConfigurations: [LiveTeamOverseerConfiguration] = []
     private var strategicContexts: [LiveTeamOverseerContext] = []
     private var reviewedCompletionContexts: [LiveTeamOverseerContext] = []
     private var reviewedMigrationContexts: [LiveTeamOverseerContext] = []
@@ -1410,9 +1489,9 @@ private actor RecordingLiveTeamOverseer: LiveTeamOverseerRouting {
         configuration: LiveTeamOverseerConfiguration,
         cwd: String
     ) -> LiveTeamStrategicDecision {
-        _ = configuration
         _ = cwd
         strategicContexts.append(context)
+        usedStrategicConfigurations.append(configuration)
         if context.triggerReason.contains("no agents may be needed") {
             return LiveTeamStrategicDecision(
                 action: .complete,
@@ -1467,6 +1546,9 @@ private actor RecordingLiveTeamOverseer: LiveTeamOverseerRouting {
     }
     func recordedStrategicContexts() -> [LiveTeamOverseerContext] {
         strategicContexts
+    }
+    func strategicConfigurations() -> [LiveTeamOverseerConfiguration] {
+        usedStrategicConfigurations
     }
     func migrationCount() -> Int { reviewedMigrationContexts.count }
     func migrationContexts() -> [LiveTeamOverseerContext] {
