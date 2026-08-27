@@ -36,6 +36,26 @@ public enum RunDetailPresentation: String, Codable, Sendable, CaseIterable {
     }
 }
 
+public struct TranscriptTextRange: Sendable, Equatable {
+    public let location: Int
+    public let length: Int
+
+    public init(location: Int, length: Int) {
+        self.location = location
+        self.length = length
+    }
+}
+
+public struct PresentedTranscript: Sendable, Equatable {
+    public let text: String
+    public let steeringRanges: [TranscriptTextRange]
+
+    public init(text: String, steeringRanges: [TranscriptTextRange] = []) {
+        self.text = text
+        self.steeringRanges = steeringRanges
+    }
+}
+
 public enum RunTranscriptPresentation {
     private static let markerPrefix = "\u{001E}codeness:"
     private static let markerSuffix = "\u{001F}"
@@ -50,6 +70,14 @@ public enum RunTranscriptPresentation {
     public static func storedText(_ text: String, section: TranscriptSectionKind) -> String {
         guard !text.isEmpty else { return "" }
         return marker(for: section) + text
+    }
+
+    public static func storedSteeringMessage(_ message: String) -> String {
+        let visibleMessage = message
+            .replacingOccurrences(of: "\u{001E}", with: "␞")
+            .replacingOccurrences(of: "\u{001F}", with: "␟")
+        return storedText("\n\nYou steered\n\(visibleMessage)\n", section: .steering)
+            + storedText("\n", section: .reasoning)
     }
 
     public static func reconciledTranscript(metadata: String, appendLog: String) -> String {
@@ -72,29 +100,43 @@ public enum RunTranscriptPresentation {
         separatesRuns: Bool,
         visibility: TranscriptVisibility = .recommended
     ) -> String {
+        content(
+            for: run,
+            separatesRuns: separatesRuns,
+            visibility: visibility
+        ).text
+    }
+
+    public static func content(
+        for run: RunRecord,
+        separatesRuns: Bool,
+        visibility: TranscriptVisibility = .recommended
+    ) -> PresentedTranscript {
         if run.transcript.contains(markerPrefix) {
-            return structuredText(
+            return structuredContent(
                 run.transcript,
                 separatesRuns: separatesRuns,
                 visibility: visibility
             )
         }
 
-        return legacyText(
-            run.transcript,
-            prompt: run.prompt,
-            finalOutput: run.finalOutput,
-            separatesRuns: separatesRuns,
-            visibility: visibility
+        return PresentedTranscript(
+            text: legacyText(
+                run.transcript,
+                prompt: run.prompt,
+                finalOutput: run.finalOutput,
+                separatesRuns: separatesRuns,
+                visibility: visibility
+            )
         )
     }
 
-    private static func structuredText(
+    private static func structuredContent(
         _ transcript: String,
         separatesRuns: Bool,
         visibility: TranscriptVisibility
-    ) -> String {
-        var result = ""
+    ) -> PresentedTranscript {
+        var result = PresentedTranscriptBuilder()
         var cursor = transcript.startIndex
         var section: TranscriptSectionKind?
 
@@ -111,8 +153,11 @@ public enum RunTranscriptPresentation {
                 of: markerSuffix,
                 range: nameStart..<transcript.endIndex
             ) else {
-                result += String(transcript[markerRange.lowerBound...])
-                return cleanPresentedText(result)
+                result.append(
+                    String(transcript[markerRange.lowerBound...]),
+                    isSteering: section == .steering
+                )
+                return result.presentation
             }
             section = TranscriptSectionKind(rawValue: String(transcript[nameStart..<suffixRange.lowerBound]))
             cursor = suffixRange.upperBound
@@ -124,7 +169,7 @@ public enum RunTranscriptPresentation {
             visibility: visibility,
             to: &result
         )
-        return cleanPresentedText(result)
+        return result.presentation
     }
 
     private static func legacyText(
@@ -184,19 +229,19 @@ public enum RunTranscriptPresentation {
         section: TranscriptSectionKind?,
         separatesRuns: Bool,
         visibility: TranscriptVisibility,
-        to result: inout String
+        to result: inout PresentedTranscriptBuilder
     ) {
         guard let section else {
-            result += text
+            result.append(text, isSteering: false)
             return
         }
         if isVisible(section, separatesRuns: separatesRuns, visibility: visibility) {
-            result += text
+            result.append(text, isSteering: section == .steering)
         } else if section == .action,
                   !visibility.actions,
                   visibility.reasoning,
                   let recovered = legacyClaudeTextAfterAction(in: text) {
-            result += recovered
+            result.append(recovered, isSteering: false)
         }
     }
 
@@ -223,6 +268,7 @@ public enum RunTranscriptPresentation {
         case .action: visibility.actions
         case .result: visibility.results
         case .diagnostic: visibility.diagnostics
+        case .steering: true
         }
     }
 
@@ -238,5 +284,41 @@ public enum RunTranscriptPresentation {
         cleanLeadingWhitespace(
             text.replacingOccurrences(of: transientClaudeStatus, with: "")
         )
+    }
+}
+
+private struct PresentedTranscriptBuilder {
+    private(set) var text = ""
+    private(set) var steeringRanges: [TranscriptTextRange] = []
+    private var utf16Count = 0
+
+    mutating func append(_ value: String, isSteering: Bool) {
+        var rendered = value.replacingOccurrences(
+            of: "Claude status: requesting",
+            with: ""
+        )
+        if text.isEmpty {
+            rendered = String(rendered.drop(while: { $0 == "\n" || $0 == "\r" }))
+        }
+        guard !rendered.isEmpty else { return }
+
+        let location = utf16Count
+        text += rendered
+        utf16Count += rendered.utf16.count
+        guard isSteering else { return }
+
+        let utf16 = Array(rendered.utf16)
+        let leading = utf16.prefix(while: { $0 == 10 || $0 == 13 }).count
+        let trailing = utf16.reversed().prefix(while: { $0 == 10 || $0 == 13 }).count
+        let length = utf16.count - leading - trailing
+        guard length > 0 else { return }
+        steeringRanges.append(TranscriptTextRange(
+            location: location + leading,
+            length: length
+        ))
+    }
+
+    var presentation: PresentedTranscript {
+        PresentedTranscript(text: text, steeringRanges: steeringRanges)
     }
 }

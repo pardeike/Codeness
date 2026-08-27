@@ -1562,6 +1562,10 @@ public final class RepositoryCoordinator {
                     runID: run.id,
                     message: cleanMessage
                 )
+                await recordTranscript(
+                    RunTranscriptPresentation.storedSteeringMessage(cleanMessage),
+                    runID: run.id
+                )
                 return true
             } catch {
                 errorMessage = error.localizedDescription
@@ -1571,6 +1575,10 @@ public final class RepositoryCoordinator {
         guard let threadID = run.threadID, let turnID = run.turnID else { return false }
         do {
             try await appServer.steer(threadID: threadID, turnID: turnID, message: cleanMessage)
+            await recordTranscript(
+                RunTranscriptPresentation.storedSteeringMessage(cleanMessage),
+                runID: run.id
+            )
             return true
         } catch {
             errorMessage = error.localizedDescription

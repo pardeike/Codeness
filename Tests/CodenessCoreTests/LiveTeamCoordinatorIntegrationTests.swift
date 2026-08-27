@@ -289,6 +289,62 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
+    func successfulSteeringIsRecordedInTheActiveTurnTranscript() async throws {
+        let fixture = try makeFixture(goal: "Deliver the fixed user goal.")
+        defer { fixture.remove() }
+        let definition = liveDefinition(members: [
+            liveMember(id: "deliver", sessionPolicy: .ownMemory)
+        ])
+        let gate = FirstRunGate()
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            firstRunGate: gate
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.completionCandidate)
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: fixture.goal)
+        await gate.waitUntilBlocked()
+        defer { Task { await gate.release() } }
+
+        let message = "Prioritize the native interaction proof."
+        #expect(await coordinator.steer(message))
+        try await waitUntil {
+            guard let run = coordinator.record.activity?.runs.first else { return false }
+            return RunTranscriptPresentation.content(
+                for: run,
+                separatesRuns: true
+            ).text.contains(message)
+        }
+
+        let run = try #require(coordinator.record.activity?.runs.first)
+        let presented = RunTranscriptPresentation.content(
+            for: run,
+            separatesRuns: true
+        )
+        #expect(presented.text.contains("You steered\n\(message)"))
+        #expect(presented.steeringRanges.count == 1)
+
+        await gate.release()
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+    }
+
+    @Test
     func interruptedMemberRecoversFromPersistedSnapshotWithoutReinterpretingTheTeam() async throws {
         let fixture = try makeFixture(goal: "Recover the fixed Board goal.")
         defer { fixture.remove() }

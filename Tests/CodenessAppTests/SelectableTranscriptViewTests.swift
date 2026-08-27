@@ -6,6 +6,44 @@ import Testing
 @MainActor
 struct SelectableTranscriptViewTests {
     @Test
+    func steeringRangesUseTheAccentStyleWithoutChangingAgentOutput() throws {
+        let text = "Agent output.\nYou steered\nCheck the menu.\nAgent continued."
+        let steeringText = "You steered\nCheck the menu."
+        let steeringRange = (text as NSString).range(of: steeringText)
+        let presentation = PresentedTranscript(
+            text: text,
+            steeringRanges: [TranscriptTextRange(
+                location: steeringRange.location,
+                length: steeringRange.length
+            )]
+        )
+
+        let attributed = TranscriptTextStyler.attributedString(for: presentation)
+        let normalAttribute = unsafe attributed.attribute(
+            .foregroundColor,
+            at: 0,
+            effectiveRange: nil
+        )
+        let steeringAttribute = unsafe attributed.attribute(
+            .foregroundColor,
+            at: steeringRange.location,
+            effectiveRange: nil
+        )
+        let paragraphAttribute = unsafe attributed.attribute(
+            .paragraphStyle,
+            at: steeringRange.location,
+            effectiveRange: nil
+        )
+        let normalColor = try #require(normalAttribute as? NSColor)
+        let steeringColor = try #require(steeringAttribute as? NSColor)
+        let paragraph = try #require(paragraphAttribute as? NSParagraphStyle)
+
+        #expect(normalColor == .textColor)
+        #expect(steeringColor == .controlAccentColor)
+        #expect(paragraph.headIndent == 8)
+    }
+
+    @Test
     func viewportMappingUsesTextLayoutWithoutWindowHitTesting() throws {
         let text = "first\nsecond\nthird\nfourth\n"
         let textStorage = NSTextStorage(string: text)

@@ -236,7 +236,8 @@ The current prototype is not ready to replace production without further work:
 - Saved decisions improve explainability, but the same goal can still produce a different setup on another run.
 - Shared memory weakens independence and should remain rare.
 - `RepositoryCoordinator.swift` has absorbed too much live-orchestration logic. The prototype works, but this file should be split by responsibility before production adoption.
-- The UI overlap reported on the second demo came from the transcript's macOS scroll-edge material covering its header. The isolated prototype now applies a hard top edge, matching the sidebar. Live capture of the rebuilt app shows the complete turn header unobscured, while the repaired review appears as a paused, handoff-pending result rather than a failure.
+- The UI overlap reported on the second demo came from macOS scroll-edge material covering the transcript header. Forcing a hard edge stopped the original overlap but produced a large blank material strip. The final prototype disables the transcript's top edge effect and gives the compact header its own stable background. Live capture shows the complete header during both completed and running turns.
+- Successful steering messages are now recorded in the ordered transcript. They appear as indented accent-colored `You steered` blocks, remain visible when routine reasoning is hidden, and return subsequent agent output to normal styling. Failed sends do not create a transcript entry.
 
 The highest-value next work is not more configuration. It is better evidence: a small read-only activity record for audit agents, measured strategy-review outcomes, and hard enforcement only for restrictions that repeatedly prove too important for prompt interpretation.
 

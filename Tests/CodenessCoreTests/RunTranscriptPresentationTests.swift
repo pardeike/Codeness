@@ -1,4 +1,5 @@
 import CodenessCore
+import Foundation
 import Testing
 
 struct RunTranscriptPresentationTests {
@@ -57,6 +58,57 @@ struct RunTranscriptPresentationTests {
         )
         #expect(all.contains("Do the work."))
         #expect(all.contains("xcodebuild"))
+    }
+
+    @Test
+    func steeringMessagesRemainVisibleAndIdentifyOnlyTheUserMessage() throws {
+        let transcript = RunTranscriptPresentation.storedText(
+            "Agent output before steering.\n",
+            section: .reasoning
+        )
+        + RunTranscriptPresentation.storedSteeringMessage(
+            "Prioritize the native interaction proof."
+        )
+        + "Agent output after steering.\n"
+        let run = makeRun(prompt: "Review the app.", transcript: transcript)
+
+        let steeringOnly = RunTranscriptPresentation.content(
+            for: run,
+            separatesRuns: true,
+            visibility: TranscriptVisibility(
+                reasoning: false,
+                actions: false,
+                results: false,
+                diagnostics: false
+            )
+        )
+        #expect(
+            steeringOnly.text
+                == "You steered\nPrioritize the native interaction proof.\n"
+        )
+        #expect(steeringOnly.steeringRanges.count == 1)
+        let range = try #require(steeringOnly.steeringRanges.first)
+        #expect(
+            (steeringOnly.text as NSString).substring(with: NSRange(
+                location: range.location,
+                length: range.length
+            )) == "You steered\nPrioritize the native interaction proof."
+        )
+
+        let complete = RunTranscriptPresentation.content(
+            for: run,
+            separatesRuns: true,
+            visibility: .all
+        )
+        #expect(complete.text.contains("Agent output before steering."))
+        #expect(complete.text.contains("Agent output after steering."))
+        #expect(complete.steeringRanges.count == 1)
+        let completeRange = try #require(complete.steeringRanges.first)
+        let styledText = (complete.text as NSString).substring(with: NSRange(
+            location: completeRange.location,
+            length: completeRange.length
+        ))
+        #expect(!styledText.contains("Agent output after steering."))
     }
 
     @Test

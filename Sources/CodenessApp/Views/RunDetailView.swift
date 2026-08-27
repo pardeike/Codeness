@@ -19,6 +19,8 @@ struct RunDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+                .background(Color(nsColor: .windowBackgroundColor))
+                .zIndex(1)
             Divider()
             transcriptAndFinalResult
                 .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -103,7 +105,7 @@ struct RunDetailView: View {
 
     private var transcript: some View {
         SelectableTranscriptView(
-            text: RunTranscriptPresentation.text(
+            presentation: RunTranscriptPresentation.content(
                 for: run,
                 separatesRuns: application.separatesRunTranscripts,
                 visibility: TranscriptVisibility(
@@ -123,7 +125,7 @@ struct RunDetailView: View {
                 coordinator.stopFollowingActiveProgress(for: run.id)
             }
         )
-        .modifier(TranscriptTopEdgeProtection())
+        .modifier(TranscriptTopEdgeSuppression())
         .accessibilityLabel("Turn transcript")
         .help("Select or scroll this turn transcript; press Command-F to search it")
     }
@@ -280,11 +282,11 @@ struct RunDetailView: View {
     }
 }
 
-private struct TranscriptTopEdgeProtection: ViewModifier {
+private struct TranscriptTopEdgeSuppression: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
-            content.scrollEdgeEffectStyle(.hard, for: .top)
+            content.scrollEdgeEffectStyle(nil, for: .top)
         } else {
             content
         }

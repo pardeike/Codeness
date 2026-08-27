@@ -3,7 +3,7 @@ import CodenessCore
 import SwiftUI
 
 struct SelectableTranscriptView: NSViewRepresentable {
-    let text: String
+    let presentation: PresentedTranscript
     let initialViewport: TranscriptViewportState
     let scrollToEndRequest: Int
     let onViewportChange: (TranscriptViewportState) -> Void
@@ -54,7 +54,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
         context.coordinator.onViewportChange = onViewportChange
         context.coordinator.onUserStoppedFollowing = onUserStoppedFollowing
         context.coordinator.update(
-            text: text,
+            presentation: presentation,
             scrollToEndRequest: scrollToEndRequest,
             in: scrollView
         )
@@ -76,6 +76,7 @@ struct SelectableTranscriptView: NSViewRepresentable {
         private var followRevision = 0
         private var lastScrollToEndRequest: Int
         private var lastReportedViewport: TranscriptViewportState?
+        private var lastPresentation: PresentedTranscript?
         private var settleTask: Task<Void, Never>?
 
         init(
@@ -115,13 +116,23 @@ struct SelectableTranscriptView: NSViewRepresentable {
             setFollowingOutput(isAtBottom(scrollView: scrollView))
         }
 
-        func update(text: String, scrollToEndRequest: Int, in scrollView: NSScrollView) {
-            if let textView, textView.string != text {
+        func update(
+            presentation: PresentedTranscript,
+            scrollToEndRequest: Int,
+            in scrollView: NSScrollView
+        ) {
+            let presentationChanged = lastPresentation != presentation
+            if let textView, presentationChanged {
                 let shouldFollow = didApplyInitialViewport
                     && (isFollowingOutput || isAtBottom(scrollView: scrollView))
                 isApplyingTextUpdate = true
-                replaceText(in: textView, with: text)
+                replaceText(
+                    in: textView,
+                    with: presentation,
+                    previous: lastPresentation
+                )
                 isApplyingTextUpdate = false
+                lastPresentation = presentation
 
                 if !didApplyInitialViewport {
                     didApplyInitialViewport = true
@@ -134,8 +145,10 @@ struct SelectableTranscriptView: NSViewRepresentable {
                 }
             } else if !didApplyInitialViewport {
                 didApplyInitialViewport = true
+                lastPresentation = presentation
                 restoreInitialViewport()
             } else {
+                lastPresentation = presentation
                 reportViewportState()
             }
 
@@ -235,26 +248,38 @@ struct SelectableTranscriptView: NSViewRepresentable {
             }
         }
 
-        private func replaceText(in textView: NSTextView, with text: String) {
+        private func replaceText(
+            in textView: NSTextView,
+            with presentation: PresentedTranscript,
+            previous: PresentedTranscript?
+        ) {
             let existing = textView.string
             // NSTextView owns its unowned AppKit text storage for the view's lifetime.
-            if text.hasPrefix(existing), let textStorage = unsafe textView.textStorage {
-                let suffix = String(text.dropFirst(existing.count))
-                textStorage.append(NSAttributedString(
-                    string: suffix,
-                    attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
-                        .foregroundColor: NSColor.textColor
-                    ]
+            if !existing.isEmpty,
+               presentation.text != existing,
+               presentation.text.hasPrefix(existing),
+               previous?.text == existing,
+               presentation.steeringRanges.starts(with: previous?.steeringRanges ?? []),
+               let textStorage = unsafe textView.textStorage {
+                let existingLength = (existing as NSString).length
+                let suffixRange = NSRange(
+                    location: existingLength,
+                    length: (presentation.text as NSString).length - existingLength
+                )
+                textStorage.append(TranscriptTextStyler.attributedString(
+                    for: presentation,
+                    in: suffixRange
                 ))
                 return
             }
 
             let selectedRanges = textView.selectedRanges
-            textView.string = text
-            textView.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
-            textView.textColor = .textColor
-            let textLength = (text as NSString).length
+            if let textStorage = unsafe textView.textStorage {
+                textStorage.setAttributedString(
+                    TranscriptTextStyler.attributedString(for: presentation)
+                )
+            }
+            let textLength = (presentation.text as NSString).length
             let clampedRanges: [NSValue] = selectedRanges.compactMap { value -> NSValue? in
                 guard let range = value.rangeValue.intersection(NSRange(location: 0, length: textLength)) else {
                     return nil
@@ -310,6 +335,58 @@ struct SelectableTranscriptView: NSViewRepresentable {
             let visibleMaxY = scrollView.contentView.bounds.maxY
             return documentView.bounds.maxY - visibleMaxY <= 40
         }
+    }
+}
+
+@MainActor
+enum TranscriptTextStyler {
+    static func attributedString(
+        for presentation: PresentedTranscript,
+        in requestedRange: NSRange? = nil
+    ) -> NSAttributedString {
+        let source = presentation.text as NSString
+        let fullRange = NSRange(location: 0, length: source.length)
+        let range = requestedRange?.intersection(fullRange) ?? fullRange
+        let result = NSMutableAttributedString(
+            string: source.substring(with: range),
+            attributes: baseAttributes
+        )
+
+        for steeringRange in presentation.steeringRanges {
+            let sourceRange = NSRange(
+                location: steeringRange.location,
+                length: steeringRange.length
+            )
+            guard let intersection = sourceRange.intersection(range) else { continue }
+            result.addAttributes(
+                steeringAttributes,
+                range: NSRange(
+                    location: intersection.location - range.location,
+                    length: intersection.length
+                )
+            )
+        }
+        return result
+    }
+
+    private static var baseAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
+            .foregroundColor: NSColor.textColor
+        ]
+    }
+
+    private static var steeringAttributes: [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.firstLineHeadIndent = 8
+        paragraph.headIndent = 8
+        paragraph.tailIndent = -8
+        paragraph.paragraphSpacing = 2
+        return [
+            .font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .medium),
+            .foregroundColor: NSColor.controlAccentColor,
+            .paragraphStyle: paragraph
+        ]
     }
 }
 

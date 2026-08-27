@@ -25,6 +25,7 @@ public enum TranscriptSectionKind: String, Sendable, Equatable {
     case action
     case result
     case diagnostic
+    case steering
 }
 
 public enum TranscriptFormatter {
