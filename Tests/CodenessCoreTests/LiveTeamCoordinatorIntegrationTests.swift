@@ -320,6 +320,88 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
+    func automaticRevisionOfExhaustedTeamDoesNotPauseForChurnGuard() async throws {
+        let fixture = try makeFixture(goal: "Continue autonomously through bounded stages.")
+        defer { fixture.remove() }
+        var audit = liveMember(id: "audit", sessionPolicy: .freshEveryRun)
+        audit.runPolicy = .once
+        let current = LiveTeamDefinition(
+            revision: 2,
+            workingGoal: "Audit the current bounded stage.",
+            members: [audit],
+            coordinator: liveCoordinatorConfiguration(),
+            strategicReason: "The current stage needs one independent audit."
+        )
+        var correction = liveMember(id: "correction", sessionPolicy: .ownMemory)
+        correction.runPolicy = .once
+        let proposed = LiveTeamDefinition(
+            revision: 3,
+            workingGoal: "Correct the bounded findings.",
+            members: [correction],
+            coordinator: liveCoordinatorConfiguration(),
+            strategicReason: "The completed audit found a bounded correction stage."
+        )
+        let checkpoint = LiveTeamCheckpoint(
+            memberID: audit.id,
+            cycle: 1,
+            revision: current.revision
+        )
+        var record = RepositoryRecord(canonicalPath: fixture.canonicalPath)
+        record.activity = ActivityRecord(
+            goal: fixture.goal,
+            prompts: .builtInDefaults,
+            status: .paused,
+            liveTeam: LiveTeamState(
+                overseer: liveOverseerConfiguration(),
+                currentDefinition: current,
+                checkpoint: checkpoint,
+                resumeCheckpoint: .perform(checkpoint),
+                cyclesUnderCurrentRevision: 0
+            )
+        )
+        try await fixture.store.save(record)
+
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.requestOversight, evidence: "The audit found bounded fixes."),
+            decision(.completionCandidate)
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: current,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal,
+            strategicDecision: LiveTeamStrategicDecision(
+                action: .revise,
+                reason: proposed.strategicReason,
+                evidence: "The existing Once agent is complete, so another current turn cannot run.",
+                proposedDefinition: proposed,
+                preferredNextMemberID: correction.id
+            )
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+        await coordinator.resume()
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+
+        #expect(
+            coordinator.record.activity?.runs.compactMap(\.liveTeamMember?.member.id)
+                == [audit.id, correction.id]
+        )
+        #expect(coordinator.record.activity?.liveTeam?.currentDefinition == proposed)
+        #expect(await overseer.recordedStrategicContexts().count == 2)
+    }
+
+    @Test
     func successfulSteeringIsRecordedInTheActiveTurnTranscript() async throws {
         let fixture = try makeFixture(goal: "Deliver the fixed user goal.")
         defer { fixture.remove() }

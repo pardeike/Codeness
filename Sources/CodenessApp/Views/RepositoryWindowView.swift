@@ -605,6 +605,9 @@ private struct StrategyChangeDetails: View {
             .padding(14)
         }
         .frame(width: 340, height: 300)
+        // A popover presented from a sidebar List inherits its single-line row
+        // environment unless the detail surface explicitly restores wrapping.
+        .lineLimit(nil)
     }
 
     private func detail(_ title: String, text: String) -> some View {

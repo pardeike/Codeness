@@ -4329,20 +4329,14 @@ public final class RepositoryCoordinator {
             if request.automatic,
                record.activity?.liveTeam?.cyclesUnderCurrentRevision == 0,
                current.revision > 1,
-               !isUnrunnable {
+               !isUnrunnable,
+               let continuation = request.continuation {
                 record.activity?.liveTeam?.workerTurnsSinceStrategicReview = 0
                 record.activity?.liveTeam?.cyclesSinceStrategicReview = 0
-                if let continuation = request.continuation {
-                    await scheduleLiveTeamRun(
-                        continuation,
-                        afterRunID: request.sourceRunID ?? UUID()
-                    )
-                } else {
-                    pauseLiveTeamActivity(
-                        message: "Agent changes deferred until one round runs under the current strategy"
-                    )
-                    try? await persist()
-                }
+                await scheduleLiveTeamRun(
+                    continuation,
+                    afterRunID: request.sourceRunID ?? UUID()
+                )
                 return
             }
 

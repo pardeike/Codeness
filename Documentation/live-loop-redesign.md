@@ -125,6 +125,8 @@ The turn list marks each applied strategy revision with a compact chapter divide
 
 Elapsed time is a cooldown, never a trigger. Codeness has no strategy-review timer. Fast rounds keep accumulating until the next turn boundary after the cooldown expires. A goal change, repeated failure, unrunnable setup, or completion claim bypasses the periodic cooldown because waiting cannot improve those decisions. The round limit, turn limit, cooldown, and repeated-failure threshold are internal orchestration values, not another user-facing settings form.
 
+To limit back-to-back automatic strategy churn, Codeness may keep the current setup until it completes one round, but only when that setup still has an eligible agent. An exhausted setup cannot be paused by the churn limit; the Overseer's replacement setup applies immediately.
+
 The user may change the fixed goal at any time. A running agent finishes against its immutable assignment, then the Overseer revises the strategy against the changed goal before another agent starts.
 
 ## Memory choices
