@@ -233,11 +233,34 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             outputSchema: Self.strategicSchema(targetOptions: context.targetOptions)
         )
         let result = try await providers.runUtility(request)
-        return try Self.decodeStrategicDecision(
-            result.output,
-            current: current,
-            targetOptions: context.targetOptions
-        )
+        do {
+            return try Self.decodeStrategicDecision(
+                result.output,
+                current: current,
+                targetOptions: context.targetOptions
+            )
+        } catch let error as AgentProviderError {
+            guard case .invalidResponse = error else { throw error }
+            let retryRequest = AgentUtilityRequest(
+                cwd: request.cwd,
+                prompt: """
+                \(request.prompt)
+
+                CORRECTION RETRY
+                The previous structured response was rejected: \(error.localizedDescription)
+                Return one complete corrected strategic decision. For revise, use only the offered target IDs and provide every replacement setup field. For keep or complete, set every replacement setup field to null.
+                """,
+                target: request.target,
+                developerInstructions: request.developerInstructions,
+                outputSchema: request.outputSchema
+            )
+            let result = try await providers.runUtility(retryRequest)
+            return try Self.decodeStrategicDecision(
+                result.output,
+                current: current,
+                targetOptions: context.targetOptions
+            )
+        }
     }
 
     public func reviewCompletion(

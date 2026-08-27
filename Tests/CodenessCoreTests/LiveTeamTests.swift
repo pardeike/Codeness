@@ -344,6 +344,55 @@ struct AgentLiveTeamRouterTests {
     }
 
     @Test
+    func strategicReviewRetriesOneInvalidResponseWithCorrectionFeedback() async throws {
+        let provider = LiveTeamUtilityProvider(outputs: [
+            Self.invalidStrategicRevision,
+            Self.validStrategicKeep
+        ])
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+        let decision = try await router.reviewStrategy(
+            strategicContext(target: target),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep reversible work moving."
+            ),
+            cwd: "/tmp/live-team-router-retry"
+        )
+
+        #expect(decision.action == .keep)
+        let requests = await provider.requests()
+        #expect(requests.count == 2)
+        #expect(requests[1].prompt.contains("CORRECTION RETRY"))
+        #expect(requests[1].prompt.contains("work-routing configuration is invalid"))
+        #expect(requests[1].outputSchema == requests[0].outputSchema)
+    }
+
+    @Test
+    func strategicReviewStopsAfterSecondInvalidResponse() async {
+        let provider = LiveTeamUtilityProvider(outputs: [
+            Self.invalidStrategicRevision,
+            Self.invalidStrategicRevision
+        ])
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+
+        await #expect(throws: AgentProviderError.self) {
+            try await router.reviewStrategy(
+                strategicContext(target: target),
+                configuration: LiveTeamOverseerConfiguration(
+                    target: target,
+                    instructions: "Keep reversible work moving."
+                ),
+                cwd: "/tmp/live-team-router-retry"
+            )
+        }
+        #expect(await provider.requests().count == 2)
+    }
+
+    @Test
     func coordinatorDecoderRejectsStrategicSmuggling() {
         #expect(throws: (any Error).self) {
             try AgentLiveTeamRouter.decodeCoordinatorDecision(
@@ -487,6 +536,45 @@ struct AgentLiveTeamRouterTests {
             property: "outcome"
         ) == ["complete", "continueWork"])
     }
+
+    private static let invalidStrategicRevision = """
+    {
+      "action": "revise",
+      "reason": "The next stage needs a replacement setup.",
+      "evidence": "The current agents have finished.",
+      "workingGoal": "Continue the fixed goal.",
+      "members": [
+        {
+          "id": "deliver",
+          "name": "Deliver",
+          "instructions": "Implement the next reversible unit.",
+          "targetID": "primary",
+          "runPolicy": "once",
+          "sessionPolicy": "ownMemory",
+          "sharedGroupID": null
+        }
+      ],
+      "coordinator": {
+        "targetID": "missing",
+        "instructions": "Route the next turn."
+      },
+      "overseerTargetID": "primary",
+      "preferredNextMemberID": "deliver"
+    }
+    """
+
+    private static let validStrategicKeep = """
+    {
+      "action": "keep",
+      "reason": "The current setup still has useful work.",
+      "evidence": "An eligible agent can continue.",
+      "workingGoal": null,
+      "members": null,
+      "coordinator": null,
+      "overseerTargetID": null,
+      "preferredNextMemberID": null
+    }
+    """
 }
 
 private func schemaEnumValues(_ value: JSONValue, property: String) -> [String] {
@@ -515,6 +603,11 @@ private func schemaUsesStrictObjectProperties(_ value: JSONValue) -> Bool {
 private actor LiveTeamUtilityProvider: AgentProviding {
     nonisolated let id: AgentProviderID = .codex
     private var utilityRequests: [AgentUtilityRequest] = []
+    private var outputs: [String]
+
+    init(outputs: [String] = []) {
+        self.outputs = outputs
+    }
 
     func prepareSession(_ request: AgentSessionRequest) throws -> AgentSession {
         throw AgentProviderError.invalidSession(request.name)
@@ -545,6 +638,9 @@ private actor LiveTeamUtilityProvider: AgentProviding {
 
     func runUtility(_ request: AgentUtilityRequest) -> AgentUtilityResult {
         utilityRequests.append(request)
+        if !outputs.isEmpty {
+            return AgentUtilityResult(output: outputs.removeFirst())
+        }
         if request.developerInstructions.contains("route local agent work") {
             return AgentUtilityResult(output: """
             {
@@ -583,6 +679,20 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     func shutdown() {}
     func shutdownAndVerify() -> Bool { true }
     func requests() -> [AgentUtilityRequest] { utilityRequests }
+}
+
+private func strategicContext(target: AgentTarget) -> LiveTeamOverseerContext {
+    LiveTeamOverseerContext(
+        userGoal: "Finish the project autonomously.",
+        currentDefinition: liveTeamDefinition(),
+        coordinatorHandoff: "The current agents finished their work.",
+        recentEvidence: [],
+        editHistory: [],
+        targetOptions: [
+            LiveTeamTargetOption(id: "primary", label: "Primary", target: target)
+        ],
+        triggerReason: "The current agents are exhausted."
+    )
 }
 
 private func testTarget() -> AgentTarget {
