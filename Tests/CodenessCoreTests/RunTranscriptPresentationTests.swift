@@ -36,10 +36,10 @@ struct RunTranscriptPresentationTests {
     func structuredTranscriptDefaultsToReasoningResultAndDiagnostics() {
         let transcript = [
             RunTranscriptPresentation.storedText("Prompt\nDo the work.\n\n", section: .prompt),
-            RunTranscriptPresentation.storedText("Reasoning\nInspecting.\n", section: .reasoning),
+            RunTranscriptPresentation.storedText("\n\nInspecting.\n", section: .reasoning),
             RunTranscriptPresentation.storedText("\n› xcodebuild test\n", section: .action),
             RunTranscriptPresentation.storedText("\n⚠ A command failed\n", section: .diagnostic),
-            RunTranscriptPresentation.storedText("\nResult\nFinished.\n", section: .result)
+            RunTranscriptPresentation.storedText("\nFinished.\n", section: .result)
         ].joined()
         let run = makeRun(prompt: "Do the work.", transcript: transcript)
 

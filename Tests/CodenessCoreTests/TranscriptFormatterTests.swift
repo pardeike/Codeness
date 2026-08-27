@@ -69,7 +69,7 @@ struct TranscriptFormatterTests {
                 "type": .string("commandExecution"),
                 "status": .string("failed"),
                 "exitCode": .integer(1),
-                "aggregatedOutput": .string("\u{001B}[31mERROR\u{001B}[0m apply_patch verification failed")
+                "aggregatedOutput": .string("\u{001B}[31mERROR\u{001B}[0m apply_patch verification failed\nNo matching context")
             ])
         ])
 
@@ -78,8 +78,8 @@ struct TranscriptFormatterTests {
             params: completed,
             itemsWithDeltas: []
         )
-        #expect(finish.text.contains("Command failed, exit 1"))
-        #expect(finish.text.contains("ERROR apply_patch verification failed"))
+        #expect(finish.text.contains("⚠ Command failed (exit 1)"))
+        #expect(finish.text.contains("  └ ERROR apply_patch verification failed\n    No matching context"))
         #expect(!finish.text.contains("\u{001B}"))
     }
 
@@ -126,11 +126,11 @@ struct TranscriptFormatterTests {
         #expect(TranscriptFormatter.update(method: "item/completed", params: succeeded, itemsWithDeltas: []).text.isEmpty)
         let failure = TranscriptFormatter.update(method: "item/completed", params: failed, itemsWithDeltas: [])
         #expect(failure.text.contains("decompiler/resolve_member_id failed"))
-        #expect(failure.text.contains("Member was not found"))
+        #expect(failure.text.contains("  └ Member was not found"))
     }
 
     @Test
-    func emitsOneReasoningHeadingPerReasoningItem() {
+    func startsReasoningWithoutAVisibleHeading() {
         let started: JSONValue = .object([
             "item": .object([
                 "id": .string("reasoning-1"),
@@ -165,10 +165,44 @@ struct TranscriptFormatterTests {
         )
         #expect(heading.text.isEmpty)
         #expect(separator.text.isEmpty)
-        #expect(first.text.contains("Reasoning"))
+        #expect(first.text == "\n\nChecking the implementation.")
         #expect(first.section == .reasoning)
-        #expect(!later.text.contains("Reasoning"))
+        #expect(later.text == " More detail.")
         #expect(later.section == nil)
+    }
+
+    @Test
+    func startsAgentMessagesWithoutVisibleReasoningOrResultHeadings() {
+        let commentary: JSONValue = .object([
+            "item": .object([
+                "id": .string("message-1"),
+                "type": .string("agentMessage"),
+                "phase": .string("commentary")
+            ])
+        ])
+        let finalAnswer: JSONValue = .object([
+            "item": .object([
+                "id": .string("message-2"),
+                "type": .string("agentMessage"),
+                "phase": .string("final_answer")
+            ])
+        ])
+
+        let reasoning = TranscriptFormatter.update(
+            method: "item/started",
+            params: commentary,
+            itemsWithDeltas: []
+        )
+        let result = TranscriptFormatter.update(
+            method: "item/started",
+            params: finalAnswer,
+            itemsWithDeltas: []
+        )
+
+        #expect(reasoning.text == "\n\n")
+        #expect(reasoning.section == .reasoning)
+        #expect(result.text == "\n\n")
+        #expect(result.section == .result)
     }
 
     @Test
@@ -189,6 +223,7 @@ struct TranscriptFormatterTests {
         )
 
         #expect(update.section == .reasoning)
+        #expect(update.text.contains("Plan\n"))
         #expect(update.text.contains("Checking the durable workflow first."))
         #expect(update.text.contains("[done] Inspect recovery"))
         #expect(update.text.contains("[active] Repair persistence"))

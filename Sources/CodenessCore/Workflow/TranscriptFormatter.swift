@@ -37,7 +37,7 @@ public enum TranscriptFormatter {
         case "item/reasoning/summaryTextDelta":
             let isFirstDelta = itemID.map { !itemsWithDeltas.contains($0) } ?? true
             return .init(
-                text: (isFirstDelta ? "\n\nReasoning\n" : "")
+                text: (isFirstDelta ? "\n\n" : "")
                     + (params["delta"]?.stringValue ?? ""),
                 itemID: itemID,
                 section: isFirstDelta ? .reasoning : nil
@@ -138,7 +138,7 @@ public enum TranscriptFormatter {
         case "agentMessage":
             let isResult = item["phase"]?.stringValue == "final_answer"
             return .init(
-                text: "\n\n\(isResult ? "Result" : "Reasoning")\n",
+                text: "\n\n",
                 itemID: itemID,
                 section: isResult ? .result : .reasoning
             )
@@ -169,10 +169,10 @@ public enum TranscriptFormatter {
             guard toolFailed(status: status, exitCode: exitCode, error: itemErrorText(item)) else {
                 return .init(itemID: itemID)
             }
-            let exitDescription = exitCode.map { ", exit \($0)" } ?? ""
+            let exitDescription = exitCode.map { " (exit \($0))" } ?? ""
             let detail = failureExcerpt(output.isEmpty ? itemErrorText(item) ?? "" : output)
             return .init(
-                text: "\n⚠ Command \(status)\(exitDescription)\(detail.isEmpty ? "" : "\n\(detail)")\n",
+                text: "\n⚠ Command \(status)\(exitDescription)\(nestedFailureDetail(detail))\n",
                 itemID: itemID,
                 section: .diagnostic
             )
@@ -184,7 +184,7 @@ public enum TranscriptFormatter {
             let error = itemFailureText(item)
             let detail = failureExcerpt(error ?? "")
             return .init(
-                text: "\n⚠ File changes \(status)\(detail.isEmpty ? "" : ": \(detail)")\n",
+                text: "\n⚠ File changes \(status)\(nestedFailureDetail(detail))\n",
                 itemID: itemID,
                 section: .diagnostic
             )
@@ -218,7 +218,7 @@ public enum TranscriptFormatter {
     ) -> TranscriptUpdate {
         let detail = failureExcerpt(error ?? "")
         return .init(
-            text: "\n⚠ \(name) \(status)\(detail.isEmpty ? "" : "\n\(detail)")\n",
+            text: "\n⚠ \(name) \(status)\(nestedFailureDetail(detail))\n",
             itemID: itemID,
             section: .diagnostic
         )
@@ -286,5 +286,16 @@ public enum TranscriptFormatter {
             excerpt = "…\n" + excerpt
         }
         return excerpt
+    }
+
+    private static func nestedFailureDetail(_ detail: String) -> String {
+        guard !detail.isEmpty else { return "" }
+        return "\n" + detail
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated()
+            .map { index, line in
+                "\(index == 0 ? "  └ " : "    ")\(line)"
+            }
+            .joined(separator: "\n")
     }
 }
