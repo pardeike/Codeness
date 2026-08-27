@@ -4363,14 +4363,21 @@ public final class RepositoryCoordinator {
                     requested: request.continuation,
                     preferredMemberID: decision.preferredNextMemberID
                 )
-                if request.leavePaused || pauseAfterCurrent {
+                if let continuation, request.leavePaused || pauseAfterCurrent {
                     record.activity?.status = .paused
-                    record.activity?.liveTeam?.resumeCheckpoint = continuation.map { .perform($0) }
+                    record.activity?.liveTeam?.resumeCheckpoint = .perform(continuation)
                     statusMessage = "Agent changes applied; paused"
                     try? await persist()
                 } else if let continuation {
                     await performLiveTeam(checkpoint: continuation)
                 } else {
+                    record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(
+                        autonomousContinuationOverseerRequest(
+                            previousReason: "The changed setup has no eligible agent.",
+                            sourceRunID: request.sourceRunID,
+                            continuation: nil
+                        )
+                    )
                     pauseLiveTeamActivity(message: "The changed setup has no eligible agent.")
                     try? await persist()
                 }

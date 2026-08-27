@@ -402,6 +402,106 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
+    func exhaustedReplacementPreservesOverseerRetryCheckpoint() async throws {
+        let fixture = try makeFixture(goal: "Continue until an eligible stage is available.")
+        defer { fixture.remove() }
+        var audit = liveMember(id: "audit", sessionPolicy: .freshEveryRun)
+        audit.runPolicy = .once
+        let current = LiveTeamDefinition(
+            revision: 2,
+            workingGoal: "Audit the current bounded stage.",
+            members: [audit],
+            coordinator: liveCoordinatorConfiguration(),
+            strategicReason: "The current stage needs one independent audit."
+        )
+        var unchangedAudit = audit
+        unchangedAudit.sessionPolicy = .ownMemory
+        let ineffective = LiveTeamDefinition(
+            revision: 3,
+            workingGoal: current.workingGoal,
+            members: [unchangedAudit],
+            coordinator: liveCoordinatorConfiguration(),
+            strategicReason: "Reuse the completed audit with a different memory policy."
+        )
+        let checkpoint = LiveTeamCheckpoint(
+            memberID: audit.id,
+            cycle: 1,
+            revision: current.revision
+        )
+        var record = RepositoryRecord(canonicalPath: fixture.canonicalPath)
+        record.activity = ActivityRecord(
+            goal: fixture.goal,
+            prompts: .builtInDefaults,
+            status: .paused,
+            liveTeam: LiveTeamState(
+                overseer: liveOverseerConfiguration(),
+                currentDefinition: current,
+                checkpoint: checkpoint,
+                resumeCheckpoint: .perform(checkpoint),
+                cyclesUnderCurrentRevision: 0
+            )
+        )
+        try await fixture.store.save(record)
+
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.requestOversight, evidence: "The audit finished its Once assignment.")
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: current,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal,
+            strategicDecision: LiveTeamStrategicDecision(
+                action: .revise,
+                reason: ineffective.strategicReason,
+                evidence: "The replacement leaves the completed Once assignment unchanged.",
+                proposedDefinition: ineffective,
+                preferredNextMemberID: audit.id
+            )
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+        await coordinator.resume()
+        try await waitUntilAsync {
+            await overseer.recordedStrategicContexts().count == 1
+        }
+        try await waitUntil { coordinator.record.activity?.status == .paused }
+
+        #expect(coordinator.record.activity?.liveTeam?.currentDefinition?.revision == 3)
+        #expect(coordinator.record.activity?.runs.count == 1)
+        guard case .invokeOverseer(let retry)? =
+            coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
+            Issue.record("The exhausted replacement did not preserve an Overseer retry.")
+            return
+        }
+        #expect(retry.reason.contains("no eligible agent"))
+        #expect(coordinator.canResume)
+
+        await coordinator.resume()
+        try await waitUntilAsync {
+            await overseer.recordedStrategicContexts().count == 2
+        }
+        try await waitUntil { coordinator.record.activity?.status == .paused }
+
+        #expect(coordinator.record.activity?.runs.count == 1)
+        guard case .invokeOverseer? =
+            coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
+            Issue.record("Retrying the exhausted replacement lost its Overseer checkpoint.")
+            return
+        }
+    }
+
+    @Test
     func successfulSteeringIsRecordedInTheActiveTurnTranscript() async throws {
         let fixture = try makeFixture(goal: "Deliver the fixed user goal.")
         defer { fixture.remove() }
