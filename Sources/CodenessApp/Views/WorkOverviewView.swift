@@ -23,7 +23,8 @@ struct WorkOverviewView: View {
                         activity: activity,
                         repositoryUpdatedAt: record.updatedAt,
                         now: context.date
-                    )
+                    ),
+                    now: context.date
                 )
             }
             .task(id: coordinator.workOverviewSummarySourceSignature) {
@@ -34,12 +35,13 @@ struct WorkOverviewView: View {
 
     private func overview(
         activity: ActivityRecord,
-        metrics: WorkOverviewMetrics
+        metrics: WorkOverviewMetrics,
+        now: Date
     ) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 if let liveTeam = activity.liveTeam {
-                    liveTeamOverview(activity: activity, state: liveTeam)
+                    liveTeamOverview(activity: activity, state: liveTeam, now: now)
                 }
                 if metrics.usesLiveTeam {
                     productReturn(metrics)
@@ -133,7 +135,8 @@ struct WorkOverviewView: View {
 
     private func liveTeamOverview(
         activity: ActivityRecord,
-        state: LiveTeamState
+        state: LiveTeamState,
+        now: Date
     ) -> some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 14) {
@@ -198,14 +201,11 @@ struct WorkOverviewView: View {
                     }
 
                 } else {
-                    HStack(spacing: 10) {
-                        if activity.status == .running {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        Text("Codeness is preparing the agents.")
-                            .foregroundStyle(.secondary)
-                    }
+                    CompanyFormationView(
+                        status: activity.status,
+                        startedAt: activity.createdAt,
+                        now: now
+                    )
                 }
             }
             .padding(8)
@@ -559,6 +559,108 @@ struct WorkOverviewView: View {
         }
         let colors: [Color] = [.blue, .purple, .orange, .teal, .indigo, .pink]
         return colors[index % colors.count]
+    }
+}
+
+struct CompanyFormationPresentation: Equatable {
+    struct Moment: Equatable, Identifiable {
+        let title: String
+        let symbol: String
+
+        var id: String { title }
+    }
+
+    static let moments = [
+        Moment(title: "Finding the sharpest product bet", symbol: "scope"),
+        Moment(title: "Creating a founder with a point of view", symbol: "crown.fill"),
+        Moment(title: "Casting distinct people, not generic agents", symbol: "person.2.fill"),
+        Moment(title: "Giving every hire a concrete mission", symbol: "hammer.fill"),
+        Moment(title: "Preparing the first piece of real work", symbol: "play.fill")
+    ]
+
+    let headline: String
+    let detail: String
+    let activeMomentIndex: Int?
+
+    init(status: ActivityStatus, startedAt: Date, now: Date) {
+        if status == .running {
+            let elapsed = max(0, now.timeIntervalSince(startedAt))
+            activeMomentIndex = Int(elapsed / 4) % Self.moments.count
+            headline = "Founding the company"
+            detail = Self.moments[activeMomentIndex!].title
+        } else {
+            activeMomentIndex = nil
+            headline = "Company setup is paused"
+            detail = "Resume when you want Codeness to continue."
+        }
+    }
+}
+
+private struct CompanyFormationView: View {
+    let status: ActivityStatus
+    let startedAt: Date
+    let now: Date
+
+    private var presentation: CompanyFormationPresentation {
+        CompanyFormationPresentation(status: status, startedAt: startedAt, now: now)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(.orange.opacity(0.14))
+                    Image(systemName: "sparkles")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+                .frame(width: 42, height: 42)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(presentation.headline)
+                        .font(.headline)
+                    Text(presentation.detail)
+                        .foregroundStyle(.secondary)
+                        .contentTransition(.opacity)
+                }
+
+                Spacer()
+
+                if status == .running {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            HStack(spacing: 8) {
+                ForEach(Array(CompanyFormationPresentation.moments.enumerated()), id: \.element.id) {
+                    index, moment in
+                    Image(systemName: moment.symbol)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(
+                            presentation.activeMomentIndex == index ? .orange : .secondary
+                        )
+                        .frame(width: 28, height: 28)
+                        .background(
+                            presentation.activeMomentIndex == index
+                                ? Color.orange.opacity(0.16)
+                                : Color.secondary.opacity(0.08),
+                            in: Circle()
+                        )
+                }
+            }
+            .accessibilityHidden(true)
+
+            if status == .running {
+                Text("The first setup can take a few minutes. Work starts automatically when the company is ready.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(4)
+        .accessibilityElement(children: .combine)
     }
 }
 

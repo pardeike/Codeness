@@ -5,6 +5,46 @@ import CodenessCore
 
 struct WorkOverviewMetricsTests {
     @Test
+    func companyFormationKeepsLongBootstrapVisiblyAliveWithoutInventingProgress() {
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+
+        let first = CompanyFormationPresentation(
+            status: .running,
+            startedAt: startedAt,
+            now: startedAt
+        )
+        let next = CompanyFormationPresentation(
+            status: .running,
+            startedAt: startedAt,
+            now: startedAt.addingTimeInterval(4)
+        )
+        let wrapped = CompanyFormationPresentation(
+            status: .running,
+            startedAt: startedAt,
+            now: startedAt.addingTimeInterval(20)
+        )
+
+        #expect(first.headline == "Founding the company")
+        #expect(first.activeMomentIndex == 0)
+        #expect(next.activeMomentIndex == 1)
+        #expect(next.detail == CompanyFormationPresentation.moments[1].title)
+        #expect(wrapped.activeMomentIndex == 0)
+    }
+
+    @Test
+    func pausedCompanyFormationStopsTheActivityCue() {
+        let presentation = CompanyFormationPresentation(
+            status: .paused,
+            startedAt: .distantPast,
+            now: .now
+        )
+
+        #expect(presentation.headline == "Company setup is paused")
+        #expect(presentation.detail == "Resume when you want Codeness to continue.")
+        #expect(presentation.activeMomentIndex == nil)
+    }
+
+    @Test
     func companyMetricsSeparateProductTokensFromAllControlTokens() throws {
         let target = AgentTarget(providerID: .codex, model: "gpt-company")
         let chiefExecutive = metricsPerson(

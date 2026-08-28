@@ -754,6 +754,7 @@ final class CodenessApplicationModel {
             retainedEventRoutingPauses[.codex] = await appServer.pauseEventRouting()
         }
         guard lifecycleIsCurrent(lease) else { return .failedClosed }
+        serverState = .starting
         intentionalShutdown = true
         let oldServerStopped = await codexShutdownAndVerify()
         guard oldServerStopped else {

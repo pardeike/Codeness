@@ -664,13 +664,7 @@ private struct CompanyPersonRow: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            Image(systemName: person.positionID == .chiefExecutive
-                ? "crown.fill"
-                : "person.fill")
-                .foregroundStyle(
-                    person.positionID == .chiefExecutive ? Color.orange : Color.secondary
-                )
-                .frame(width: 18)
+            CompanyAvatarView(person: person, size: 28)
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.profile.fullName)
                     .font(.callout.weight(.medium))

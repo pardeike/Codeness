@@ -75,15 +75,7 @@ struct CompanyPersonDetailView: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 16) {
-            Image(systemName: person.positionID == .chiefExecutive
-                ? "crown.fill"
-                : "person.crop.circle.fill")
-                .font(.system(size: 32))
-                .foregroundStyle(
-                    person.positionID == .chiefExecutive ? Color.orange : Color.accentColor
-                )
-                .frame(width: 52, height: 52)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+            CompanyAvatarView(person: person, size: 56)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(person.profile.fullName)

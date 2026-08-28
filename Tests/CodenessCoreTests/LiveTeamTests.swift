@@ -516,10 +516,34 @@ struct LiveTeamModelTests {
         #expect(instructions.contains("visible, usable, integrated product value"))
         #expect(instructions.contains("at most 180 words"))
         #expect(instructions.contains("not an academic, consultant, or formal committee"))
+        #expect(instructions.contains("position is a real division of responsibility"))
+        #expect(instructions.contains("Managers use the running product"))
         #expect(instructions.contains("personal or global agent memory"))
         #expect(!instructions.contains("Implement member"))
         #expect(!instructions.contains("Review member"))
     }
+
+    @Test
+    func companyMemberPromptMakesProfessionARealWorkBoundary() throws {
+        let definition = companyLiveTeamDefinition()
+        let member = try #require(definition.members.first)
+        let prompt = LiveTeamPromptBuilder.memberPrompt(
+            snapshot: LiveTeamMemberSnapshot(
+                member: member,
+                workingGoal: definition.workingGoal,
+                revision: definition.revision,
+                cycle: 1,
+                sessionSlotID: "member:\(member.id)",
+                productBet: definition.productBet
+            ),
+            handoff: nil
+        )
+
+        #expect(prompt.contains("position is a real division of responsibility"))
+        #expect(prompt.contains("Do not take over another hired specialist's core craft"))
+        #expect(prompt.contains("Managers use the running product"))
+    }
+
 }
 
 private struct SeededTestGenerator: RandomNumberGenerator {
@@ -623,6 +647,11 @@ struct AgentLiveTeamRouterTests {
         #expect(bootstrapRequest.developerInstructions.contains("PROJECT MEMORY BOUNDARY"))
         #expect(bootstrapRequest.prompt.contains("first six eligible product turns"))
         #expect(bootstrapRequest.developerInstructions.contains("choose only from this catalog"))
+        let bootstrapInstructions = bootstrapRequest.developerInstructions
+            + bootstrapRequest.prompt
+        #expect(bootstrapInstructions.contains("Order people by real execution dependency"))
+        #expect(bootstrapInstructions.contains("first person must own the next tangible product change"))
+        #expect(bootstrapInstructions.contains("put the appropriate maker before a Product Manager or Producer"))
         #expect(coordinatorRequest.developerInstructions.contains("route local agent work"))
         #expect(coordinatorRequest.developerInstructions.contains("evidence and advice, not authority"))
     }

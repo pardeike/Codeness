@@ -145,3 +145,7 @@ Before declaring a production change complete, run:
 ```
 
 The completion build must install and verify `/Applications/Codeness.app`. For isolated development that must not touch production state, use `./scripts/build-prototype-quiet.sh`; it installs `/Applications/Codeness Prototype.app` with a separate bundle identifier and Application Support directory.
+
+## Credits
+
+Company avatars use [Adventurer Neutral](https://www.dicebear.com/styles/adventurer-neutral/) by Lisa Wischofsky through DiceBear, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
