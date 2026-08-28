@@ -698,17 +698,6 @@ private struct RunListTopEdgeProtection: ViewModifier {
     }
 }
 
-struct RepositoryDetailTopEdgeSuppression: ViewModifier {
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.scrollEdgeEffectHidden(true, for: .top)
-        } else {
-            content
-        }
-    }
-}
-
 private struct RunGroupHeader: View {
     let group: RunWorkUnit
 

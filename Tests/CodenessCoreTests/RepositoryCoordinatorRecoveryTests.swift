@@ -184,6 +184,59 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func loadRepairsAReviewCheckpointCreatedBeforeInitialSetup() async throws {
+        let target = AgentTarget(providerID: .codex, model: "gpt-5.6-luna")
+        let invalidRequest = LiveTeamOverseerRequest(
+            mode: .strategicReview,
+            reason: "The user amended the goal.",
+            automatic: false,
+            leavePaused: true
+        )
+        let invalidReview = LiveTeamReviewRecord(
+            mode: .strategicReview,
+            trigger: invalidRequest.reason,
+            sourceRunID: nil,
+            baseRevision: 1,
+            status: .failed,
+            decision: .init(
+                outcome: .failed,
+                summary: "Review interrupted",
+                reason: "Strategic review requires a current live-team definition.",
+                evidence: "The checkpoint was preserved for retry."
+            ),
+            completedAt: .now
+        )
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-prebootstrap-goal-\(UUID().uuidString)",
+            activity: ActivityRecord(
+                goal: "Use the revised goal.",
+                prompts: .builtInDefaults,
+                status: .paused,
+                liveTeam: LiveTeamState(
+                    overseer: .init(target: target, instructions: "Own the goal."),
+                    resumeCheckpoint: .invokeOverseer(invalidRequest),
+                    reviews: [invalidReview],
+                    lastStrategicReviewAt: .now,
+                    boardGoalAmendmentPendingReview: true
+                )
+            )
+        )
+        let harness = try await CoordinatorHarness(record: record)
+        defer { harness.remove() }
+
+        let state = try #require(harness.coordinator.activity?.liveTeam)
+        guard case .invokeOverseer(let repairedRequest)? = state.resumeCheckpoint else {
+            Issue.record("Expected a repaired bootstrap checkpoint")
+            return
+        }
+        #expect(repairedRequest.mode == .bootstrap)
+        #expect(!repairedRequest.automatic)
+        #expect(state.reviews.isEmpty)
+        #expect(state.lastStrategicReviewAt == nil)
+        #expect(!state.boardGoalAmendmentPendingReview)
+    }
+
+    @Test
     func interruptedLastRunIsResumable() async throws {
         let harness = try await CoordinatorHarness(record: repositoryRecord(
             activityStatus: .paused,

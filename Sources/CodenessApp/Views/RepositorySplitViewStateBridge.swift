@@ -74,12 +74,16 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
 
         @discardableResult
         func attachIfPossible(from probe: NSView) -> Bool {
-            if splitView != nil { return true }
+            if let splitView {
+                suppressAutomaticTitlebarBackgrounds(in: splitView)
+                return true
+            }
             // AppKit owns the probe's unowned window reference for the duration of this
             // main-actor view-hierarchy lookup; the optional becomes nil when detached.
             guard let root = unsafe probe.window?.contentView,
                   let splitView = findNavigationSplitView(in: root) else { return false }
             self.splitView = splitView
+            suppressAutomaticTitlebarBackgrounds(in: splitView)
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(splitViewDidResize),
@@ -117,6 +121,9 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
 
         @objc private func splitViewDidResize() {
             guard !isApplyingWidth else { return }
+            if let splitView {
+                suppressAutomaticTitlebarBackgrounds(in: splitView)
+            }
             scheduleStateReport()
         }
 
@@ -212,6 +219,7 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
         private func reportCurrentState() {
             guard let splitView,
                   let sidebar = splitView.arrangedSubviews.first else { return }
+            suppressAutomaticTitlebarBackgrounds(in: splitView)
             let width = sidebar.frame.width
             let isVisible = allowsSidebarRestoration && !sidebar.isHidden && width > 1
             guard lastReportedWidth.map({ abs($0 - width) >= 0.5 }) != false
@@ -219,6 +227,19 @@ struct RepositorySplitViewStateBridge: NSViewRepresentable {
             lastReportedWidth = width
             lastReportedVisibility = isVisible
             onSidebarChange(width, isVisible)
+        }
+
+        private func suppressAutomaticTitlebarBackgrounds(in splitView: NSSplitView) {
+            // macOS 26 adds an unconfigurable titlebar scroll-edge backdrop to
+            // every NavigationSplitView column, even when the window toolbar
+            // has no content over that column. It covers the first 52 points
+            // of every detail page. The background is an AppKit-owned sibling
+            // of the arranged column views, so page-level SwiftUI scroll-edge
+            // modifiers cannot affect it.
+            for view in splitView.subviews
+            where NSStringFromClass(type(of: view)) == "NSTitlebarBackgroundView" {
+                view.isHidden = true
+            }
         }
 
         private func findNavigationSplitView(in view: NSView) -> NSSplitView? {

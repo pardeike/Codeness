@@ -17,33 +17,26 @@ struct ActivityConfigurationView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("What should Codeness accomplish?")
-                        .font(.largeTitle.weight(.semibold))
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Goal")
+                    .font(.title2.weight(.semibold))
 
-                    ActivityTextEditor(
-                        text: $goal,
-                        minHeight: 240,
-                        accessibilityLabel: "Goal",
-                        helpText: "Describe the complete outcome, requirements, and authority granted to Codeness.",
-                        placeholder: "For example: Implement the specification in Docs/Feature.md, including its validation requirements."
-                    )
+                ActivityTextEditor(
+                    text: $goal,
+                    minHeight: 240,
+                    accessibilityLabel: "Goal",
+                    helpText: "Describe the result Codeness should accomplish.",
+                    placeholder: "Describe the result you want."
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    Text("Include any provider, model, cost, or session limits that Codeness must follow.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if let message = application.liveTeamAvailabilityMessage {
-                        Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    }
+                if let message = application.liveTeamAvailabilityMessage {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
                 }
-                .frame(maxWidth: 820, alignment: .leading)
-                .padding(32)
-                .frame(maxWidth: .infinity)
             }
-            .modifier(RepositoryDetailTopEdgeSuppression())
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             Divider()
             HStack {

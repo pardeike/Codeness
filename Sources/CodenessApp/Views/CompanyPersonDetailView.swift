@@ -71,7 +71,6 @@ struct CompanyPersonDetailView: View {
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .top)
         }
-        .modifier(RepositoryDetailTopEdgeSuppression())
     }
 
     private var header: some View {

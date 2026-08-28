@@ -774,6 +774,7 @@ public final class RepositoryCoordinator {
             guard isCurrentLoad(generation) else { return }
             if record.activity?.liveTeam != nil {
                 recoverInterruptedLiveTeamState()
+                repairPrebootstrapReviewCheckpointIfNeeded()
                 repairInterruptedLiveTeamReviewsIfNeeded()
                 if record.activity?.liveTeam?.pendingRevision != nil {
                     _ = await activatePendingLiveTeamRevision()
@@ -2401,7 +2402,7 @@ public final class RepositoryCoordinator {
                 activity.goal = cleanGoal
             }
         }
-        if activity.liveTeam != nil, activity.status != .running {
+        if activity.liveTeam?.currentDefinition != nil, activity.status != .running {
             activity.liveTeam?.boardGoalAmendmentPendingReview = true
         }
         record.activity = activity
@@ -5217,6 +5218,31 @@ public final class RepositoryCoordinator {
             )
             record.activity?.liveTeam?.reviews[index].completedAt = .now
         }
+    }
+
+    private func repairPrebootstrapReviewCheckpointIfNeeded() {
+        guard var state = record.activity?.liveTeam,
+              state.currentDefinition == nil else { return }
+
+        state.boardGoalAmendmentPendingReview = false
+        if !state.reviews.isEmpty {
+            state.reviews.removeAll()
+            selectedReviewID = nil
+            viewState.selectedReviewID = nil
+        }
+        state.lastStrategicReviewAt = nil
+        guard case .invokeOverseer(let request)? = state.resumeCheckpoint,
+              request.mode != .bootstrap else {
+            record.activity?.liveTeam = state
+            return
+        }
+
+        state.resumeCheckpoint = .invokeOverseer(LiveTeamOverseerRequest(
+            mode: .bootstrap,
+            reason: "Prepare the first agents for the current goal.",
+            automatic: false
+        ))
+        record.activity?.liveTeam = state
     }
 
     private func resumeGeneric() async {

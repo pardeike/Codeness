@@ -38,7 +38,6 @@ struct WorkOverviewView: View {
     ) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                overviewHeader(activity: activity)
                 if let liveTeam = activity.liveTeam {
                     liveTeamOverview(activity: activity, state: liveTeam)
                 }
@@ -56,7 +55,6 @@ struct WorkOverviewView: View {
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .top)
         }
-        .modifier(RepositoryDetailTopEdgeSuppression())
     }
 
     private var workSummary: some View {
@@ -120,38 +118,6 @@ struct WorkOverviewView: View {
             $0.handoff != nil || $0.workflowHandoff != nil || $0.coordinatorDecision != nil
         }) ?? 0
         return count == 1 ? "handoff" : "\(count) handoffs"
-    }
-
-    private func overviewHeader(activity: ActivityRecord) -> some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 28))
-                .foregroundStyle(.tint)
-                .frame(width: 46, height: 46)
-                .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(URL(fileURLWithPath: record.canonicalPath).lastPathComponent)
-                    .font(.title2.weight(.semibold))
-                Text(record.canonicalPath)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-            }
-
-            Spacer(minLength: 16)
-
-            Label(
-                activity.status.rawValue.capitalized,
-                systemImage: statusSymbol(activity.status)
-            )
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(statusColor(activity.status))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(statusColor(activity.status).opacity(0.12), in: Capsule())
-        }
     }
 
     private func goal(_ text: String) -> some View {
@@ -565,26 +531,6 @@ struct WorkOverviewView: View {
         guard let session else { return "Not created" }
         let readiness = session.providerSessionID == nil ? "Pending" : "Ready"
         return session.lineage == 1 ? readiness : "\(readiness) · lineage \(session.lineage)"
-    }
-
-    private func statusSymbol(_ status: ActivityStatus) -> String {
-        switch status {
-        case .running: "play.circle.fill"
-        case .paused: "pause.circle.fill"
-        case .completed: "checkmark.circle.fill"
-        case .cancelled: "xmark.circle.fill"
-        case .failed: "exclamationmark.triangle.fill"
-        }
-    }
-
-    private func statusColor(_ status: ActivityStatus) -> Color {
-        switch status {
-        case .running: .green
-        case .paused: .orange
-        case .completed: .blue
-        case .cancelled: .secondary
-        case .failed: .red
-        }
     }
 
     private func phaseSymbol(_ phase: WorkOverviewMetrics.Phase) -> String {

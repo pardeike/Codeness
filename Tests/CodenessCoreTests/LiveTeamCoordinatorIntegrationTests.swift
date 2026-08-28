@@ -359,6 +359,66 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
+    func pausedPrebootstrapGoalAmendmentUpdatesBootstrapWithoutStartingReview() async throws {
+        let fixture = try makeFixture(goal: "Create the first company.")
+        defer { fixture.remove() }
+        let bootstrapRequest = LiveTeamOverseerRequest(
+            mode: .bootstrap,
+            reason: "Create the first working goal and agents for the user's goal.",
+            automatic: false
+        )
+        try await fixture.store.save(RepositoryRecord(
+            canonicalPath: fixture.canonicalPath,
+            activity: ActivityRecord(
+                goal: fixture.goal,
+                prompts: .builtInDefaults,
+                status: .paused,
+                liveTeam: LiveTeamState(
+                    overseer: liveRuntimeConfiguration().overseer,
+                    resumeCheckpoint: .invokeOverseer(bootstrapRequest)
+                )
+            )
+        ))
+        let definition = liveDefinition(members: [
+            liveMember(id: "deliver", sessionPolicy: .ownMemory)
+        ])
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+        await coordinator.load()
+
+        let amendedGoal = "Create the first company from the clearer goal."
+        #expect(await coordinator.amendGoal(amendedGoal))
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.goal == amendedGoal)
+        #expect(activity.status == .paused)
+        #expect(activity.goalAmendments.count == 1)
+        #expect(activity.liveTeam?.resumeCheckpoint == .invokeOverseer(bootstrapRequest))
+        #expect(activity.liveTeam?.reviews.isEmpty == true)
+        #expect(activity.liveTeam?.boardGoalAmendmentPendingReview == false)
+        #expect(await overseer.bootstrapCount() == 0)
+        #expect(await overseer.recordedStrategicContexts().isEmpty)
+
+        let persisted = try await fixture.store.load(canonicalPath: fixture.canonicalPath)
+        #expect(persisted.activity == activity)
+    }
+
+    @Test
     func boardGoalAmendmentDuringMemberTurnQueuesStrategicReviewAtBoundary() async throws {
         let fixture = try makeFixture(goal: "Keep the initial Board goal.")
         defer { fixture.remove() }
