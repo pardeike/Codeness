@@ -25,10 +25,13 @@ struct WorkOverviewMetricsTests {
         )
 
         #expect(first.headline == "Founding the company")
+        #expect(first.progress == "Step 1/2")
         #expect(first.activeMomentIndex == 0)
         #expect(next.activeMomentIndex == 1)
         #expect(next.detail == CompanyFormationPresentation.moments[1].title)
+        #expect(next.progress == first.progress)
         #expect(wrapped.activeMomentIndex == 0)
+        #expect(wrapped.progress == first.progress)
     }
 
     @Test
@@ -40,6 +43,7 @@ struct WorkOverviewMetricsTests {
         )
 
         #expect(presentation.headline == "Company setup is paused")
+        #expect(presentation.progress == "Step 1/2")
         #expect(presentation.detail == "Resume when you want Codeness to continue.")
         #expect(presentation.activeMomentIndex == nil)
     }

@@ -579,10 +579,12 @@ struct CompanyFormationPresentation: Equatable {
     ]
 
     let headline: String
+    let progress: String
     let detail: String
     let activeMomentIndex: Int?
 
     init(status: ActivityStatus, startedAt: Date, now: Date) {
+        progress = "Step 1/2"
         if status == .running {
             let elapsed = max(0, now.timeIntervalSince(startedAt))
             activeMomentIndex = Int(elapsed / 4) % Self.moments.count
@@ -618,8 +620,14 @@ private struct CompanyFormationView: View {
                 .frame(width: 42, height: 42)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(presentation.headline)
-                        .font(.headline)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(presentation.headline)
+                            .font(.headline)
+                        Text(presentation.progress)
+                            .font(.caption.weight(.medium))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                     Text(presentation.detail)
                         .foregroundStyle(.secondary)
                         .contentTransition(.opacity)
