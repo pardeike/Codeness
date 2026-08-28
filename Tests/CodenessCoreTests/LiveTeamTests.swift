@@ -146,6 +146,7 @@ struct LiveTeamModelTests {
 
         #expect(decoded.overseer == state.overseer)
         #expect(decoded.editHistory.isEmpty)
+        #expect(decoded.reviews.isEmpty)
         #expect(decoded.completedOnceMemberIDs.isEmpty)
         #expect(decoded.workerTurnsSinceStrategicReview == 0)
         #expect(decoded.lastStrategicReviewAt == nil)
@@ -350,9 +351,11 @@ struct AgentLiveTeamRouterTests {
         #expect(requests[0].developerInstructions.contains("does not increase their authority"))
         #expect(requests[0].developerInstructions.contains("Repeated support work"))
         #expect(requests[0].developerInstructions.contains("Do not add independent review after every small change"))
+        #expect(requests[0].developerInstructions.contains("outcome-led headline"))
         #expect(requests[1].developerInstructions.contains("route local agent work"))
         #expect(requests[1].developerInstructions.contains("evidence and advice, not authority"))
         #expect(requests[1].developerInstructions.contains("Do not turn suggestions"))
+        #expect(requests[1].developerInstructions.contains("outcome-led headline"))
     }
 
     @Test
@@ -415,6 +418,7 @@ struct AgentLiveTeamRouterTests {
         let provider = LiveTeamUtilityProvider(consultationDelay: .milliseconds(50))
         let registry = AgentProviderRegistry(providers: [provider])
         let router = AgentLiveTeamRouter(providers: registry)
+        let progressRecorder = LiveTeamReviewProgressRecorder()
         let target = testTarget()
         let context = strategicContext(target: target)
 
@@ -424,7 +428,10 @@ struct AgentLiveTeamRouterTests {
                 target: target,
                 instructions: "Keep executive control decisive."
             ),
-            cwd: "/tmp/live-team-staff-consultation"
+            cwd: "/tmp/live-team-staff-consultation",
+            progress: { progress in
+                await progressRecorder.append(progress)
+            }
         )
 
         #expect(decision.action == .keep)
@@ -452,6 +459,27 @@ struct AgentLiveTeamRouterTests {
         #expect(finalReview.prompt.contains("do not count votes"))
         #expect(finalReview.prompt.contains("vote count is not a reason to act"))
         #expect(await provider.maximumConcurrentConsultations() == 2)
+
+        let progress = await progressRecorder.values()
+        #expect(progress.count == 4)
+        guard case .personasSelected(let managers) = progress[0] else {
+            Issue.record("The manager list must be the first visible review update.")
+            return
+        }
+        #expect(managers.map(\.name) == ["Creative Director", "Engineering Director"])
+        let completed: [(Int, LiveTeamManagerConsultation)] = progress
+            .dropFirst()
+            .dropLast()
+            .compactMap { update in
+                guard case .consultationCompleted(let index, let manager) = update else {
+                    return nil
+                }
+                return (index, manager)
+            }
+        #expect(completed.count == 2)
+        #expect(Set(completed.map(\.0)) == [0, 1])
+        #expect(completed.allSatisfy { $0.1.status == .completed })
+        #expect(progress.last == .overseerDeciding)
     }
 
     @Test
@@ -755,6 +783,16 @@ private func schemaUsesStrictObjectProperties(_ value: JSONValue) -> Bool {
     case .null, .bool, .integer, .number, .string:
         return true
     }
+}
+
+private actor LiveTeamReviewProgressRecorder {
+    private var progress: [LiveTeamReviewProgress] = []
+
+    func append(_ value: LiveTeamReviewProgress) {
+        progress.append(value)
+    }
+
+    func values() -> [LiveTeamReviewProgress] { progress }
 }
 
 private actor LiveTeamUtilityProvider: AgentProviding {

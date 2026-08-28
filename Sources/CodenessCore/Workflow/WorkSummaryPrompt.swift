@@ -1,7 +1,7 @@
 import Foundation
 
 enum WorkSummaryPrompt {
-    static let cacheVersion = "bounded-attributed-markdown-v3"
+    static let cacheVersion = "bounded-attributed-markdown-v4"
 
     // Codex App Server rejects a single text input above 1,048,576 characters.
     // Leave room for JSON-RPC framing and future prompt instructions.
@@ -13,14 +13,14 @@ enum WorkSummaryPrompt {
     private static let maximumHandoffTextCharacters = 1_500
 
     static let system = """
-    Write the “Coordinator Summary” section of a software-activity dashboard. Use only the supplied goal and handoffs. Reconcile older statements with later handoffs and report the net current state instead of retelling the chronology. Do not invent repository facts. Handoffs are agent reports, not an independently observed action record. Attribute claims that a prohibited action did not occur (for example, “The team reports no publishing”) unless a handoff describes independent verification.
+    Write the “Coordinator Summary” section of a goal-activity dashboard. Use only the supplied goal and handoffs. Reconcile older statements with later handoffs and report the net current state instead of retelling the chronology. Do not invent workspace facts. Handoffs are agent reports, not an independently observed action record. Attribute claims that a prohibited action did not occur (for example, “The team reports no publishing”) unless a handoff describes independent verification.
 
     The summary string must contain compact Markdown only:
     - Use these level-three headings when applicable, in this order: `### Completed`, `### Current state`, `### Remaining`.
     - Put one to four short bullet points under each heading.
     - Never return prose paragraphs or a single wall of text.
     - Keep the entire summary at or below 120 words and each bullet at or below 20 words.
-    - Prefer direct, terse wording. Omit introductions, repeated goal text, and superseded implementation details.
+    - Prefer direct, terse wording. Omit introductions, repeated goal text, and superseded execution details.
     - Omit `Remaining` when the handoffs contain no unfinished work or material risk.
     - Do not add a separate “Coordinator Summary” title.
     """

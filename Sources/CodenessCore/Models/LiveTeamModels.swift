@@ -411,6 +411,156 @@ public struct LiveTeamEditRecord: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public enum LiveTeamReviewStatus: String, Codable, Equatable, Sendable {
+    case selectingManagers
+    case consultingManagers
+    case overseerDeciding
+    case completed
+    case failed
+}
+
+public enum LiveTeamManagerConsultationStatus: String, Codable, Equatable, Sendable {
+    case waiting
+    case reporting
+    case completed
+    case unavailable
+}
+
+public struct LiveTeamManagerConsultation: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let mandate: String
+    public var status: LiveTeamManagerConsultationStatus
+    public var involvement: String?
+    public var progress: String?
+    public var evidence: String?
+    public var concern: String?
+    public var nextMove: String?
+    public var failure: String?
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        mandate: String,
+        status: LiveTeamManagerConsultationStatus = .waiting,
+        involvement: String? = nil,
+        progress: String? = nil,
+        evidence: String? = nil,
+        concern: String? = nil,
+        nextMove: String? = nil,
+        failure: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.mandate = mandate
+        self.status = status
+        self.involvement = involvement
+        self.progress = progress
+        self.evidence = evidence
+        self.concern = concern
+        self.nextMove = nextMove
+        self.failure = failure
+    }
+}
+
+public enum LiveTeamReviewOutcome: String, Codable, Equatable, Sendable {
+    case kept
+    case revised
+    case completed
+    case continueWork
+    case rejectedPause
+    case failed
+
+    public var displayName: String {
+        switch self {
+        case .kept: "Strategy retained"
+        case .revised: "Strategy revised"
+        case .completed: "Goal confirmed complete"
+        case .continueWork: "More work found"
+        case .rejectedPause: "Autonomous pause rejected"
+        case .failed: "Review interrupted"
+        }
+    }
+}
+
+public struct LiveTeamReviewDecision: Codable, Equatable, Sendable {
+    public let outcome: LiveTeamReviewOutcome
+    public let summary: String
+    public let reason: String
+    public let evidence: String
+
+    public init(
+        outcome: LiveTeamReviewOutcome,
+        summary: String,
+        reason: String,
+        evidence: String
+    ) {
+        self.outcome = outcome
+        self.summary = summary
+        self.reason = reason
+        self.evidence = evidence
+    }
+}
+
+public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let mode: LiveTeamOverseerMode
+    public let trigger: String
+    public let sourceRunID: UUID?
+    public let baseRevision: Int
+    public let startedAt: Date
+    public var status: LiveTeamReviewStatus
+    public var consultations: [LiveTeamManagerConsultation]
+    public var decision: LiveTeamReviewDecision?
+    public var resultingRevision: Int?
+    public var resultingDefinition: LiveTeamDefinition?
+    public var completedAt: Date?
+
+    public init(
+        id: UUID = UUID(),
+        mode: LiveTeamOverseerMode,
+        trigger: String,
+        sourceRunID: UUID?,
+        baseRevision: Int,
+        startedAt: Date = .now,
+        status: LiveTeamReviewStatus = .selectingManagers,
+        consultations: [LiveTeamManagerConsultation] = [],
+        decision: LiveTeamReviewDecision? = nil,
+        resultingRevision: Int? = nil,
+        resultingDefinition: LiveTeamDefinition? = nil,
+        completedAt: Date? = nil
+    ) {
+        self.id = id
+        self.mode = mode
+        self.trigger = trigger
+        self.sourceRunID = sourceRunID
+        self.baseRevision = max(baseRevision, 1)
+        self.startedAt = startedAt
+        self.status = status
+        self.consultations = consultations
+        self.decision = decision
+        self.resultingRevision = resultingRevision
+        self.resultingDefinition = resultingDefinition
+        self.completedAt = completedAt
+    }
+
+    public var completedConsultationCount: Int {
+        consultations.count {
+            $0.status == .completed || $0.status == .unavailable
+        }
+    }
+}
+
+public enum LiveTeamReviewProgress: Sendable, Equatable {
+    case personasSelected([LiveTeamManagerConsultation])
+    case consultationCompleted(index: Int, consultation: LiveTeamManagerConsultation)
+    case overseerDeciding
+}
+
+public typealias LiveTeamReviewProgressHandler = @Sendable (
+    LiveTeamReviewProgress
+) async -> Void
+
 public enum LiveTeamProgressEvidence: String, Codable, CaseIterable, Sendable {
     case none
     case repositoryChange
@@ -493,6 +643,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
     public var coordinatorHandoff: String?
     public var lastCoordinatorDecision: LiveTeamCoordinatorDecision?
     public var editHistory: [LiveTeamEditRecord]
+    public var reviews: [LiveTeamReviewRecord]
     public var workerTurnsSinceStrategicReview: Int
     public var cyclesSinceStrategicReview: Int
     public var lastStrategicReviewAt: Date?
@@ -514,6 +665,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         coordinatorHandoff: String? = nil,
         lastCoordinatorDecision: LiveTeamCoordinatorDecision? = nil,
         editHistory: [LiveTeamEditRecord] = [],
+        reviews: [LiveTeamReviewRecord] = [],
         workerTurnsSinceStrategicReview: Int = 0,
         cyclesSinceStrategicReview: Int = 0,
         lastStrategicReviewAt: Date? = nil,
@@ -534,6 +686,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         self.coordinatorHandoff = coordinatorHandoff
         self.lastCoordinatorDecision = lastCoordinatorDecision
         self.editHistory = editHistory
+        self.reviews = reviews
         self.workerTurnsSinceStrategicReview = max(workerTurnsSinceStrategicReview, 0)
         self.cyclesSinceStrategicReview = max(cyclesSinceStrategicReview, 0)
         self.lastStrategicReviewAt = lastStrategicReviewAt
@@ -556,6 +709,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         case coordinatorHandoff
         case lastCoordinatorDecision
         case editHistory
+        case reviews
         case workerTurnsSinceStrategicReview
         case cyclesSinceStrategicReview
         case lastStrategicReviewAt
@@ -606,6 +760,10 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
             editHistory: try container.decodeIfPresent(
                 [LiveTeamEditRecord].self,
                 forKey: .editHistory
+            ) ?? [],
+            reviews: try container.decodeIfPresent(
+                [LiveTeamReviewRecord].self,
+                forKey: .reviews
             ) ?? [],
             workerTurnsSinceStrategicReview: try container.decodeIfPresent(
                 Int.self,
@@ -664,6 +822,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
             forKey: .lastCoordinatorDecision
         )
         try container.encode(editHistory, forKey: .editHistory)
+        try container.encode(reviews, forKey: .reviews)
         try container.encode(
             workerTurnsSinceStrategicReview,
             forKey: .workerTurnsSinceStrategicReview

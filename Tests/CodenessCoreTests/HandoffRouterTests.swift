@@ -137,7 +137,7 @@ struct HandoffRouterTests {
         #expect(first.sourceSignature != revised.sourceSignature)
         #expect(
             first.sourceSignature
-                == "27a677e77c83c0839bce8a6a3eec302eea2faaf498730619e2c15f935b23c9f9"
+                == "1b6d24dcaf562ac64cb10e09928585454dc75d4e9ee17e8e4bb12eeb5a2d65c1"
         )
     }
 

@@ -32,7 +32,7 @@ The Overseer adjusts the agents when evidence warrants it
 The Overseer completes only when the fixed goal has no work left
 ```
 
-Recurring agents return once per round. One-time agents retire after their first accepted turn unless their responsibility or the working goal changes. Agent changes take effect only between turns, after the current state is saved. Each strategy revision appears as a compact chapter break in the turn list; its Info button shows the change, reason, and evidence without asking for approval.
+Recurring agents return once per round. One-time agents retire after their first accepted turn unless their responsibility or the working goal changes. Agent changes take effect only between turns, after the current state is saved. Each strategy or completion review appears as a selectable chapter in the turn list. Its detail view shows the consulted manager perspectives, their short reports, the Overseer's judgment, and any resulting agent setup without asking for approval.
 
 Codeness reviews strategy after three rounds or twelve agent turns, after repeated failure, when local routing asks for help, and before final completion. Automatic periodic reviews also have a ten-minute cooldown, so fast rounds cannot create a review loop; time alone never starts work. Internal stage boundaries never ask the user for direction.
 

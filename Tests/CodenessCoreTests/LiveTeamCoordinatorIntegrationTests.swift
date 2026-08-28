@@ -254,6 +254,17 @@ struct LiveTeamCoordinatorIntegrationTests {
         #expect(reviews[0].userGoal == fixture.goal)
         #expect(reviews[0].triggerReason.contains("older work-routing action"))
         #expect(reviews[1].triggerReason.contains("no agents may be needed"))
+        let reviewRecords = try #require(activity.liveTeam?.reviews)
+        #expect(reviewRecords.count == 2)
+        #expect(reviewRecords.allSatisfy { $0.status == .completed })
+        #expect(reviewRecords.allSatisfy { $0.consultations.count == 2 })
+        #expect(reviewRecords.allSatisfy {
+            $0.consultations.allSatisfy { $0.status == .completed }
+        })
+        #expect(reviewRecords.map { $0.decision?.outcome } == [.kept, .completed])
+
+        let persisted = try await fixture.store.load(canonicalPath: fixture.canonicalPath)
+        #expect(persisted.activity?.liveTeam?.reviews == reviewRecords)
     }
 
     @Test
@@ -718,8 +729,9 @@ struct LiveTeamCoordinatorIntegrationTests {
         let runs = try #require(coordinator.record.activity?.runs)
         #expect(runs.count == 2)
         #expect(runs[1].liveTeamMember == snapshot)
-        #expect(runs[1].prompt.contains("INTERRUPTED MEMBER RECOVERY"))
-        #expect(runs[1].prompt.contains("Original immutable member assignment."))
+        let recoveredRequest = try #require(await provider.runRequests().first)
+        #expect(recoveredRequest.prompt.contains("INTERRUPTED MEMBER RECOVERY"))
+        #expect(recoveredRequest.prompt.contains("Original immutable member assignment."))
         #expect(await provider.existingSessionIDs() == ["codex-session-stale"])
         #expect(await provider.preparedSessionIDs() == ["codex-session-stale"])
     }
@@ -1502,6 +1514,16 @@ private actor RecordingLiveTeamOverseer: LiveTeamOverseerRouting {
         return strategicDecision
     }
 
+    func reviewStrategy(
+        _ context: LiveTeamOverseerContext,
+        configuration: LiveTeamOverseerConfiguration,
+        cwd: String,
+        progress: @escaping LiveTeamReviewProgressHandler
+    ) async -> LiveTeamStrategicDecision {
+        await reportFixtureConsultation(progress)
+        return reviewStrategy(context, configuration: configuration, cwd: cwd)
+    }
+
     func reviewCompletion(
         _ context: LiveTeamOverseerContext,
         configuration: LiveTeamOverseerConfiguration,
@@ -1515,6 +1537,51 @@ private actor RecordingLiveTeamOverseer: LiveTeamOverseerRouting {
             evidence: "The worker result and Coordinator evidence satisfy the Board goal.",
             reason: "Independent completion review passed."
         )
+    }
+
+    func reviewCompletion(
+        _ context: LiveTeamOverseerContext,
+        configuration: LiveTeamOverseerConfiguration,
+        cwd: String,
+        progress: @escaping LiveTeamReviewProgressHandler
+    ) async -> LiveTeamCompletionDecision {
+        await reportFixtureConsultation(progress)
+        return reviewCompletion(context, configuration: configuration, cwd: cwd)
+    }
+
+    private func reportFixtureConsultation(
+        _ progress: LiveTeamReviewProgressHandler
+    ) async {
+        let managers = [
+            LiveTeamManagerConsultation(
+                name: "Product Director",
+                mandate: "Judge delivery progress.",
+                status: .reporting
+            ),
+            LiveTeamManagerConsultation(
+                name: "Engineering Director",
+                mandate: "Judge execution readiness.",
+                status: .reporting
+            )
+        ]
+        await progress(.personasSelected(managers))
+        for (index, manager) in managers.enumerated() {
+            await progress(.consultationCompleted(
+                index: index,
+                consultation: LiveTeamManagerConsultation(
+                    id: manager.id,
+                    name: manager.name,
+                    mandate: manager.mandate,
+                    status: .completed,
+                    involvement: "material",
+                    progress: "advancing",
+                    evidence: "The fixture recorded durable progress.",
+                    concern: "none",
+                    nextMove: "Continue the bounded plan."
+                )
+            ))
+        }
+        await progress(.overseerDeciding)
     }
 
     func migrate(

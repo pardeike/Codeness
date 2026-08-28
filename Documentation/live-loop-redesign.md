@@ -121,7 +121,9 @@ Automatic strategy changes apply only between turns. A running turn retains the 
 
 Pause lets the running agent finish and saves the local-routing handoff, but it does not start an Overseer review from that handoff. Any pending strategy or completion review becomes the durable Resume checkpoint and runs only after the user resumes.
 
-The turn list marks each applied strategy revision with a compact chapter divider before the affected agent turns. Its Info popover shows the structural summary, reason, and evidence. This is a transparency surface, not an approval point.
+Before a strategy or completion decision, the Overseer selects the relevant management perspectives and collects their short independent reports concurrently. The reports expose involvement, progress, evidence, concerns, and a recommended next move. They are advisory evidence, not votes or new authority; the Overseer remains responsible for judging them against the fixed user goal.
+
+The turn list presents each review as a compact selectable chapter around the agent turns it affected. Its detail view shows live consultation progress, every report, the Overseer's judgment, and the complete resulting agent setup when it changed. Earlier saved strategy changes that predate review records remain visible as compact chapter dividers. These are transparency surfaces, not approval points.
 
 Elapsed time is a cooldown, never a trigger. Codeness has no strategy-review timer. Fast rounds keep accumulating until the next turn boundary after the cooldown expires. A goal change, repeated failure, unrunnable setup, or completion claim bypasses the periodic cooldown because waiting cannot improve those decisions. The round limit, turn limit, cooldown, and repeated-failure threshold are internal orchestration values, not another user-facing settings form.
 

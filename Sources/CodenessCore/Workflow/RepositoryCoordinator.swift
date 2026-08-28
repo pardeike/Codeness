@@ -251,6 +251,14 @@ public final class RepositoryCoordinator {
             scheduleSelectedTranscriptLoad(previousRunID: oldValue)
         }
     }
+    public var selectedReviewID: UUID? {
+        didSet {
+            guard isLoaded, selectedReviewID != oldValue else { return }
+            viewState.selectedReviewID = selectedReviewID
+            viewState.runSelectionWasSaved = true
+            scheduleViewStateSave()
+        }
+    }
     public var pendingInteraction: PendingServerInteraction? { pendingInteractions.first }
     public var pendingInteractionCount: Int { pendingInteractions.count }
     public private(set) var statusMessage = "Loading repository history…"
@@ -480,6 +488,11 @@ public final class RepositoryCoordinator {
     public var selectedRun: RunRecord? {
         guard let selectedRunID else { return nil }
         return record.activity?.runs.first(where: { $0.id == selectedRunID })
+    }
+
+    public var selectedReview: LiveTeamReviewRecord? {
+        guard let selectedReviewID else { return nil }
+        return record.activity?.liveTeam?.reviews.first { $0.id == selectedReviewID }
     }
 
     public var activeActivity: ActivityRecord? {
@@ -714,16 +727,27 @@ public final class RepositoryCoordinator {
             pauseAfterCurrent = viewState.pauseAfterCurrent
             runIsAtBottom = viewState.transcriptViewports.mapValues(\.followsOutput)
             if viewState.runSelectionWasSaved {
-                if let restoredRunID = viewState.selectedRunID,
+                if let restoredReviewID = viewState.selectedReviewID,
+                   record.activity?.liveTeam?.reviews.contains(where: {
+                       $0.id == restoredReviewID
+                   }) == true {
+                    selectedReviewID = restoredReviewID
+                    selectedRunID = nil
+                } else if let restoredRunID = viewState.selectedRunID,
                    record.activity?.runs.contains(where: { $0.id == restoredRunID }) == true {
                     selectedRunID = restoredRunID
+                    selectedReviewID = nil
                 } else {
                     selectedRunID = nil
+                    selectedReviewID = nil
                     viewState.selectedRunID = nil
+                    viewState.selectedReviewID = nil
                 }
             } else {
                 selectedRunID = record.activity?.runs.last?.id
+                selectedReviewID = nil
                 viewState.selectedRunID = selectedRunID
+                viewState.selectedReviewID = nil
                 viewState.runSelectionWasSaved = true
             }
             guard await recoverAppendOnlyTokenUsage(loadGeneration: generation),
@@ -732,6 +756,7 @@ public final class RepositoryCoordinator {
             guard isCurrentLoad(generation) else { return }
             if record.activity?.liveTeam != nil {
                 recoverInterruptedLiveTeamState()
+                repairInterruptedLiveTeamReviewsIfNeeded()
                 if record.activity?.liveTeam?.pendingRevision != nil {
                     _ = await activatePendingLiveTeamRevision()
                 }
@@ -1075,7 +1100,14 @@ public final class RepositoryCoordinator {
 
     public func selectRun(_ runID: UUID?) {
         followsActiveProgress = false
+        selectedReviewID = nil
         selectedRunID = runID
+    }
+
+    public func selectReview(_ reviewID: UUID?) {
+        followsActiveProgress = false
+        selectedRunID = nil
+        selectedReviewID = reviewID
     }
 
     public func stopFollowingActiveProgress(for runID: UUID) {
@@ -1094,6 +1126,7 @@ public final class RepositoryCoordinator {
             ?? record.activity?.runs.last?.id else { return }
 
         followsActiveProgress = true
+        selectedReviewID = nil
         runIsAtBottom[runID] = true
         var viewport = viewState.transcriptViewports[runID] ?? TranscriptViewportState()
         viewport.followsOutput = true
@@ -2433,6 +2466,7 @@ public final class RepositoryCoordinator {
             record = resetRecord
             viewState = resetViewState
             selectedRunID = nil
+            selectedReviewID = nil
             pauseAfterCurrent = false
             itemsWithDeltas.removeAll()
             deltaItemRetainedByteCounts.removeAll()
@@ -2631,6 +2665,7 @@ public final class RepositoryCoordinator {
             record.activity?.status = .paused
             if record.activity?.liveTeam != nil {
                 recoverInterruptedLiveTeamState()
+                repairInterruptedLiveTeamReviewsIfNeeded()
             } else if record.activity?.workflow != nil {
                 markLastGenericRunInterruptedIfNeeded()
             } else {
@@ -4134,6 +4169,7 @@ public final class RepositoryCoordinator {
         state.resumeCheckpoint = .invokeOverseer(request)
         state.boardDirectionReason = nil
         record.activity?.liveTeam = state
+        let reviewID = beginLiveTeamReview(request)
         record.activity?.status = .running
         statusMessage = switch request.mode {
         case .bootstrap: "Codeness · Preparing agents…"
@@ -4144,6 +4180,13 @@ public final class RepositoryCoordinator {
         do {
             try await persist()
         } catch {
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .failed,
+                summary: "Review could not start",
+                reason: error.localizedDescription,
+                evidence: "The review point could not be saved."
+            )
             pauseLiveTeamActivity(message: "Paused before review")
             errorMessage = "Could not save the review point: \(error.localizedDescription)"
             try? await persist()
@@ -4185,19 +4228,29 @@ public final class RepositoryCoordinator {
                 let decision = try await router.reviewStrategy(
                     context,
                     configuration: overseerConfiguration,
-                    cwd: record.canonicalPath
+                    cwd: record.canonicalPath,
+                    progress: liveTeamReviewProgressHandler(reviewID: reviewID)
                 )
                 guard !isClosing else { return }
-                await applyLiveTeamStrategicDecision(decision, request: request)
+                await applyLiveTeamStrategicDecision(
+                    decision,
+                    request: request,
+                    reviewID: reviewID
+                )
 
             case .completionReview:
                 let decision = try await router.reviewCompletion(
                     context,
                     configuration: overseerConfiguration,
-                    cwd: record.canonicalPath
+                    cwd: record.canonicalPath,
+                    progress: liveTeamReviewProgressHandler(reviewID: reviewID)
                 )
                 guard !isClosing else { return }
-                await applyLiveTeamCompletionDecision(decision, request: request)
+                await applyLiveTeamCompletionDecision(
+                    decision,
+                    request: request,
+                    reviewID: reviewID
+                )
 
             case .migration:
                 throw AgentProviderError.invalidResponse(
@@ -4206,12 +4259,103 @@ public final class RepositoryCoordinator {
             }
         } catch {
             guard !isClosing else { return }
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .failed,
+                summary: "Review interrupted",
+                reason: error.localizedDescription,
+                evidence: "Codeness preserved the review checkpoint for retry."
+            )
             record.activity?.status = .paused
             record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(request)
             statusMessage = "Codeness needs attention during \(request.mode.displayName.lowercased())"
             errorMessage = error.localizedDescription
             try? await persist()
         }
+    }
+
+    private func beginLiveTeamReview(_ request: LiveTeamOverseerRequest) -> UUID? {
+        guard request.mode == .strategicReview || request.mode == .completionReview else {
+            return nil
+        }
+        let review = LiveTeamReviewRecord(
+            mode: request.mode,
+            trigger: request.reason,
+            sourceRunID: request.sourceRunID,
+            baseRevision: record.activity?.liveTeam?.currentDefinition?.revision ?? 1
+        )
+        let followsReview = followsActiveProgress
+            || request.sourceRunID.map { sourceRunID in
+                selectedRunID == sourceRunID
+                    && transcriptViewport(for: sourceRunID).followsOutput
+            } == true
+        record.activity?.liveTeam?.reviews.append(review)
+        if followsReview {
+            followsActiveProgress = true
+            selectedRunID = nil
+            selectedReviewID = review.id
+        }
+        return review.id
+    }
+
+    private func liveTeamReviewProgressHandler(
+        reviewID: UUID?
+    ) -> LiveTeamReviewProgressHandler {
+        { [weak self] progress in
+            guard let reviewID else { return }
+            await self?.recordLiveTeamReviewProgress(progress, reviewID: reviewID)
+        }
+    }
+
+    private func recordLiveTeamReviewProgress(
+        _ progress: LiveTeamReviewProgress,
+        reviewID: UUID
+    ) async {
+        guard let index = record.activity?.liveTeam?.reviews.firstIndex(where: {
+            $0.id == reviewID
+        }) else { return }
+        switch progress {
+        case .personasSelected(let consultations):
+            record.activity?.liveTeam?.reviews[index].status = .consultingManagers
+            record.activity?.liveTeam?.reviews[index].consultations = consultations
+
+        case .consultationCompleted(let consultationIndex, let consultation):
+            guard record.activity?.liveTeam?.reviews[index].consultations.indices
+                .contains(consultationIndex) == true else { return }
+            record.activity?.liveTeam?.reviews[index]
+                .consultations[consultationIndex] = consultation
+
+        case .overseerDeciding:
+            record.activity?.liveTeam?.reviews[index].status = .overseerDeciding
+        }
+        try? await persist()
+    }
+
+    private func finishLiveTeamReview(
+        id: UUID?,
+        outcome: LiveTeamReviewOutcome,
+        summary: String,
+        reason: String,
+        evidence: String,
+        resultingRevision: Int? = nil,
+        resultingDefinition: LiveTeamDefinition? = nil
+    ) {
+        guard let id,
+              let index = record.activity?.liveTeam?.reviews.firstIndex(where: {
+                  $0.id == id
+              }) else { return }
+        record.activity?.liveTeam?.reviews[index].status = outcome == .failed
+            ? .failed
+            : .completed
+        record.activity?.liveTeam?.reviews[index].decision = LiveTeamReviewDecision(
+            outcome: outcome,
+            summary: summary,
+            reason: reason,
+            evidence: evidence
+        )
+        record.activity?.liveTeam?.reviews[index].resultingRevision = resultingRevision
+        record.activity?.liveTeam?.reviews[index].resultingDefinition = resultingDefinition
+        record.activity?.liveTeam?.reviews[index].completedAt = .now
     }
 
     private func installInitialLiveTeamDefinition(
@@ -4255,20 +4399,45 @@ public final class RepositoryCoordinator {
 
     private func applyLiveTeamStrategicDecision(
         _ decision: LiveTeamStrategicDecision,
-        request: LiveTeamOverseerRequest
+        request: LiveTeamOverseerRequest,
+        reviewID: UUID?
     ) async {
         guard let current = record.activity?.liveTeam?.currentDefinition else {
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .failed,
+                summary: "No current agent setup",
+                reason: "Strategic review has no current agents.",
+                evidence: "No live team definition was available."
+            )
             pauseLiveTeamActivity(message: "Strategic review has no current agents.")
+            try? await persist()
             return
         }
         switch decision.action {
         case .complete:
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .completed,
+                summary: "The fixed goal is complete",
+                reason: decision.reason,
+                evidence: decision.evidence,
+                resultingRevision: current.revision
+            )
             await completeLiveTeam(
                 reason: decision.reason,
                 evidence: decision.evidence
             )
 
         case .keep:
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .kept,
+                summary: current.workingGoal,
+                reason: decision.reason,
+                evidence: decision.evidence,
+                resultingRevision: current.revision
+            )
             let continuation = preferredLiveTeamContinuation(
                 requested: request.continuation,
                 preferredMemberID: nil
@@ -4299,6 +4468,14 @@ public final class RepositoryCoordinator {
             }
 
         case .pause:
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .rejectedPause,
+                summary: "The Overseer must choose the next internal stage",
+                reason: decision.reason,
+                evidence: decision.evidence,
+                resultingRevision: current.revision
+            )
             let continuation = preferredLiveTeamContinuation(
                 requested: request.continuation,
                 preferredMemberID: nil
@@ -4325,7 +4502,15 @@ public final class RepositoryCoordinator {
 
         case .revise:
             guard let proposed = decision.proposedDefinition else {
+                finishLiveTeamReview(
+                    id: reviewID,
+                    outcome: .failed,
+                    summary: "No replacement setup returned",
+                    reason: "Codeness proposed no replacement agents.",
+                    evidence: decision.evidence
+                )
                 pauseLiveTeamActivity(message: "Codeness proposed no replacement agents.")
+                try? await persist()
                 return
             }
             let isUnrunnable = request.reason.hasPrefix("UNRUNNABLE:")
@@ -4334,6 +4519,14 @@ public final class RepositoryCoordinator {
                current.revision > 1,
                !isUnrunnable,
                let continuation = request.continuation {
+                finishLiveTeamReview(
+                    id: reviewID,
+                    outcome: .kept,
+                    summary: current.workingGoal,
+                    reason: "The current strategy has not yet run a full cycle under this revision.",
+                    evidence: decision.evidence,
+                    resultingRevision: current.revision
+                )
                 record.activity?.liveTeam?.workerTurnsSinceStrategicReview = 0
                 record.activity?.liveTeam?.cyclesSinceStrategicReview = 0
                 await scheduleLiveTeamRun(
@@ -4358,7 +4551,26 @@ public final class RepositoryCoordinator {
                 record.activity?.liveTeam?.resumeCheckpoint = request.continuation.map {
                     .perform($0)
                 }
-                guard await activatePendingLiveTeamRevision() else { return }
+                guard await activatePendingLiveTeamRevision() else {
+                    finishLiveTeamReview(
+                        id: reviewID,
+                        outcome: .failed,
+                        summary: "Agent changes could not be applied",
+                        reason: errorMessage ?? "The replacement setup could not be activated.",
+                        evidence: decision.evidence
+                    )
+                    try? await persist()
+                    return
+                }
+                finishLiveTeamReview(
+                    id: reviewID,
+                    outcome: .revised,
+                    summary: proposed.workingGoal,
+                    reason: decision.reason,
+                    evidence: decision.evidence,
+                    resultingRevision: proposed.revision,
+                    resultingDefinition: proposed
+                )
                 record.activity?.liveTeam?.workerTurnsSinceStrategicReview = 0
                 record.activity?.liveTeam?.cyclesSinceStrategicReview = 0
                 record.activity?.liveTeam?.cyclesUnderCurrentRevision = 0
@@ -4385,6 +4597,13 @@ public final class RepositoryCoordinator {
                     try? await persist()
                 }
             } catch {
+                finishLiveTeamReview(
+                    id: reviewID,
+                    outcome: .failed,
+                    summary: "Agent changes could not be applied",
+                    reason: error.localizedDescription,
+                    evidence: decision.evidence
+                )
                 record.activity?.status = .paused
                 record.activity?.liveTeam?.resumeCheckpoint = .invokeOverseer(request)
                 errorMessage = error.localizedDescription
@@ -4396,13 +4615,30 @@ public final class RepositoryCoordinator {
 
     private func applyLiveTeamCompletionDecision(
         _ decision: LiveTeamCompletionDecision,
-        request: LiveTeamOverseerRequest
+        request: LiveTeamOverseerRequest,
+        reviewID: UUID?
     ) async {
         switch decision.outcome {
         case .complete:
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .completed,
+                summary: "The fixed goal is complete",
+                reason: decision.reason,
+                evidence: decision.evidence,
+                resultingRevision: record.activity?.liveTeam?.currentDefinition?.revision
+            )
             await completeLiveTeam(reason: decision.reason, evidence: decision.evidence)
 
         case .continueWork:
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .continueWork,
+                summary: "The fixed goal still needs work",
+                reason: decision.reason,
+                evidence: decision.evidence,
+                resultingRevision: record.activity?.liveTeam?.currentDefinition?.revision
+            )
             await requestLiveTeamStrategicReview(
                 reason: "Completion review found remaining work: \(decision.reason)",
                 automatic: true,
@@ -4412,6 +4648,14 @@ public final class RepositoryCoordinator {
             )
 
         case .pause:
+            finishLiveTeamReview(
+                id: reviewID,
+                outcome: .rejectedPause,
+                summary: "The Overseer must resolve remaining work",
+                reason: decision.reason,
+                evidence: decision.evidence,
+                resultingRevision: record.activity?.liveTeam?.currentDefinition?.revision
+            )
             let revision = record.activity?.liveTeam?.currentDefinition?.revision ?? 1
             let continuation = preferredLiveTeamContinuation(
                 requested: request.continuation,
@@ -4735,6 +4979,15 @@ public final class RepositoryCoordinator {
     private func recoverInterruptedLiveTeamState() {
         guard record.activity?.status == .running else { return }
         record.activity?.status = .paused
+        if case .invokeOverseer = record.activity?.liveTeam?.resumeCheckpoint {
+            if let index = record.activity?.runs.indices.last,
+               let status = record.activity?.runs[index].status,
+               [.queued, .running, .awaitingApproval].contains(status) {
+                record.activity?.runs[index].status = .interrupted
+                record.activity?.runs[index].completedAt = .now
+            }
+            return
+        }
         guard let index = record.activity?.runs.indices.last else {
             if let checkpoint = record.activity?.liveTeam?.checkpoint {
                 record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
@@ -4763,6 +5016,24 @@ public final class RepositoryCoordinator {
         } else if let runID = run?.id,
                   run?.coordinatorDecision != nil {
             record.activity?.liveTeam?.resumeCheckpoint = .applyCoordinatorDecision(runID)
+        }
+    }
+
+    private func repairInterruptedLiveTeamReviewsIfNeeded() {
+        guard let reviews = record.activity?.liveTeam?.reviews else { return }
+        for index in reviews.indices where [
+            LiveTeamReviewStatus.selectingManagers,
+            .consultingManagers,
+            .overseerDeciding
+        ].contains(reviews[index].status) {
+            record.activity?.liveTeam?.reviews[index].status = .failed
+            record.activity?.liveTeam?.reviews[index].decision = LiveTeamReviewDecision(
+                outcome: .failed,
+                summary: "Review interrupted",
+                reason: "The app closed before this review returned a decision.",
+                evidence: "Resume starts a fresh review from the saved checkpoint."
+            )
+            record.activity?.liveTeam?.reviews[index].completedAt = .now
         }
     }
 
@@ -8052,6 +8323,7 @@ public final class RepositoryCoordinator {
     private func persistDocumentState() async throws {
         guard isLoaded else { throw RepositoryCoordinatorError.documentNotLoaded }
         viewState.selectedRunID = selectedRunID
+        viewState.selectedReviewID = selectedReviewID
         viewState.runSelectionWasSaved = true
         viewState.pauseAfterCurrent = pauseAfterCurrent
         try await persist()

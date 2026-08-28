@@ -82,6 +82,108 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
+    func interruptedOverseerReviewPreservesItsCheckpointAndMarksTheReviewFailed() async throws {
+        let target = AgentTarget(
+            providerID: .codex,
+            model: "gpt-5.6-sol",
+            options: .init(effort: "high", mode: .standard)
+        )
+        let member = LiveTeamMember(
+            id: "deliver",
+            name: "Deliver",
+            instructions: "Continue the bounded production stage.",
+            target: target,
+            runPolicy: .everyCycle,
+            sessionPolicy: .ownMemory
+        )
+        let definition = LiveTeamDefinition(
+            revision: 2,
+            workingGoal: "Advance the customer-facing result.",
+            members: [member],
+            coordinator: .init(target: target, instructions: "Route local work."),
+            strategicReason: "Production work remains."
+        )
+        let checkpoint = LiveTeamCheckpoint(memberID: member.id, cycle: 2, revision: 2)
+        let completedRunID = UUID()
+        let request = LiveTeamOverseerRequest(
+            mode: .strategicReview,
+            reason: "Periodic review is due.",
+            sourceRunID: completedRunID,
+            continuation: checkpoint,
+            automatic: true
+        )
+        let review = LiveTeamReviewRecord(
+            mode: .strategicReview,
+            trigger: request.reason,
+            sourceRunID: completedRunID,
+            baseRevision: definition.revision,
+            status: .overseerDeciding
+        )
+        let decision = LiveTeamCoordinatorDecision(
+            handoff: "Continue production.",
+            runLabel: "Production turn",
+            disposition: .continueTeam,
+            evidence: "The prior turn produced durable progress.",
+            progressEvidence: .repositoryChange
+        )
+        let completedRun = RunRecord(
+            id: completedRunID,
+            sequence: 1,
+            role: .implementer,
+            kind: .implementation,
+            status: .completed,
+            threadID: "member:deliver",
+            model: target.model,
+            effort: "high",
+            prompt: "Deliver the next result.",
+            finalOutput: "Production advanced.",
+            completedAt: .now,
+            agentTarget: target,
+            liveTeamMember: LiveTeamMemberSnapshot(
+                member: member,
+                workingGoal: definition.workingGoal,
+                revision: definition.revision,
+                cycle: checkpoint.cycle,
+                sessionSlotID: "member:deliver"
+            ),
+            coordinatorDecision: decision
+        )
+        let record = RepositoryRecord(
+            canonicalPath: "/tmp/codeness-review-recovery-\(UUID().uuidString)",
+            activity: ActivityRecord(
+                goal: "Deliver the fixed goal.",
+                prompts: .builtInDefaults,
+                status: .running,
+                runs: [completedRun],
+                liveTeam: LiveTeamState(
+                    overseer: .init(target: target, instructions: "Own strategy."),
+                    currentDefinition: definition,
+                    checkpoint: checkpoint,
+                    resumeCheckpoint: .invokeOverseer(request),
+                    coordinatorHandoff: decision.handoff,
+                    lastCoordinatorDecision: decision,
+                    reviews: [review]
+                )
+            )
+        )
+        let harness = try await CoordinatorHarness(record: record)
+        defer { harness.remove() }
+
+        #expect(harness.coordinator.record.activity?.status == .paused)
+        #expect(
+            harness.coordinator.record.activity?.liveTeam?.resumeCheckpoint
+                == .invokeOverseer(request)
+        )
+        let recoveredReview = try #require(
+            harness.coordinator.record.activity?.liveTeam?.reviews.first
+        )
+        #expect(recoveredReview.status == .failed)
+        #expect(recoveredReview.decision?.outcome == .failed)
+        #expect(recoveredReview.decision?.summary == "Review interrupted")
+        #expect(recoveredReview.completedAt != nil)
+    }
+
+    @Test
     func interruptedLastRunIsResumable() async throws {
         let harness = try await CoordinatorHarness(record: repositoryRecord(
             activityStatus: .paused,

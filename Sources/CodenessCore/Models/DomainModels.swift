@@ -501,6 +501,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
 
     public var schemaVersion: Int
     public var selectedRunID: UUID?
+    public var selectedReviewID: UUID?
     public var runSelectionWasSaved: Bool
     public var transcriptViewports: [UUID: TranscriptViewportState]
     public var windowFrame: StoredWindowFrame?
@@ -514,6 +515,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
     public init(
         schemaVersion: Int = Self.currentSchemaVersion,
         selectedRunID: UUID? = nil,
+        selectedReviewID: UUID? = nil,
         runSelectionWasSaved: Bool? = nil,
         transcriptViewports: [UUID: TranscriptViewportState] = [:],
         windowFrame: StoredWindowFrame? = nil,
@@ -526,7 +528,9 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
     ) {
         self.schemaVersion = schemaVersion
         self.selectedRunID = selectedRunID
-        self.runSelectionWasSaved = runSelectionWasSaved ?? (selectedRunID != nil)
+        self.selectedReviewID = selectedReviewID
+        self.runSelectionWasSaved = runSelectionWasSaved
+            ?? (selectedRunID != nil || selectedReviewID != nil)
         self.transcriptViewports = transcriptViewports
         self.windowFrame = windowFrame
         self.sidebarWidth = sidebarWidth
@@ -540,6 +544,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
         case selectedRunID
+        case selectedReviewID
         case runSelectionWasSaved
         case transcriptViewports
         case windowFrame
@@ -556,10 +561,11 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
             ?? Self.currentSchemaVersion
         selectedRunID = try container.decodeIfPresent(UUID.self, forKey: .selectedRunID)
+        selectedReviewID = try container.decodeIfPresent(UUID.self, forKey: .selectedReviewID)
         runSelectionWasSaved = try container.decodeIfPresent(
             Bool.self,
             forKey: .runSelectionWasSaved
-        ) ?? container.contains(.selectedRunID)
+        ) ?? (container.contains(.selectedRunID) || container.contains(.selectedReviewID))
         transcriptViewports = try container.decodeIfPresent(
             [UUID: TranscriptViewportState].self,
             forKey: .transcriptViewports

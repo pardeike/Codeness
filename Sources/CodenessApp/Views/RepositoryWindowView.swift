@@ -128,6 +128,9 @@ struct RepositoryWindowView: View {
                 coordinator: coordinator,
                 suggestedGoal: coordinator.record.activityDraft?.goal ?? ""
             )
+        } else if let review = coordinator.selectedReview {
+            OverseerReviewDetailView(review: review)
+                .id(review.id)
         } else if let run = coordinator.selectedRun {
             RunDetailView(coordinator: coordinator, run: run)
                 .id(run.id)
@@ -176,12 +179,18 @@ struct RepositoryWindowView: View {
     private var runList: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                List(selection: runSelectionBinding) {
+                List(selection: timelineSelectionBinding) {
                     if let activity = coordinator.activity {
                         ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
                             Section {
                                 ForEach(group.runs) { run in
-                                    if let change = strategyChange(before: run, in: activity) {
+                                    ForEach(reviews(before: run, in: activity)) { review in
+                                        OverseerReviewRow(review: review)
+                                            .tag(review.id)
+                                            .id(review.id)
+                                    }
+                                    if reviews(before: run, in: activity).isEmpty,
+                                       let change = strategyChange(before: run, in: activity) {
                                         StrategyChapterRow(change: change)
                                     }
                                     RunRow(
@@ -195,6 +204,11 @@ struct RepositoryWindowView: View {
                                         "Show the \(run.displayName) turn "
                                             + "(\(run.status.displayName.lowercased()))"
                                     )
+                                    ForEach(reviews(after: run, in: activity)) { review in
+                                        OverseerReviewRow(review: review)
+                                            .tag(review.id)
+                                            .id(review.id)
+                                    }
                                 }
                             } header: {
                                 RunGroupHeader(group: group)
@@ -203,6 +217,11 @@ struct RepositoryWindowView: View {
 
                         ForEach(unrepresentedStrategyChanges(in: activity)) { change in
                             StrategyChapterRow(change: change)
+                        }
+                        ForEach(unrepresentedReviews(in: activity)) { review in
+                            OverseerReviewRow(review: review)
+                                .tag(review.id)
+                                .id(review.id)
                         }
                     }
 
@@ -234,6 +253,11 @@ struct RepositoryWindowView: View {
                     guard followedRunID != nil else { return }
                     scrollRunListToBottom(using: proxy)
                 }
+                .onChange(of: reviewProgressSignature) {
+                    guard coordinator.selectedReviewID == coordinator.activity?
+                        .liveTeam?.reviews.last?.id else { return }
+                    scrollRunListToBottom(using: proxy)
+                }
             }
 
             if workflowControls.isVisible {
@@ -255,11 +279,71 @@ struct RepositoryWindowView: View {
         )
     }
 
-    private var runSelectionBinding: Binding<UUID?> {
+    private var timelineSelectionBinding: Binding<UUID?> {
         Binding(
-            get: { coordinator.selectedRunID },
-            set: { coordinator.selectRun($0) }
+            get: { coordinator.selectedReviewID ?? coordinator.selectedRunID },
+            set: { id in
+                if let id,
+                   coordinator.activity?.liveTeam?.reviews.contains(where: {
+                       $0.id == id
+                   }) == true {
+                    coordinator.selectReview(id)
+                } else {
+                    coordinator.selectRun(id)
+                }
+            }
         )
+    }
+
+    private var reviewProgressSignature: String {
+        guard let review = coordinator.activity?.liveTeam?.reviews.last else { return "" }
+        return "\(review.id):\(review.status.rawValue):\(review.completedConsultationCount)"
+    }
+
+    private func reviews(
+        before run: RunRecord,
+        in activity: ActivityRecord
+    ) -> [LiveTeamReviewRecord] {
+        guard let revision = run.liveTeamMember?.revision,
+              activity.runs.first(where: {
+                  $0.liveTeamMember?.revision == revision
+              })?.id == run.id else { return [] }
+        return (activity.liveTeam?.reviews ?? [])
+            .filter {
+                $0.resultingDefinition != nil && $0.resultingRevision == revision
+            }
+            .sorted { $0.startedAt < $1.startedAt }
+    }
+
+    private func reviews(
+        after run: RunRecord,
+        in activity: ActivityRecord
+    ) -> [LiveTeamReviewRecord] {
+        (activity.liveTeam?.reviews ?? [])
+            .filter { $0.sourceRunID == run.id && $0.resultingDefinition == nil }
+            .sorted { $0.startedAt < $1.startedAt }
+    }
+
+    private func unrepresentedReviews(
+        in activity: ActivityRecord
+    ) -> [LiveTeamReviewRecord] {
+        let runIDs = Set(activity.runs.map(\.id))
+        let runRevisions = Set(activity.runs.compactMap(\.liveTeamMember?.revision))
+        return (activity.liveTeam?.reviews ?? [])
+            .filter { review in
+                if review.resultingDefinition != nil,
+                   let revision = review.resultingRevision,
+                   runRevisions.contains(revision) {
+                    return false
+                }
+                if review.resultingDefinition == nil,
+                   let sourceRunID = review.sourceRunID,
+                   runIDs.contains(sourceRunID) {
+                    return false
+                }
+                return true
+            }
+            .sorted { $0.startedAt < $1.startedAt }
     }
 
     private func strategyChange(
@@ -287,11 +371,17 @@ struct RepositoryWindowView: View {
 
     private func strategyChanges(in activity: ActivityRecord) -> [LiveTeamEditRecord] {
         guard let edits = activity.liveTeam?.editHistory else { return [] }
+        let reviewedRevisions = Set(
+            (activity.liveTeam?.reviews ?? []).compactMap { review in
+                review.resultingDefinition == nil ? nil : review.resultingRevision
+            }
+        )
         var seenRevisions: Set<Int> = []
         return edits
             .filter { edit in
                 edit.actor == .overseer
                     && edit.revision > 1
+                    && !reviewedRevisions.contains(edit.revision)
                     && seenRevisions.insert(edit.revision).inserted
             }
             .sorted { $0.createdAt < $1.createdAt }
@@ -369,10 +459,11 @@ struct RepositoryWindowView: View {
             controlTitles.append(immediateControl.buttonTitle)
         }
         return RepositoryWindowMetrics.optimalSidebarWidth(
-            rowTitles: runs.map(\.displayName),
+            rowTitles: runs.map(\.displayName) + (coordinator.activity?.liveTeam?.reviews ?? [])
+                .map(\.sidebarTitle),
             rowMetadata: runs.map {
                 runSidebarMetadata($0, targetName: application.targetDisplayName)
-            },
+            } + (coordinator.activity?.liveTeam?.reviews ?? []).map(\.sidebarDetail),
             sectionTitles: groups.map(\.title),
             controlTitles: controlTitles
         )
@@ -581,6 +672,87 @@ private struct StrategyChapterRow: View {
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
         .selectionDisabled()
+    }
+}
+
+private extension LiveTeamReviewRecord {
+    var sidebarTitle: String {
+        decision?.outcome.displayName ?? mode.reviewDisplayName
+    }
+
+    var sidebarDetail: String {
+        switch status {
+        case .selectingManagers:
+            "Selecting managers"
+        case .consultingManagers:
+            "Consulting managers · \(completedConsultationCount) of \(consultations.count)"
+        case .overseerDeciding:
+            "Overseer deciding"
+        case .completed, .failed:
+            "\(mode.reviewDisplayName) · \(decision?.summary ?? "Review finished")"
+        }
+    }
+}
+
+private extension LiveTeamOverseerMode {
+    var reviewDisplayName: String {
+        switch self {
+        case .strategicReview: "Strategy review"
+        case .completionReview: "Completion review"
+        case .bootstrap: "Initial setup"
+        case .migration: "Earlier activity setup"
+        }
+    }
+}
+
+private struct OverseerReviewRow: View {
+    let review: LiveTeamReviewRecord
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(color)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(review.sidebarTitle)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if review.status != .completed && review.status != .failed {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .accessibilityLabel("Review in progress")
+                    }
+                }
+                Text(review.sidebarDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.top, 10)
+        .padding(.bottom, 3)
+        .listRowSeparator(.hidden)
+        .help("Show this \(review.mode.reviewDisplayName.lowercased())")
+        .accessibilityElement(children: .combine)
+    }
+
+    private var symbol: String {
+        switch review.status {
+        case .selectingManagers, .consultingManagers: "person.3.sequence.fill"
+        case .overseerDeciding: "eye.fill"
+        case .completed: "checkmark.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var color: Color {
+        switch review.status {
+        case .selectingManagers, .consultingManagers, .overseerDeciding: .orange
+        case .completed: .blue
+        case .failed: .red
+        }
     }
 }
 
