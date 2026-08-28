@@ -251,9 +251,38 @@ struct OverseerReviewDetailView: View {
 
 private struct ManagerConsultationView: View {
     let manager: LiveTeamManagerConsultation
+    @State private var isExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 9) {
+                Text(manager.mandate)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if manager.status == .waiting || manager.status == .reporting {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("Preparing a short independent report…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    reportField("Involvement", manager.involvement)
+                    reportField("Progress", manager.progress)
+                    reportField("Evidence", manager.evidence)
+                    reportField("Concern", manager.concern)
+                    reportField("Recommended next move", manager.nextMove)
+                    if let failure = manager.failure {
+                        reportField("Availability", failure, color: .orange)
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: symbol)
                     .foregroundStyle(color)
@@ -264,31 +293,6 @@ private struct ManagerConsultationView: View {
                 Text(statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            Text(manager.mandate)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if manager.status == .waiting || manager.status == .reporting {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.mini)
-                    Text("Preparing a short independent report…")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                reportField("Involvement", manager.involvement)
-                reportField("Progress", manager.progress)
-                reportField("Evidence", manager.evidence)
-                reportField("Concern", manager.concern)
-                reportField("Recommended next move", manager.nextMove)
-                if let failure = manager.failure {
-                    reportField("Availability", failure, color: .orange)
-                }
             }
         }
         .padding(12)

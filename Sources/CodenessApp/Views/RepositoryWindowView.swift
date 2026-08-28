@@ -709,29 +709,32 @@ private struct OverseerReviewRow: View {
     let review: LiveTeamReviewRecord
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol)
-                .foregroundStyle(color)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text(review.sidebarTitle)
-                        .fontWeight(.medium)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    if review.status != .completed && review.status != .failed {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .accessibilityLabel("Review in progress")
-                    }
-                }
-                Text(review.sidebarDetail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 4) {
+            Divider()
+                .padding(.bottom, 3)
+
+            HStack(spacing: 8) {
+                Text(review.sidebarTitle)
+                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
+                Spacer(minLength: 4)
+                if review.status == .completed || review.status == .failed {
+                    Image(systemName: symbol)
+                        .foregroundStyle(color)
+                        .frame(width: 18)
+                } else {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityLabel("Review in progress")
+                }
             }
+
+            Text(review.sidebarDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
-        .padding(.top, 10)
+        .padding(.top, 7)
         .padding(.bottom, 3)
         .listRowSeparator(.hidden)
         .help("Show this \(review.mode.reviewDisplayName.lowercased())")
@@ -742,7 +745,15 @@ private struct OverseerReviewRow: View {
         switch review.status {
         case .selectingManagers, .consultingManagers: "person.3.sequence.fill"
         case .overseerDeciding: "eye.fill"
-        case .completed: "checkmark.circle.fill"
+        case .completed:
+            switch review.decision?.outcome {
+            case .revised: "arrow.triangle.2.circlepath"
+            case .completed: "checkmark.seal.fill"
+            case .kept: "arrow.forward.circle.fill"
+            case .continueWork: "arrow.right.circle.fill"
+            case .rejectedPause: "arrow.uturn.forward.circle.fill"
+            case .failed, nil: "eye.fill"
+            }
         case .failed: "exclamationmark.triangle.fill"
         }
     }
@@ -750,7 +761,7 @@ private struct OverseerReviewRow: View {
     private var color: Color {
         switch review.status {
         case .selectingManagers, .consultingManagers, .overseerDeciding: .orange
-        case .completed: .blue
+        case .completed: .purple
         case .failed: .red
         }
     }
