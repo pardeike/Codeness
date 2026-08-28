@@ -39,6 +39,7 @@ struct RunDetailView: View {
                 .frame(maxHeight: 180)
             }
         }
+        .modifier(RunDetailTopEdgeSuppression())
     }
 
     private var recoveryPresentation: RunRecoveryPresentation? {
@@ -125,7 +126,6 @@ struct RunDetailView: View {
                 coordinator.stopFollowingActiveProgress(for: run.id)
             }
         )
-        .modifier(TranscriptTopEdgeSuppression())
         .accessibilityLabel("Turn transcript")
         .help("Select or scroll this turn transcript; press Command-F to search it")
     }
@@ -282,7 +282,7 @@ struct RunDetailView: View {
     }
 }
 
-private struct TranscriptTopEdgeSuppression: ViewModifier {
+private struct RunDetailTopEdgeSuppression: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
