@@ -4,6 +4,7 @@ import SwiftUI
 
 struct OverseerReviewDetailView: View {
     let review: LiveTeamReviewRecord
+    let personRoles: [UUID: String]
 
     var body: some View {
         ScrollView {
@@ -76,7 +77,10 @@ struct OverseerReviewDetailView: View {
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(review.consultations) { manager in
-                        ManagerConsultationView(manager: manager)
+                        ManagerConsultationView(
+                            manager: manager,
+                            role: personRoles[manager.id]
+                        )
                     }
                 }
             }
@@ -277,6 +281,9 @@ private struct ReviewDisclosureSection<Content: View>: View {
             } label: {
                 Label(title, systemImage: symbol)
                     .font(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { isExpanded.toggle() }
             }
             .padding(8)
         }
@@ -285,6 +292,7 @@ private struct ReviewDisclosureSection<Content: View>: View {
 
 private struct ManagerConsultationView: View {
     let manager: LiveTeamManagerConsultation
+    let role: String?
     @State private var isExpanded = false
 
     var body: some View {
@@ -323,11 +331,20 @@ private struct ManagerConsultationView: View {
                     .frame(width: 16)
                 Text(manager.name)
                     .font(.headline)
+                    .lineLimit(1)
+                if let role {
+                    Text(role)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 Spacer()
                 Text(statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { isExpanded.toggle() }
         }
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))

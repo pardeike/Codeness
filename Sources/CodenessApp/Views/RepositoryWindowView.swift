@@ -132,7 +132,10 @@ struct RepositoryWindowView: View {
             CompanyPersonDetailView(coordinator: coordinator, person: person)
                 .id(person.id)
         } else if let review = coordinator.selectedReview {
-            OverseerReviewDetailView(review: review)
+            OverseerReviewDetailView(
+                review: review,
+                personRoles: consultationRoles(for: review)
+            )
                 .id(review.id)
         } else if let run = coordinator.selectedRun {
             RunDetailView(coordinator: coordinator, run: run)
@@ -318,6 +321,21 @@ struct RepositoryWindowView: View {
     private var reviewProgressSignature: String {
         guard let review = coordinator.activity?.liveTeam?.reviews.last else { return "" }
         return "\(review.id):\(review.status.rawValue):\(review.completedConsultationCount)"
+    }
+
+    private func consultationRoles(
+        for review: LiveTeamReviewRecord
+    ) -> [UUID: String] {
+        guard let state = coordinator.activity?.liveTeam else { return [:] }
+        let definition = state.definitionHistory.first {
+            $0.revision == review.baseRevision
+        } ?? state.currentDefinition.flatMap {
+            $0.revision == review.baseRevision ? $0 : nil
+        }
+        return definition?.members.reduce(into: [:]) { roles, member in
+            guard let person = member.person else { return }
+            roles[person.id] = person.position.title
+        } ?? [:]
     }
 
     private func reviews(
