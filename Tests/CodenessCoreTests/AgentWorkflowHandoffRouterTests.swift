@@ -98,7 +98,12 @@ struct AgentWorkflowHandoffRouterTests {
         #expect(requests.count == 3)
         #expect(requests.allSatisfy { $0.target == target })
         #expect(requests.allSatisfy {
-            $0.developerInstructions == configuration.instructions
+            $0.developerInstructions.contains(configuration.instructions)
+        })
+        #expect(requests.allSatisfy {
+            $0.developerInstructions.contains("HUMAN VOICE AND CHARACTER")
+                && $0.developerInstructions.contains("Stay in character")
+                && $0.developerInstructions.contains("status-ticker language")
         })
         #expect(requests.first?.prompt.contains("This is not the loop decision point") == true)
         #expect(requests.first?.prompt.contains("Preserve the accepted architecture") == true)

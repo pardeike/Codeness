@@ -22,7 +22,7 @@ struct HandoffRouterTests {
         #expect(body["text"]?["format"]?["strict"]?.boolValue == true)
         #expect(body["text"]?["format"]?["schema"]?["additionalProperties"]?.boolValue == false)
         #expect(body["text"]?["format"]?["schema"]?["properties"]?["handoffText"]?["minLength"]?.integerValue == 1)
-        #expect(body["text"]?["format"]?["schema"]?["properties"]?["runLabel"]?["maxLength"]?.integerValue == 48)
+        #expect(body["text"]?["format"]?["schema"]?["properties"]?["runLabel"]?["maxLength"] == nil)
         #expect(
             body["text"]?["format"]?["schema"]?["properties"]?["sourceDisposition"]?["enum"]?.arrayValue?
                 .compactMap(\.stringValue) == ["reviewComplete", "blocked", "failed", "unclear"]
@@ -215,6 +215,30 @@ struct HandoffRouterTests {
         #expect(decoded.sourceDisposition == .reviewComplete)
         #expect(decoded.handoffText == "Keep Parser.swift:42 unchanged.")
         #expect(decoded.runLabel == "Parser review")
+    }
+
+    @Test
+    func acceptsAConcreteRunLabelOfAnyLength() throws {
+        let label = Array(repeating: "parser finding", count: 20).joined(separator: " ")
+        let envelope = """
+        {"handoffText":"Keep Parser.swift:42 unchanged.","sourceDisposition":"reviewComplete","runLabel":"\(label)"}
+        """
+        let response: JSONValue = .object([
+            "output": .array([.object([
+                "type": .string("message"),
+                "content": .array([.object([
+                    "type": .string("output_text"),
+                    "text": .string(envelope)
+                ])])
+            ])])
+        ])
+
+        let decoded = try HandoffRouter.decode(
+            HTTPResult(data: try response.encodedData(), statusCode: 200),
+            for: .review
+        )
+
+        #expect(decoded.runLabel == label)
     }
 
     @Test

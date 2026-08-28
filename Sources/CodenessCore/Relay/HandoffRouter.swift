@@ -316,8 +316,7 @@ public actor HandoffRouter: HandoffRouting {
                 ]),
                 "runLabel": .object([
                     "type": .string("string"),
-                    "minLength": .integer(1),
-                    "maxLength": .integer(48)
+                    "minLength": .integer(1)
                 ])
             ])
         ])
@@ -419,9 +418,9 @@ public actor HandoffRouter: HandoffRouting {
             }
             let label = envelope.runLabel.trimmingCharacters(in: .whitespacesAndNewlines)
             let genericLabels = ["implement", "implementation", "review", "fix", "fixes", "closeout"]
-            guard !label.isEmpty, label.count <= 48, !genericLabels.contains(label.lowercased()) else {
+            guard !label.isEmpty, !genericLabels.contains(label.lowercased()) else {
                 throw HandoffRouterError.invalidEnvelope(
-                    "runLabel must be a concrete label of at most 48 characters, not a generic phase name."
+                    "runLabel must be a concrete label, not a generic phase name."
                 )
             }
             return HandoffEnvelope(

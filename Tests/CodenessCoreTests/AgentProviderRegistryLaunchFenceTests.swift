@@ -4,6 +4,27 @@ import Testing
 
 struct AgentProviderRegistryLaunchFenceTests {
     @Test
+    func everyProviderCallReceivesTheHumanVoiceAndCharacterContract() async throws {
+        let provider = LaunchRecordingAgentProvider()
+        let registry = AgentProviderRegistry(providers: [provider])
+
+        _ = try await registry.prepareSession(Self.sessionRequest)
+        _ = try await registry.runUtility(Self.utilityRequest)
+
+        let requests = await provider.capturedRequests()
+        let sessionInstructions = try #require(requests.session?.developerInstructions)
+        let utilityInstructions = try #require(requests.utility?.developerInstructions)
+        for instructions in [sessionInstructions, utilityInstructions] {
+            #expect(instructions.contains("Fixture"))
+            #expect(instructions.contains("HUMAN VOICE AND CHARACTER"))
+            #expect(instructions.contains("Stay in character"))
+            #expect(instructions.contains("use I for their judgments"))
+            #expect(instructions.contains("status-ticker language"))
+            #expect(instructions.contains("Exact output schemas remain binding"))
+        }
+    }
+
+    @Test
     func launchFenceRejectsEveryDirectAdmissionWithoutCallingProvider() async throws {
         let provider = LaunchRecordingAgentProvider()
         let registry = AgentProviderRegistry(providers: [provider])
@@ -101,6 +122,8 @@ private actor LaunchRecordingAgentProvider: AgentProviding {
     nonisolated let id = AgentProviderID.codex
     private let prepareGate: ProviderLaunchGate?
     private var counts = ProviderLaunchCounts()
+    private var capturedSessionRequest: AgentSessionRequest?
+    private var capturedUtilityRequest: AgentUtilityRequest?
 
     init(prepareGate: ProviderLaunchGate? = nil) {
         self.prepareGate = prepareGate
@@ -108,6 +131,7 @@ private actor LaunchRecordingAgentProvider: AgentProviding {
 
     func prepareSession(_ request: AgentSessionRequest) async -> AgentSession {
         counts.preparedSessions += 1
+        capturedSessionRequest = request
         await prepareGate?.pause()
         return AgentSession(
             providerID: id,
@@ -138,6 +162,7 @@ private actor LaunchRecordingAgentProvider: AgentProviding {
 
     func runUtility(_ request: AgentUtilityRequest) -> AgentUtilityResult {
         counts.utilities += 1
+        capturedUtilityRequest = request
         return AgentUtilityResult(output: "fixture")
     }
 
@@ -145,6 +170,13 @@ private actor LaunchRecordingAgentProvider: AgentProviding {
 
     func launchCounts() -> ProviderLaunchCounts {
         counts
+    }
+
+    func capturedRequests() -> (
+        session: AgentSessionRequest?,
+        utility: AgentUtilityRequest?
+    ) {
+        (capturedSessionRequest, capturedUtilityRequest)
     }
 }
 

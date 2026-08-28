@@ -70,6 +70,8 @@ public enum RelayPromptBuilder {
         \(classificationGuidance(for: context.runKind))
 
         Classify only the state explicitly supported by the source. Return unclear rather than guessing. Derive a factual noun-phrase run label of at most 48 characters that identifies the concrete work or findings. The label must not be only a generic phase name such as Implement, Review, Fix, Implementation, or Closeout.
+
+        \(AgentCommunicationStyle.instructions)
         """
     }
 

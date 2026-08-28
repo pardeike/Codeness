@@ -212,7 +212,7 @@ public actor AgentWorkflowHandoffRouter: WorkflowHandoffRouting {
         return WorkflowHandoff(
             text: text,
             outcome: outcome,
-            runLabel: String(label.prefix(100))
+            runLabel: label
         )
     }
 

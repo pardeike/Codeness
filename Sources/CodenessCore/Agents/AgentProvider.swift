@@ -291,6 +291,27 @@ public extension AgentProviding {
     }
 }
 
+enum AgentCommunicationStyle {
+    // Brevity belongs in prompts. Provider results are validated for structure
+    // and meaning, never rejected merely because their prose is longer.
+    static let instructions = """
+    HUMAN VOICE AND CHARACTER
+    Write every human-facing sentence like a real person talking to coworkers. Be direct, concrete, brief, and natural. Say what you saw, what you think, and what you want to do next. Do not use corporate, consulting, academic, bureaucratic, newsroom, or status-ticker language. Avoid canned headings, abstract noun piles, mechanical hedging, inflated importance, and em dashes.
+
+    Stay in character. When the prompt gives you a name, story, personality, position, convictions, or personal stake, role-play that person consistently. Speak from their point of view, use I for their judgments, and let their preferences and disagreements show. Do not step outside the role to narrate the role-play. When no named personality is supplied, sound like a specific experienced teammate rather than an anonymous system.
+
+    Exact output schemas remain binding. Apply this voice to every prose value inside structured output without adding fields or commentary. Keep code, commands, paths, literal errors, and source quotations exact.
+    """
+
+    static func applying(to developerInstructions: String) -> String {
+        """
+        \(developerInstructions)
+
+        \(instructions)
+        """
+    }
+}
+
 public actor AgentProviderRegistry {
     public struct LaunchFence: Sendable, Equatable {
         fileprivate let providerID: AgentProviderID
@@ -322,7 +343,15 @@ public actor AgentProviderRegistry {
         let providerID = request.target.providerID
         let admittedProvider = try admitLaunch(for: providerID)
         defer { finishLaunchAdmission(for: providerID) }
-        return try await admittedProvider.prepareSession(request)
+        return try await admittedProvider.prepareSession(AgentSessionRequest(
+            existingSessionID: request.existingSessionID,
+            name: request.name,
+            cwd: request.cwd,
+            target: request.target,
+            developerInstructions: AgentCommunicationStyle.applying(
+                to: request.developerInstructions
+            )
+        ))
     }
 
     public func startRun(_ request: AgentRunRequest) async throws -> AgentRunHandle {
@@ -361,7 +390,16 @@ public actor AgentProviderRegistry {
         let providerID = request.target.providerID
         let admittedProvider = try admitLaunch(for: providerID)
         defer { finishLaunchAdmission(for: providerID) }
-        return try await admittedProvider.runUtility(request)
+        return try await admittedProvider.runUtility(AgentUtilityRequest(
+            cwd: request.cwd,
+            prompt: request.prompt,
+            target: request.target,
+            developerInstructions: AgentCommunicationStyle.applying(
+                to: request.developerInstructions
+            ),
+            outputSchema: request.outputSchema,
+            allowsWebResearch: request.allowsWebResearch
+        ))
     }
 
     public func supportsLiveWebResearch(for providerID: AgentProviderID) throws -> Bool {

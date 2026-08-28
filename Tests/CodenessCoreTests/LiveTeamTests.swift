@@ -1006,6 +1006,39 @@ struct AgentLiveTeamRouterTests {
     }
 
     @Test
+    func strategicReviewKeepsLongButValidStaffOpinions() async throws {
+        let provider = LiveTeamUtilityProvider(verboseStaffReports: true)
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let progressRecorder = LiveTeamReviewProgressRecorder()
+        let target = testTarget()
+
+        _ = try await router.reviewStrategy(
+            strategicContext(target: target),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep executive control decisive."
+            ),
+            cwd: "/tmp/repository",
+            progress: { progress in
+                await progressRecorder.append(progress)
+            }
+        )
+
+        let consultations = await progressRecorder.values().compactMap {
+            progress -> LiveTeamManagerConsultation? in
+            guard case .consultationCompleted(_, let consultation) = progress else {
+                return nil
+            }
+            return consultation
+        }
+        #expect(!consultations.isEmpty)
+        #expect(consultations.allSatisfy {
+            $0.status == .completed && $0.failure == nil
+        })
+    }
+
+    @Test
     func completionReviewAlsoUsesStaffConsultation() async throws {
         let provider = LiveTeamUtilityProvider()
         let registry = AgentProviderRegistry(providers: [provider])
@@ -1172,6 +1205,18 @@ struct AgentLiveTeamRouterTests {
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.completionSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.focusGroupSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.staffReportSchema))
+        #expect(!schemaContainsKey(AgentLiveTeamRouter.focusGroupSchema, key: "maxLength"))
+        #expect(!schemaContainsKey(AgentLiveTeamRouter.staffReportSchema, key: "maxLength"))
+        #expect(!schemaContainsKey(AgentLiveTeamRouter.coordinatorSchema, key: "maxLength"))
+        #expect(!schemaContainsKey(AgentLiveTeamRouter.personaSchema, key: "maxLength"))
+        #expect(!schemaContainsKey(
+            AgentLiveTeamRouter.companyDefinitionSchema(targetOptions: targetOptions),
+            key: "maxLength"
+        ))
+        #expect(!schemaContainsKey(
+            AgentLiveTeamRouter.companyStrategicSchema(targetOptions: targetOptions),
+            key: "maxLength"
+        ))
         #expect(schemaEnumValues(
             AgentLiveTeamRouter.coordinatorSchema,
             property: "disposition"
@@ -1265,6 +1310,19 @@ private func schemaUsesStrictObjectProperties(_ value: JSONValue) -> Bool {
     }
 }
 
+private func schemaContainsKey(_ value: JSONValue, key: String) -> Bool {
+    switch value {
+    case .object(let object):
+        return object[key] != nil || object.values.contains {
+            schemaContainsKey($0, key: key)
+        }
+    case .array(let values):
+        return values.contains { schemaContainsKey($0, key: key) }
+    case .null, .bool, .integer, .number, .string:
+        return false
+    }
+}
+
 private actor LiveTeamReviewProgressRecorder {
     private var progress: [LiveTeamReviewProgress] = []
 
@@ -1285,6 +1343,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     private let unavailablePersona: String?
     private let focusGroupUnavailable: Bool
     private let verboseFocusGroup: Bool
+    private let verboseStaffReports: Bool
     private var activeConsultations = 0
     private var maximumActiveConsultations = 0
 
@@ -1294,6 +1353,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         unavailablePersona: String? = nil,
         focusGroupUnavailable: Bool = false,
         verboseFocusGroup: Bool = false,
+        verboseStaffReports: Bool = false,
         personaNames: [String] = []
     ) {
         self.outputs = outputs
@@ -1301,6 +1361,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         self.unavailablePersona = unavailablePersona
         self.focusGroupUnavailable = focusGroupUnavailable
         self.verboseFocusGroup = verboseFocusGroup
+        self.verboseStaffReports = verboseStaffReports
         self.personaNames = personaNames
     }
 
@@ -1368,7 +1429,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
                 return AgentUtilityResult(output: "invalid focus group")
             }
             if verboseFocusGroup {
-                let longText = Array(repeating: "evidence", count: 55)
+                let longText = Array(repeating: "evidence", count: 140)
                     .joined(separator: " ")
                 return AgentUtilityResult(output: """
                 {
@@ -1458,6 +1519,21 @@ private actor LiveTeamUtilityProvider: AgentProviding {
                         "WHO YOU ARE\n\(unavailablePersona)"
                     )) {
                 return AgentUtilityResult(output: "invalid report")
+            }
+            if verboseStaffReports {
+                let longOpinion = Array(
+                    repeating: "I see real product progress and want the next useful version in people's hands.",
+                    count: 18
+                ).joined(separator: " ")
+                return AgentUtilityResult(output: """
+                {
+                  "involvement": "essential",
+                  "progress": "advancing",
+                  "evidence": "\(longOpinion)",
+                  "concern": "\(longOpinion)",
+                  "nextMove": "\(longOpinion)"
+                }
+                """)
             }
             if request.prompt.contains("WHO YOU ARE\nMira Voss") {
                 return AgentUtilityResult(output: """

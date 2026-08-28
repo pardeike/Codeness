@@ -19,6 +19,8 @@ struct PromptBuilderTests {
         #expect(prompt.contains("affected files and symbols"))
         #expect(prompt.contains("at most 48 characters"))
         #expect(prompt.contains("must not be only a generic phase name"))
+        #expect(prompt.contains("HUMAN VOICE AND CHARACTER"))
+        #expect(prompt.contains("Stay in character"))
     }
 
     @Test
