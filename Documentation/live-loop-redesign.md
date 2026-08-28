@@ -154,6 +154,8 @@ Employee prompts establish build-first behavior:
 
 CEO decisions use short fields rather than essays: reason and evidence are at most two sentences each, working goals are at most three sentences, and assignments are at most 60 words. Company check-ins are capped at 80 words. Formal, academic, consultant, and committee language is explicitly rejected because volume can make weak progress look substantial.
 
+The current repository and Codeness handoffs are the only project-specific history. Prompts forbid recovering old project decisions or implementations from personal or global agent memory, previous Codeness runs, archives, Trash, sibling workspaces, and other checkouts unless the current goal or repository explicitly names that source. This keeps a reset repository genuinely clean while still allowing general engineering and creative knowledge.
+
 The prompts are deliberately product-generic. Software and coding remain common positions and activities, but there is no game-specific language in the operating system.
 
 ## Interface

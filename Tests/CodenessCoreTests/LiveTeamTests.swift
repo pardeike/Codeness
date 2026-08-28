@@ -503,6 +503,8 @@ struct LiveTeamModelTests {
         #expect(prompt.contains("Codeness has already assigned the other responsibilities"))
         #expect(prompt.contains("at most 180 words"))
         #expect(prompt.contains("academic analysis, formal report"))
+        #expect(prompt.contains("personal or global agent memory"))
+        #expect(prompt.contains("previous Codeness runs"))
         #expect(!prompt.contains("Board-only secret constraint"))
     }
 
@@ -514,6 +516,7 @@ struct LiveTeamModelTests {
         #expect(instructions.contains("visible, usable, integrated product value"))
         #expect(instructions.contains("at most 180 words"))
         #expect(instructions.contains("not an academic, consultant, or formal committee"))
+        #expect(instructions.contains("personal or global agent memory"))
         #expect(!instructions.contains("Implement member"))
         #expect(!instructions.contains("Review member"))
     }
@@ -617,6 +620,7 @@ struct AgentLiveTeamRouterTests {
         #expect(bootstrapRequest.developerInstructions.contains("value and learning per effective token cost"))
         #expect(bootstrapRequest.developerInstructions.contains("evidence gaps, not autonomous production blockers"))
         #expect(bootstrapRequest.developerInstructions.contains("Never sound like an academic"))
+        #expect(bootstrapRequest.developerInstructions.contains("PROJECT MEMORY BOUNDARY"))
         #expect(bootstrapRequest.prompt.contains("first six eligible product turns"))
         #expect(bootstrapRequest.developerInstructions.contains("choose only from this catalog"))
         #expect(coordinatorRequest.developerInstructions.contains("route local agent work"))
