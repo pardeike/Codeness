@@ -965,6 +965,47 @@ struct AgentLiveTeamRouterTests {
     }
 
     @Test
+    func strategicReviewKeepsAValidFocusGroupBeyondTheOldWordLimit() async throws {
+        let provider = LiveTeamUtilityProvider(verboseFocusGroup: true)
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let progressRecorder = LiveTeamReviewProgressRecorder()
+        let target = testTarget()
+        let repository = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "codeness-verbose-focus-group.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repository) }
+
+        let decision = try await router.reviewStrategy(
+            strategicContext(target: target),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep executive control decisive."
+            ),
+            cwd: repository.path,
+            progress: { progress in
+                await progressRecorder.append(progress)
+            }
+        )
+
+        #expect(decision.action == .keep)
+        let progress = await progressRecorder.values()
+        guard let firstProgress = progress.first,
+              case .focusGroupCompleted(let report) = firstProgress else {
+            Issue.record("A valid focus group must finish before staff reports.")
+            return
+        }
+        #expect(report.failure == nil)
+        #expect(report.participants.count == 4)
+        let focusRequest = try #require(await provider.requests().first {
+            $0.developerInstructions.contains("simulate a small focus group")
+        })
+        #expect(focusRequest.developerInstructions.contains("below 500 words"))
+    }
+
+    @Test
     func completionReviewAlsoUsesStaffConsultation() async throws {
         let provider = LiveTeamUtilityProvider()
         let registry = AgentProviderRegistry(providers: [provider])
@@ -1243,6 +1284,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     private let consultationDelay: Duration
     private let unavailablePersona: String?
     private let focusGroupUnavailable: Bool
+    private let verboseFocusGroup: Bool
     private var activeConsultations = 0
     private var maximumActiveConsultations = 0
 
@@ -1251,12 +1293,14 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         consultationDelay: Duration = .zero,
         unavailablePersona: String? = nil,
         focusGroupUnavailable: Bool = false,
+        verboseFocusGroup: Bool = false,
         personaNames: [String] = []
     ) {
         self.outputs = outputs
         self.consultationDelay = consultationDelay
         self.unavailablePersona = unavailablePersona
         self.focusGroupUnavailable = focusGroupUnavailable
+        self.verboseFocusGroup = verboseFocusGroup
         self.personaNames = personaNames
     }
 
@@ -1322,6 +1366,27 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         if request.developerInstructions.contains("simulate a small focus group") {
             if focusGroupUnavailable {
                 return AgentUtilityResult(output: "invalid focus group")
+            }
+            if verboseFocusGroup {
+                let longText = Array(repeating: "evidence", count: 55)
+                    .joined(separator: " ")
+                return AgentUtilityResult(output: """
+                {
+                  "comparison": "\(longText)",
+                  "comparisonReason": "\(longText)",
+                  "sources": [],
+                  "participants": [
+                    {"archetype":"Newcomer","expectation":"\(longText)","choice":"currentProduct","reaction":"\(longText)"},
+                    {"archetype":"Enthusiast","expectation":"\(longText)","choice":"comparison","reaction":"\(longText)"},
+                    {"archetype":"Skeptic","expectation":"\(longText)","choice":"neither","reaction":"\(longText)"},
+                    {"archetype":"Returning user","expectation":"\(longText)","choice":"currentProduct","reaction":"\(longText)"}
+                  ],
+                  "findings": ["\(longText)", "\(longText)"],
+                  "verdict": "\(longText)",
+                  "nextExperiment": "\(longText)",
+                  "limitations": "\(longText)"
+                }
+                """)
             }
             return AgentUtilityResult(output: """
             {

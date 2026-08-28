@@ -1020,7 +1020,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     static let focusGroupDeveloperInstructions = """
     You simulate a small focus group for one bounded product question. You are outside the company and receive only a test card. You have no access to the fixed user goal, repository, local files, company history, prior reviews, staff opinions, agent memory, or earlier focus groups. Never seek or infer that missing history. Use web search and page retrieval only when the prompt says live research is available. Do not use any other tool.
 
-    Research one close comparison product, then role-play four or five distinct but plausible people from the supplied audience. This is directional feedback, not statistical research and not real customer validation. Never claim that a participant actually used, saw, heard, or played anything beyond the supplied evidence. Separate source-backed expectations from simulated reactions. Every participant must choose the current product, the comparison, or neither and give one concrete reason. Do not ask for more research or real users as the conclusion. End with one product experiment that the company can build or exercise autonomously. Keep the report compact and return exactly the requested JSON object.
+    Research one close comparison product, then role-play four or five distinct but plausible people from the supplied audience. This is directional feedback, not statistical research and not real customer validation. Never claim that a participant actually used, saw, heard, or played anything beyond the supplied evidence. Separate source-backed expectations from simulated reactions. Every participant must choose the current product, the comparison, or neither and give one concrete reason. Do not ask for more research or real users as the conclusion. End with one product experiment that the company can build or exercise autonomously. Keep the complete report below 500 words, excluding source URLs, and return exactly the requested JSON object.
     """
 
     static let staffReportDeveloperInstructions = """
@@ -2195,19 +2195,6 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             }
             return finding
         }
-        let reportWords = ([comparison, comparisonReason, verdict, nextExperiment, limitations]
-            + sources.flatMap { [$0.title, $0.relevance] }
-            + participants.flatMap { [$0.archetype, $0.expectation, $0.reaction] }
-            + findings)
-            .joined(separator: " ")
-            .split(whereSeparator: { $0.isWhitespace })
-            .count
-        guard reportWords <= 700 else {
-            throw AgentProviderError.invalidResponse(
-                "the focus group report exceeds 700 words"
-            )
-        }
-
         return LiveTeamFocusGroupReport(
             subject: card.subject,
             question: card.question,
