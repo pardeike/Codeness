@@ -100,6 +100,19 @@ public struct RunTokenUsage: Codable, Sendable, Equatable {
         outputTokens: 0
     )
 
+    /// Funding cost keeps raw accounting intact while recognizing that cached
+    /// prompt replay is substantially cheaper than fresh input. Output is
+    /// already inclusive of reasoning output and must not be counted twice.
+    public var effectiveFundingTokens: Int64 {
+        let cachedInput = min(cachedInputTokens, inputTokens)
+        let freshInput = Self.clampedSubtract(inputTokens, cachedInput)
+        let discountedCachedInput = cachedInput / 10
+        return Self.saturatingAdd(
+            Self.saturatingAdd(freshInput, discountedCachedInput),
+            outputTokens
+        )
+    }
+
     public func adding(_ other: RunTokenUsage) -> RunTokenUsage {
         RunTokenUsage(
             totalTokens: Self.saturatingAdd(totalTokens, other.totalTokens),

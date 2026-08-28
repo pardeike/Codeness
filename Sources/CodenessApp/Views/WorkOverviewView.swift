@@ -186,11 +186,11 @@ struct WorkOverviewView: View {
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                             ProgressView(
-                                value: Double(fundedUsage.totalTokens),
+                                value: Double(fundedUsage.effectiveFundingTokens),
                                 total: Double(bet.fundedTokenLimit)
                             )
                             Text(
-                                "\(WorkOverviewFormatting.tokens(fundedUsage.totalTokens)) of \(WorkOverviewFormatting.tokens(bet.fundedTokenLimit)) funded tokens used"
+                                "\(WorkOverviewFormatting.tokens(fundedUsage.effectiveFundingTokens)) of \(WorkOverviewFormatting.tokens(bet.fundedTokenLimit)) effective funding tokens used"
                             )
                             .font(.caption)
                             .foregroundStyle(.secondary)

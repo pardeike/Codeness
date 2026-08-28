@@ -71,7 +71,7 @@ One product bet contains:
 - a token budget in 250,000-token funding units; and
 - a maximum-turn safety boundary.
 
-The CEO normally allocates three to eight funding units and six to twenty turns. Six turns is a hard minimum so a review cannot recur after only one or two assignments. The turn boundary is a fallback when a provider cannot report complete token usage; tokens remain the primary cost signal.
+The CEO normally allocates three to eight funding units and six to twenty turns. Funding uses fresh input plus output at full cost and cached input at one tenth cost; raw provider usage remains available separately. Six turns is a hard minimum before an ordinary token or readiness review, so a review cannot recur after only one or two assignments. A genuinely unrunnable team still receives immediate executive repair. The turn boundary is a fallback when a provider cannot report complete token usage; effective funding tokens remain the primary cost signal.
 
 Assignments must produce or exercise the real product. Plans, documentation, status prose, evidence collection, meetings, and reviews are support work and do not count as product value unless the user goal makes them the deliverable or they directly unlock the integrated demonstration.
 
@@ -88,12 +88,15 @@ Normal successful turns do not call a model coordinator. A deterministic product
 
 This removes the previous per-turn management call and its tendency to reinterpret every result as a reason for more ceremony.
 
-The motor opens an investment boundary when:
+After the six-turn runway, the motor opens an ordinary investment boundary when:
 
 - the funded token budget is consumed;
 - the maximum-turn boundary is reached;
-- no person remains eligible;
 - a person explicitly reports that an integrated demonstration is ready;
+
+The motor opens an exceptional investment boundary immediately when:
+
+- no person remains eligible;
 - a material blocker or repeated failure requires executive action;
 - the user changed the goal; or
 - completion must be judged.
@@ -119,7 +122,7 @@ Codeness records two cost classes:
 - product work: every employee run;
 - company control: initial setup, persona generation, legacy coordinator calls, correction retries that report usage, company check-ins, and CEO decisions.
 
-The overview shows both classes, total tokens, completed investment decisions, and tokens per decision. Historical company definitions are retained so setup and former-person costs do not disappear when the company changes. Virtual hiring opportunity charges are displayed separately from actual provider token usage.
+The overview shows both classes, raw total tokens, effective funded-token progress, completed investment decisions, and tokens per decision. Effective funding cost counts fresh input and output in full and cached input at one tenth; this keeps raw accounting honest without treating cheap replay as equivalent to new work. Historical company definitions are retained so setup and former-person costs do not disappear when the company changes. Virtual hiring opportunity charges are displayed separately from actual provider token usage.
 
 This is cost accounting, not a fabricated value score. Product value remains evidence-backed: an integrated result, exercised behavior, user or teammate use, an accepted demonstration, or concrete learning that changes the investment decision.
 
@@ -134,7 +137,8 @@ The CEO prompt establishes a forceful founder mindset:
 - the company should be bold, energetic, playful, and eager to show work;
 - the best idea must become an integrated product;
 - repeated support work or disconnected prototypes are investment failures;
-- product value and learning per total token cost drive the next bet;
+- product value and learning per effective token cost drive the next bet;
+- unavailable external evidence is recorded once while autonomous product work continues;
 - ordinary position IDs are mandatory; and
 - only the CEO can declare the goal complete.
 
@@ -146,7 +150,9 @@ Employee prompts establish build-first behavior:
 - exercise or demonstrate the result;
 - avoid documentation unless it is the product or durable operating information;
 - do not launch sub-agents because Codeness owns orchestration; and
-- report concrete changes, exercised evidence, blockers, and the highest-value next move.
+- report concrete changes, exercised evidence, blockers, and the highest-value next move in at most 180 plainspoken words.
+
+CEO decisions use short fields rather than essays: reason and evidence are at most two sentences each, working goals are at most three sentences, and assignments are at most 60 words. Company check-ins are capped at 80 words. Formal, academic, consultant, and committee language is explicitly rejected because volume can make weak progress look substantial.
 
 The prompts are deliberately product-generic. Software and coding remain common positions and activities, but there is no game-specific language in the operating system.
 

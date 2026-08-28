@@ -179,6 +179,105 @@ struct LiveTeamModelTests {
     }
 
     @Test
+    func productMotorDiscountsCachedInputAndProtectsTheFirstSixProductTurns() throws {
+        var definition = companyLiveTeamDefinition()
+        definition.productBet?.fundedTokenLimit = 1_000_000
+        definition.productBet?.maximumTurns = 20
+        let member = try #require(definition.members.last)
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: definition.revision,
+            cycle: 1,
+            sessionSlotID: "member:\(member.id)",
+            productBet: definition.productBet
+        )
+        let checkpoint = LiveTeamCheckpoint(
+            memberID: member.id,
+            cycle: 2,
+            revision: definition.revision
+        )
+        let run: (Int) -> RunRecord = { sequence in
+            RunRecord(
+                sequence: sequence,
+                role: .implementer,
+                kind: .implementation,
+                status: .completed,
+                threadID: nil,
+                model: member.target.model,
+                effort: "high",
+                prompt: "Build it.",
+                startedAt: .now,
+                tokenUsage: .init(
+                    totalTokens: 1_000_000,
+                    inputTokens: 990_000,
+                    cachedInputTokens: 980_000,
+                    outputTokens: 10_000
+                ),
+                liveTeamMember: snapshot
+            )
+        }
+
+        let firstWindow = (1...6).map(run)
+        let usage = CompanyProductMotor.usage(for: definition, runs: firstWindow)
+        #expect(usage.totalTokens == 6_000_000)
+        #expect(usage.effectiveFundingTokens == 708_000)
+
+        let protected = CompanyProductMotor.decision(
+            sourceResult: "INVESTMENT BOUNDARY: READY",
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: checkpoint,
+            runs: Array(firstWindow.prefix(5))
+        )
+        #expect(protected.disposition == .continueTeam)
+
+        let stillFunded = CompanyProductMotor.decision(
+            sourceResult: "The integrated product keeps improving.",
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: checkpoint,
+            runs: firstWindow
+        )
+        #expect(stillFunded.disposition == .continueTeam)
+
+        let tokenBoundary = CompanyProductMotor.decision(
+            sourceResult: "The integrated product keeps improving.",
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: checkpoint,
+            runs: (1...9).map(run)
+        )
+        #expect(tokenBoundary.disposition == .requestOversight)
+        #expect(tokenBoundary.evidence.contains("effective funding-token budget"))
+    }
+
+    @Test
+    func productMotorRepairsAnUnrunnableTeamWithoutWaitingSixTurns() throws {
+        let definition = companyLiveTeamDefinition()
+        let member = try #require(definition.members.last)
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: definition.revision,
+            cycle: 1,
+            sessionSlotID: "member:\(member.id)",
+            productBet: definition.productBet
+        )
+
+        let decision = CompanyProductMotor.decision(
+            sourceResult: "The one-time assignments are exhausted.",
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: nil,
+            runs: []
+        )
+
+        #expect(decision.disposition == .requestOversight)
+        #expect(decision.evidence.contains("no assigned person remains eligible"))
+    }
+
+    @Test
     func schedulerUsesStableMemberIdentityAndSkipsCompletedOnceMembers() throws {
         let definition = liveTeamDefinition()
         let initial = try #require(
@@ -402,6 +501,8 @@ struct LiveTeamModelTests {
         #expect(prompt.contains("Explicitly disclose any network or external-service use"))
         #expect(prompt.contains("Do not delegate it to sub-agents"))
         #expect(prompt.contains("Codeness has already assigned the other responsibilities"))
+        #expect(prompt.contains("at most 180 words"))
+        #expect(prompt.contains("academic analysis, formal report"))
         #expect(!prompt.contains("Board-only secret constraint"))
     }
 
@@ -411,6 +512,8 @@ struct LiveTeamModelTests {
         #expect(instructions.contains("personality, position, assignment"))
         #expect(instructions.contains("do not delegate it to sub-agents"))
         #expect(instructions.contains("visible, usable, integrated product value"))
+        #expect(instructions.contains("at most 180 words"))
+        #expect(instructions.contains("not an academic, consultant, or formal committee"))
         #expect(!instructions.contains("Implement member"))
         #expect(!instructions.contains("Review member"))
     }
@@ -511,10 +614,57 @@ struct AgentLiveTeamRouterTests {
         #expect(goalPosition.lowerBound > feedbackPosition.lowerBound)
         #expect(bootstrapRequest.developerInstructions.contains("strategic control"))
         #expect(bootstrapRequest.developerInstructions.contains("sole authority source"))
-        #expect(bootstrapRequest.developerInstructions.contains("value and learning per total token cost"))
+        #expect(bootstrapRequest.developerInstructions.contains("value and learning per effective token cost"))
+        #expect(bootstrapRequest.developerInstructions.contains("evidence gaps, not autonomous production blockers"))
+        #expect(bootstrapRequest.developerInstructions.contains("Never sound like an academic"))
+        #expect(bootstrapRequest.prompt.contains("first six eligible product turns"))
         #expect(bootstrapRequest.developerInstructions.contains("choose only from this catalog"))
         #expect(coordinatorRequest.developerInstructions.contains("route local agent work"))
         #expect(coordinatorRequest.developerInstructions.contains("evidence and advice, not authority"))
+    }
+
+    @Test
+    func companyStaffingRetriesANameAlreadyUsedByTheChiefExecutive() async throws {
+        let provider = LiveTeamUtilityProvider(personaNames: [
+            "Rhea Calder",
+            "Rhea Calder",
+            "Eli Navarro"
+        ])
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+        let definition = try await router.bootstrap(
+            LiveTeamOverseerContext(
+                userGoal: "Build a real product.",
+                currentDefinition: nil,
+                coordinatorHandoff: nil,
+                recentEvidence: [],
+                editHistory: [],
+                targetOptions: [
+                    LiveTeamTargetOption(id: "primary", label: "Primary", target: target)
+                ],
+                triggerReason: "Bootstrap"
+            ),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep direct product work moving."
+            ),
+            defaultCoordinator: LiveTeamCoordinatorConfiguration(
+                target: target,
+                instructions: "Route direct product work."
+            ),
+            cwd: "/tmp/live-team-unique-people"
+        )
+
+        #expect(definition.overseerPerson?.profile.fullName == "Rhea Calder")
+        #expect(definition.members.first?.person?.profile.fullName == "Eli Navarro")
+        let personaRequests = await provider.requests().filter {
+            $0.developerInstructions.contains("Create one memorable startup colleague")
+        }
+        #expect(personaRequests.count == 3)
+        #expect(personaRequests[1].prompt.contains("rhea calder"))
+        #expect(personaRequests[2].prompt.contains("CORRECTION RETRY"))
+        #expect(personaRequests[2].prompt.contains("reused an existing colleague's name"))
     }
 
     @Test
@@ -965,6 +1115,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     nonisolated let id: AgentProviderID = .codex
     private var utilityRequests: [AgentUtilityRequest] = []
     private var outputs: [String]
+    private var personaNames: [String]
     private let consultationDelay: Duration
     private let unavailablePersona: String?
     private var activeConsultations = 0
@@ -973,11 +1124,13 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     init(
         outputs: [String] = [],
         consultationDelay: Duration = .zero,
-        unavailablePersona: String? = nil
+        unavailablePersona: String? = nil,
+        personaNames: [String] = []
     ) {
         self.outputs = outputs
         self.consultationDelay = consultationDelay
         self.unavailablePersona = unavailablePersona
+        self.personaNames = personaNames
     }
 
     func prepareSession(_ request: AgentSessionRequest) throws -> AgentSession {
@@ -1010,9 +1163,19 @@ private actor LiveTeamUtilityProvider: AgentProviding {
     func runUtility(_ request: AgentUtilityRequest) async -> AgentUtilityResult {
         utilityRequests.append(request)
         if request.developerInstructions.contains("Create one memorable startup colleague") {
+            let name: String
+            if !personaNames.isEmpty {
+                name = personaNames.removeFirst()
+            } else if request.prompt.contains("Chief Executive") {
+                name = "Rhea Calder"
+            } else if request.prompt.contains("Developer") {
+                name = "Eli Navarro"
+            } else {
+                name = "Mira Voss"
+            }
             return AgentUtilityResult(output: """
             {
-              "fullName": "Rhea Calder",
+              "fullName": "\(name)",
               "background": "Built ambitious products with small teams.",
               "formativeSuccess": "Shipped a product customers immediately adopted.",
               "formativeScar": "Lost a year to cautious consensus and paperwork.",

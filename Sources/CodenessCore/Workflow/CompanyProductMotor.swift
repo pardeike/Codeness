@@ -1,6 +1,8 @@
 import Foundation
 
 public enum CompanyProductMotor {
+    public static let minimumProductTurns = 6
+
     public static func decision(
         sourceResult: String,
         snapshot: LiveTeamMemberSnapshot,
@@ -15,29 +17,35 @@ public enum CompanyProductMotor {
         let productTokens = betRuns.compactMap(\.tokenUsage).reduce(RunTokenUsage.zero) {
             $0.adding($1)
         }
+        let fundingTokens = usage.effectiveFundingTokens
+        let productFundingTokens = productTokens.effectiveFundingTokens
         let bet = definition.productBet
         let reachedTokenLimit = bet.map {
-            usage.totalTokens >= $0.fundedTokenLimit
+            fundingTokens >= $0.fundedTokenLimit
         } ?? false
-        let reachedTurnLimit = bet.map {
-            betRuns.count >= $0.maximumTurns
+        let turnLimit = bet.map {
+            max($0.maximumTurns, minimumProductTurns)
+        }
+        let reachedTurnLimit = turnLimit.map {
+            betRuns.count >= $0
         } ?? false
         let explicitBoundary = sourceResult.localizedCaseInsensitiveContains(
             "INVESTMENT BOUNDARY: READY"
         )
+        let completedRunway = betRuns.count >= minimumProductTurns
 
         let disposition: LiveTeamCoordinatorDisposition
         let evidence: String
         if proposedCheckpoint == nil {
             disposition = .requestOversight
             evidence = "The funded product bet reached an investment decision because no assigned person remains eligible."
-        } else if reachedTokenLimit {
+        } else if reachedTokenLimit && completedRunway {
             disposition = .requestOversight
-            evidence = "The funded product bet used \(usage.totalTokens) of its \(bet?.fundedTokenLimit ?? 0) token budget, including \(productTokens.totalTokens) product-work tokens."
+            evidence = "The funded product bet used \(fundingTokens) of its \(bet?.fundedTokenLimit ?? 0) effective funding-token budget, including \(productFundingTokens) product-work funding tokens."
         } else if reachedTurnLimit {
             disposition = .requestOversight
-            evidence = "The funded product bet reached its \(bet?.maximumTurns ?? 0)-turn investment boundary."
-        } else if explicitBoundary {
+            evidence = "The funded product bet reached its \(turnLimit ?? 0)-turn investment boundary."
+        } else if explicitBoundary && completedRunway {
             disposition = .requestOversight
             evidence = "The team declared its integrated demonstration ready for an investment decision."
         } else {
