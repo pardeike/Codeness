@@ -169,11 +169,22 @@ struct RunDetailView: View {
                     .background(.quaternary, in: Capsule())
                     .fixedSize()
             }
-            Text(runConfigurationText)
+            Text(runIdentityDetailText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
+    }
+
+    private var runIdentityDetailText: String {
+        guard let person = run.liveTeamMember?.member.person else {
+            return runConfigurationText
+        }
+        return [
+            person.profile.fullName,
+            person.position.title,
+            runConfigurationText,
+        ].joined(separator: " · ")
     }
 
     private var expandedControls: some View {
