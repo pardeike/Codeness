@@ -286,7 +286,7 @@ private struct TranscriptTopEdgeSuppression: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
-            content.scrollEdgeEffectStyle(nil, for: .top)
+            content.scrollEdgeEffectHidden(true, for: .top)
         } else {
             content
         }
