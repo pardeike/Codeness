@@ -39,7 +39,6 @@ struct RunDetailView: View {
                 .frame(maxHeight: 180)
             }
         }
-        .modifier(RunDetailTopEdgeSuppression())
     }
 
     private var recoveryPresentation: RunRecoveryPresentation? {
@@ -290,17 +289,6 @@ struct RunDetailView: View {
             values.append("Fast")
         }
         return values.joined(separator: " · ") + durationText
-    }
-}
-
-private struct RunDetailTopEdgeSuppression: ViewModifier {
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.scrollEdgeEffectHidden(true, for: .top)
-        } else {
-            content
-        }
     }
 }
 

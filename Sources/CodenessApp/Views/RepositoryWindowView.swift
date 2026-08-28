@@ -145,6 +145,7 @@ struct RepositoryWindowView: View {
     private var detailColumn: some View {
         VStack(spacing: 0) {
             detailContent
+                .modifier(RepositoryDetailTopEdgeSuppression())
             if coordinator.canInterrupt {
                 Divider()
                 steerComposer
@@ -674,6 +675,17 @@ private struct RunListTopEdgeProtection: ViewModifier {
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
             content.scrollEdgeEffectStyle(.hard, for: .top)
+        } else {
+            content
+        }
+    }
+}
+
+private struct RepositoryDetailTopEdgeSuppression: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectHidden(true, for: .top)
         } else {
             content
         }
