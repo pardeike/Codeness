@@ -259,6 +259,7 @@ public final class RepositoryCoordinator {
             scheduleViewStateSave()
         }
     }
+    public var selectedPersonID: UUID?
     public var pendingInteraction: PendingServerInteraction? { pendingInteractions.first }
     public var pendingInteractionCount: Int { pendingInteractions.count }
     public private(set) var statusMessage = "Loading repository history…"
@@ -267,6 +268,7 @@ public final class RepositoryCoordinator {
     public private(set) var pauseAfterCurrent = false
     public private(set) var isStartingActivity = false
     public private(set) var isStartingOver = false
+    public private(set) var isReplacingChiefExecutive = false
     public private(set) var pauseState: DocumentPauseState = .idle
     public private(set) var viewState = RepositoryViewState()
     public private(set) var isGeneratingWorkOverviewSummary = false
@@ -351,6 +353,7 @@ public final class RepositoryCoordinator {
     private let workflowRouter: (any WorkflowHandoffRouting)?
     private let liveTeamCoordinatorRouter: (any LiveTeamCoordinatorRouting)?
     private let liveTeamOverseerRouter: (any LiveTeamOverseerRouting)?
+    private let companyPersonaRouter: (any CompanyPersonaRouting)?
     private var liveTeamRuntimeConfiguration: LiveTeamRuntimeConfiguration?
     private let liveTeamRuntimeConfigurationProvider: (@MainActor @Sendable (
         RepositorySettings
@@ -438,6 +441,7 @@ public final class RepositoryCoordinator {
         workflowRouter: (any WorkflowHandoffRouting)? = nil,
         liveTeamCoordinatorRouter: (any LiveTeamCoordinatorRouting)? = nil,
         liveTeamOverseerRouter: (any LiveTeamOverseerRouting)? = nil,
+        companyPersonaRouter: (any CompanyPersonaRouting)? = nil,
         liveTeamRuntimeConfiguration: LiveTeamRuntimeConfiguration? = nil,
         liveTeamRuntimeConfigurationProvider: (@MainActor @Sendable (
             RepositorySettings
@@ -455,6 +459,7 @@ public final class RepositoryCoordinator {
         self.workflowRouter = workflowRouter
         self.liveTeamCoordinatorRouter = liveTeamCoordinatorRouter
         self.liveTeamOverseerRouter = liveTeamOverseerRouter
+        self.companyPersonaRouter = companyPersonaRouter
         self.liveTeamRuntimeConfiguration = liveTeamRuntimeConfiguration
         self.liveTeamRuntimeConfigurationProvider = liveTeamRuntimeConfigurationProvider
         self.legacyInterruptionMaximumAttemptCount = max(
@@ -493,6 +498,19 @@ public final class RepositoryCoordinator {
     public var selectedReview: LiveTeamReviewRecord? {
         guard let selectedReviewID else { return nil }
         return record.activity?.liveTeam?.reviews.first { $0.id == selectedReviewID }
+    }
+
+    public var companyPeople: [CompanyPerson] {
+        guard let definition = record.activity?.liveTeam?.currentDefinition else {
+            return []
+        }
+        return [definition.overseerPerson].compactMap { $0 }
+            + definition.members.compactMap(\.person)
+    }
+
+    public var selectedCompanyPerson: CompanyPerson? {
+        guard let selectedPersonID else { return nil }
+        return companyPeople.first { $0.id == selectedPersonID }
     }
 
     public var activeActivity: ActivityRecord? {
@@ -1100,14 +1118,66 @@ public final class RepositoryCoordinator {
 
     public func selectRun(_ runID: UUID?) {
         followsActiveProgress = false
+        selectedPersonID = nil
         selectedReviewID = nil
         selectedRunID = runID
     }
 
     public func selectReview(_ reviewID: UUID?) {
         followsActiveProgress = false
+        selectedPersonID = nil
         selectedRunID = nil
         selectedReviewID = reviewID
+    }
+
+    public func selectCompanyPerson(_ personID: UUID?) {
+        followsActiveProgress = false
+        selectedRunID = nil
+        selectedReviewID = nil
+        selectedPersonID = personID
+    }
+
+    public func replaceChiefExecutive() async {
+        guard !isReplacingChiefExecutive,
+              let router = companyPersonaRouter,
+              let activity = record.activity,
+              var definition = activity.liveTeam?.currentDefinition,
+              definition.operatingModelVersion >= 2 else { return }
+        isReplacingChiefExecutive = true
+        defer { isReplacingChiefExecutive = false }
+        do {
+            var person = try await router.generateChiefExecutive(
+                goal: activity.goal,
+                target: definition.overseerTarget,
+                cwd: record.canonicalPath
+            )
+            person.hiredRevision = definition.revision
+            let previousActivity = record.activity
+            let previousSelectedPersonID = selectedPersonID
+            if let previousChiefExecutive = definition.overseerPerson {
+                definition.formerPeople.append(previousChiefExecutive)
+            }
+            definition.overseerPerson = person
+            record.activity?.liveTeam?.currentDefinition = definition
+            if let index = record.activity?.liveTeam?.definitionHistory.firstIndex(where: {
+                $0.revision == definition.revision
+            }) {
+                record.activity?.liveTeam?.definitionHistory[index] = definition
+            } else {
+                record.activity?.liveTeam?.definitionHistory.append(definition)
+            }
+            selectedPersonID = person.id
+            statusMessage = "New CEO appointed"
+            do {
+                try await persist()
+            } catch {
+                record.activity = previousActivity
+                selectedPersonID = previousSelectedPersonID
+                throw error
+            }
+        } catch {
+            errorMessage = "Codeness could not appoint a new CEO: \(error.localizedDescription)"
+        }
     }
 
     public func stopFollowingActiveProgress(for runID: UUID) {
@@ -3334,7 +3404,6 @@ public final class RepositoryCoordinator {
             pauseLiveTeamActivity(message: "Codeness has not prepared the agents.")
             return
         }
-
         let snapshot: LiveTeamMemberSnapshot
         let checkpoint: LiveTeamCheckpoint
         if let snapshotOverride {
@@ -3367,7 +3436,8 @@ public final class RepositoryCoordinator {
                 workingGoal: definition.workingGoal,
                 revision: definition.revision,
                 cycle: reconciled.cycle,
-                sessionSlotID: slotID
+                sessionSlotID: slotID,
+                productBet: definition.productBet
             )
             checkpoint = reconciled
         }
@@ -3792,8 +3862,7 @@ public final class RepositoryCoordinator {
             completingRunIDs.remove(runID)
             routingTasks.removeValue(forKey: runID)
         }
-        guard let router = liveTeamCoordinatorRouter,
-              let activity = record.activity,
+        guard let activity = record.activity,
               let state = activity.liveTeam,
               let definition = state.currentDefinition,
               let run = run(withID: runID),
@@ -3821,11 +3890,28 @@ public final class RepositoryCoordinator {
             sourceResult: finalOutput
         )
         do {
-            var decision = try await router.coordinate(
-                context,
-                configuration: definition.coordinator,
-                cwd: record.canonicalPath
-            )
+            var decision: LiveTeamCoordinatorDecision
+            if definition.operatingModelVersion >= 2 {
+                decision = CompanyProductMotor.decision(
+                    sourceResult: finalOutput,
+                    snapshot: snapshot,
+                    definition: definition,
+                    proposedCheckpoint: proposedCheckpoint,
+                    runs: activity.runs
+                )
+            } else {
+                guard let router = liveTeamCoordinatorRouter else {
+                    throw AgentProviderError.namedUnavailable(
+                        displayName: "Work routing",
+                        detail: "No provider is configured."
+                    )
+                }
+                decision = try await router.coordinate(
+                    context,
+                    configuration: definition.coordinator,
+                    cwd: record.canonicalPath
+                )
+            }
             guard !isClosing else { return }
             decision.runLabel = normalizedRunLabel(
                 decision.runLabel,
@@ -3838,6 +3924,7 @@ public final class RepositoryCoordinator {
             }
             record.activity?.liveTeam?.coordinatorHandoff = decision.handoff
             record.activity?.liveTeam?.lastCoordinatorDecision = decision
+            recordCompanyExperience(snapshot: snapshot, decision: decision)
             record.activity?.liveTeam?.resumeCheckpoint = .applyCoordinatorDecision(runID)
             do {
                 try await persist()
@@ -3921,7 +4008,8 @@ public final class RepositoryCoordinator {
                     cycle: snapshot.cycle,
                     sessionSlotID: currentMember.sessionPolicy.persistentSlotID(
                         memberID: currentMember.id
-                    ) ?? "fresh:\(currentMember.id):retry"
+                    ) ?? "fresh:\(currentMember.id):retry",
+                    productBet: definition.productBet
                 ),
                 handoff: decision.handoff
             ))
@@ -3973,8 +4061,7 @@ public final class RepositoryCoordinator {
             if let continuation,
                continuation.cycle == snapshot.cycle,
                state.strategicReviewAfterBoundary == nil,
-               !state.boardGoalAmendmentPendingReview,
-               !liveTeamPeriodicReviewIsDue {
+               !state.boardGoalAmendmentPendingReview {
                 record.activity?.liveTeam?.localRetryMemberID = nil
                 record.activity?.liveTeam?.localRetryCount = 0
                 await scheduleLiveTeamRun(continuation, afterRunID: runID)
@@ -4008,6 +4095,16 @@ public final class RepositoryCoordinator {
             if next.cycle > snapshot.cycle {
                 record.activity?.liveTeam?.cyclesSinceStrategicReview += 1
                 record.activity?.liveTeam?.cyclesUnderCurrentRevision += 1
+                if definition.operatingModelVersion < 2 {
+                    await requestLiveTeamStrategicReview(
+                        reason: "Replace the earlier agent loop with the product-company operating model at this completed round boundary.",
+                        automatic: true,
+                        continuation: next,
+                        unrunnable: true,
+                        sourceRunID: runID
+                    )
+                    return
+                }
             }
             if var request = record.activity?.liveTeam?.strategicReviewAfterBoundary {
                 record.activity?.liveTeam?.strategicReviewAfterBoundary = nil
@@ -4027,16 +4124,6 @@ public final class RepositoryCoordinator {
                 )
                 return
             }
-            if liveTeamPeriodicReviewIsDue {
-                await requestLiveTeamStrategicReview(
-                    reason: "Periodic control review reached its round or agent-turn limit.",
-                    automatic: true,
-                    continuation: next,
-                    unrunnable: false,
-                    sourceRunID: runID
-                )
-                return
-            }
             await scheduleLiveTeamRun(next, afterRunID: runID)
         }
     }
@@ -4044,6 +4131,40 @@ public final class RepositoryCoordinator {
     private func markLiveTeamMemberComplete(_ snapshot: LiveTeamMemberSnapshot) {
         guard snapshot.member.runPolicy == .once else { return }
         record.activity?.liveTeam?.completedOnceMemberIDs.insert(snapshot.member.id)
+    }
+
+    private func recordCompanyExperience(
+        snapshot: LiveTeamMemberSnapshot,
+        decision: LiveTeamCoordinatorDecision
+    ) {
+        guard var definition = record.activity?.liveTeam?.currentDefinition,
+              definition.revision == snapshot.revision,
+              let index = definition.members.firstIndex(where: {
+                  $0.id == snapshot.member.id
+              }),
+              var person = definition.members[index].person else { return }
+        let routingEvidence = decision.evidence.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let productResult = decision.handoff.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let detail = definition.operatingModelVersion >= 2 && !productResult.isEmpty
+            ? String(productResult.prefix(1_200))
+            : routingEvidence.isEmpty
+                ? String(productResult.prefix(1_200))
+                : routingEvidence
+        person.experience.append(CompanyExperienceRecord(
+            headline: decision.runLabel,
+            detail: detail
+        ))
+        definition.members[index].person = person
+        record.activity?.liveTeam?.currentDefinition = definition
+        if let historyIndex = record.activity?.liveTeam?.definitionHistory.firstIndex(where: {
+            $0.revision == definition.revision
+        }) {
+            record.activity?.liveTeam?.definitionHistory[historyIndex] = definition
+        }
     }
 
     private func nextLiveTeamCheckpoint(
@@ -4082,16 +4203,6 @@ public final class RepositoryCoordinator {
             )
         }
         _ = afterRunID
-    }
-
-    private var liveTeamPeriodicReviewIsDue: Bool {
-        guard let state = record.activity?.liveTeam,
-              let runtime = liveTeamRuntimeConfiguration else { return false }
-        return runtime.oversightPolicy.periodicReviewIsDue(
-            roundsSinceReview: state.cyclesSinceStrategicReview,
-            workerTurnsSinceReview: state.workerTurnsSinceStrategicReview,
-            lastReviewAt: state.lastStrategicReviewAt
-        )
     }
 
     private func releaseFreshLiveTeamSessionIfNeeded(for runID: UUID) async -> Bool {
@@ -4388,6 +4499,7 @@ public final class RepositoryCoordinator {
         }
         let previousActivity = record.activity
         record.activity?.liveTeam?.currentDefinition = definition
+        record.activity?.liveTeam?.definitionHistory = [definition]
         record.activity?.liveTeam?.overseer.target = definition.overseerTarget
         record.activity?.liveTeam?.checkpoint = checkpoint
         record.activity?.liveTeam?.resumeCheckpoint = .perform(checkpoint)
@@ -4413,6 +4525,12 @@ public final class RepositoryCoordinator {
         request: LiveTeamOverseerRequest,
         reviewID: UUID?
     ) async {
+        if let reviewID,
+           let index = record.activity?.liveTeam?.reviews.firstIndex(where: {
+               $0.id == reviewID
+           }) {
+            record.activity?.liveTeam?.reviews[index].controlTokenUsage = decision.tokenUsage
+        }
         guard let current = record.activity?.liveTeam?.currentDefinition else {
             finishLiveTeamReview(
                 id: reviewID,
@@ -4441,13 +4559,51 @@ public final class RepositoryCoordinator {
             )
 
         case .keep:
+            var retainedDefinition: LiveTeamDefinition?
+            if current.operatingModelVersion >= 2 {
+                var renewed = current
+                renewed.revision += 1
+                renewed.strategicReason = decision.reason
+                renewed.setupTokenUsage = decision.tokenUsage
+                renewed.formerPeople = []
+                do {
+                    record.activity?.liveTeam?.pendingRevision = try LiveTeamStateMachine.pendingRevision(
+                        definition: renewed,
+                        baseRevision: current.revision,
+                        actor: .overseer,
+                        reason: decision.reason,
+                        evidence: decision.evidence,
+                        preferredNextMemberID: request.continuation?.memberID,
+                        currentDefinition: current,
+                        existingPending: record.activity?.liveTeam?.pendingRevision
+                    )
+                    guard await activatePendingLiveTeamRevision() else {
+                        throw LiveTeamRevisionError.invalid(
+                            errorMessage ?? "The renewed product bet could not be activated."
+                        )
+                    }
+                    retainedDefinition = renewed
+                } catch {
+                    finishLiveTeamReview(
+                        id: reviewID,
+                        outcome: .failed,
+                        summary: "The product bet could not be renewed",
+                        reason: error.localizedDescription,
+                        evidence: decision.evidence
+                    )
+                    pauseLiveTeamActivity(message: "The product bet could not be renewed.")
+                    try? await persist()
+                    return
+                }
+            }
             finishLiveTeamReview(
                 id: reviewID,
                 outcome: .kept,
                 summary: current.workingGoal,
                 reason: decision.reason,
                 evidence: decision.evidence,
-                resultingRevision: current.revision
+                resultingRevision: retainedDefinition?.revision ?? current.revision,
+                resultingDefinition: retainedDefinition
             )
             let continuation = preferredLiveTeamContinuation(
                 requested: request.continuation,
@@ -4629,6 +4785,12 @@ public final class RepositoryCoordinator {
         request: LiveTeamOverseerRequest,
         reviewID: UUID?
     ) async {
+        if let reviewID,
+           let index = record.activity?.liveTeam?.reviews.firstIndex(where: {
+               $0.id == reviewID
+           }) {
+            record.activity?.liveTeam?.reviews[index].controlTokenUsage = decision.tokenUsage
+        }
         switch decision.outcome {
         case .complete:
             finishLiveTeamReview(
@@ -4837,6 +4999,15 @@ public final class RepositoryCoordinator {
         )
         record.activity?.stepSessions = reconciliation.sessions
         record.activity?.liveTeam?.currentDefinition = newDefinition
+        var history = record.activity?.liveTeam?.definitionHistory ?? []
+        if !history.contains(where: { $0.revision == oldDefinition.revision }) {
+            history.append(oldDefinition)
+        }
+        history.removeAll { $0.revision == newDefinition.revision }
+        history.append(newDefinition)
+        record.activity?.liveTeam?.definitionHistory = history.sorted {
+            $0.revision < $1.revision
+        }
         record.activity?.liveTeam?.overseer.target = newDefinition.overseerTarget
         record.activity?.liveTeam?.pendingRevision = nil
         record.activity?.liveTeam?.cyclesUnderCurrentRevision = 0

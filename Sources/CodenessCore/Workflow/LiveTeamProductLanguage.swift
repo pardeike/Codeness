@@ -71,10 +71,17 @@ enum LiveTeamProductLanguage {
 
     static func definition(_ definition: LiveTeamDefinition) -> LiveTeamDefinition {
         var result = definition
-        result.workingGoal = assignment(result.workingGoal)
-        result.strategicReason = narrative(result.strategicReason)
+        let companyLanguage = definition.operatingModelVersion >= 2
+        result.workingGoal = companyLanguage
+            ? replacingInternalRoles(in: result.workingGoal)
+            : assignment(result.workingGoal)
+        result.strategicReason = companyLanguage
+            ? replacingInternalRoles(in: result.strategicReason)
+            : narrative(result.strategicReason)
         result.members = result.members.map(member)
-        result.coordinator.instructions = narrative(result.coordinator.instructions)
+        result.coordinator.instructions = companyLanguage
+            ? replacingInternalRoles(in: result.coordinator.instructions)
+            : narrative(result.coordinator.instructions)
         result.coordinator.target = executionTarget(result.coordinator.target)
         result.overseerTarget = executionTarget(result.overseerTarget)
         return result
@@ -82,8 +89,14 @@ enum LiveTeamProductLanguage {
 
     static func member(_ member: LiveTeamMember) -> LiveTeamMember {
         var result = member
-        result.name = narrative(result.name)
-        result.instructions = assignment(result.instructions)
+        if member.person != nil {
+            result.name = replacingInternalRoles(in: result.name)
+            result.instructions = replacingInternalRoles(in: result.instructions)
+            result.person?.assignment = result.instructions
+        } else {
+            result.name = narrative(result.name)
+            result.instructions = assignment(result.instructions)
+        }
         result.target = executionTarget(result.target)
         return result
     }
@@ -167,10 +180,13 @@ enum LiveTeamProductLanguage {
             if let snapshot = result.liveTeamMember {
                 result.liveTeamMember = LiveTeamMemberSnapshot(
                     member: member(snapshot.member),
-                    workingGoal: assignment(snapshot.workingGoal),
+                    workingGoal: snapshot.member.person == nil
+                        ? assignment(snapshot.workingGoal)
+                        : replacingInternalRoles(in: snapshot.workingGoal),
                     revision: snapshot.revision,
                     cycle: snapshot.cycle,
-                    sessionSlotID: snapshot.sessionSlotID
+                    sessionSlotID: snapshot.sessionSlotID,
+                    productBet: snapshot.productBet
                 )
             }
             return result

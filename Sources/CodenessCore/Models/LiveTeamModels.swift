@@ -89,6 +89,8 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
     public var target: AgentTarget
     public var runPolicy: LiveTeamRunPolicy
     public var sessionPolicy: LiveTeamSessionPolicy
+    public var positionID: CompanyPositionID?
+    public var person: CompanyPerson?
 
     public init(
         id: String,
@@ -96,7 +98,9 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
         instructions: String,
         target: AgentTarget,
         runPolicy: LiveTeamRunPolicy,
-        sessionPolicy: LiveTeamSessionPolicy
+        sessionPolicy: LiveTeamSessionPolicy,
+        positionID: CompanyPositionID? = nil,
+        person: CompanyPerson? = nil
     ) {
         self.id = id
         self.name = name
@@ -104,6 +108,8 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
         self.target = target
         self.runPolicy = runPolicy
         self.sessionPolicy = sessionPolicy
+        self.positionID = positionID
+        self.person = person
     }
 
     public var validationMessage: String? {
@@ -126,6 +132,14 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
         }
         if let message = target.validationMessage {
             return "\(name): \(message)"
+        }
+        if let person {
+            guard positionID == person.positionID else {
+                return "\(name) has a person hired into a different position."
+            }
+            if let message = person.profile.validationMessage {
+                return "\(name): \(message)"
+            }
         }
         if case .sharedMemory(let groupID) = sessionPolicy,
            groupID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -183,6 +197,11 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
     public var coordinator: LiveTeamCoordinatorConfiguration
     public var overseerTarget: AgentTarget
     public var strategicReason: String
+    public var operatingModelVersion: Int
+    public var overseerPerson: CompanyPerson?
+    public var formerPeople: [CompanyPerson]
+    public var productBet: CompanyProductBet?
+    public var setupTokenUsage: RunTokenUsage?
 
     public init(
         revision: Int,
@@ -190,7 +209,12 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
         members: [LiveTeamMember],
         coordinator: LiveTeamCoordinatorConfiguration,
         overseerTarget: AgentTarget? = nil,
-        strategicReason: String
+        strategicReason: String,
+        operatingModelVersion: Int = 1,
+        overseerPerson: CompanyPerson? = nil,
+        formerPeople: [CompanyPerson] = [],
+        productBet: CompanyProductBet? = nil,
+        setupTokenUsage: RunTokenUsage? = nil
     ) {
         self.revision = max(revision, 1)
         self.workingGoal = workingGoal
@@ -198,6 +222,11 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
         self.coordinator = coordinator
         self.overseerTarget = overseerTarget ?? coordinator.target
         self.strategicReason = strategicReason
+        self.operatingModelVersion = max(operatingModelVersion, 1)
+        self.overseerPerson = overseerPerson
+        self.formerPeople = formerPeople
+        self.productBet = productBet
+        self.setupTokenUsage = setupTokenUsage
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -207,6 +236,11 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
         case coordinator
         case overseerTarget
         case strategicReason
+        case operatingModelVersion
+        case overseerPerson
+        case formerPeople
+        case productBet
+        case setupTokenUsage
     }
 
     public init(from decoder: any Decoder) throws {
@@ -224,7 +258,27 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
                 AgentTarget.self,
                 forKey: .overseerTarget
             ) ?? coordinator.target,
-            strategicReason: try container.decode(String.self, forKey: .strategicReason)
+            strategicReason: try container.decode(String.self, forKey: .strategicReason),
+            operatingModelVersion: try container.decodeIfPresent(
+                Int.self,
+                forKey: .operatingModelVersion
+            ) ?? 1,
+            overseerPerson: try container.decodeIfPresent(
+                CompanyPerson.self,
+                forKey: .overseerPerson
+            ),
+            formerPeople: try container.decodeIfPresent(
+                [CompanyPerson].self,
+                forKey: .formerPeople
+            ) ?? [],
+            productBet: try container.decodeIfPresent(
+                CompanyProductBet.self,
+                forKey: .productBet
+            ),
+            setupTokenUsage: try container.decodeIfPresent(
+                RunTokenUsage.self,
+                forKey: .setupTokenUsage
+            )
         )
     }
 
@@ -254,6 +308,31 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
         }
         if strategicReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "The strategic reason is empty."
+        }
+        if operatingModelVersion >= 2 {
+            guard let overseerPerson,
+                  overseerPerson.positionID == .chiefExecutive else {
+                return "The company needs a CEO."
+            }
+            if let message = overseerPerson.profile.validationMessage {
+                return "CEO: \(message)"
+            }
+            guard let productBet else {
+                return "The company needs a funded product bet."
+            }
+            if let message = productBet.validationMessage {
+                return message
+            }
+            if members.contains(where: { $0.positionID == .chiefExecutive }) {
+                return "The CEO cannot also occupy a worker assignment."
+            }
+            if members.contains(where: { $0.positionID == nil || $0.person == nil }) {
+                return "Every company assignment needs a person in a standard position."
+            }
+            let currentPeople = [overseerPerson] + members.map(\.person)
+            if Set(currentPeople.compactMap { $0?.id }).count != currentPeople.count {
+                return "Every current company position needs a distinct person."
+            }
         }
 
         let sharedEntries: [(groupID: String, member: LiveTeamMember)] = members.compactMap { member in
@@ -303,7 +382,7 @@ public enum LiveTeamOverseerMode: String, Codable, CaseIterable, Sendable {
     public var displayName: String {
         switch self {
         case .bootstrap: "Initial Setup"
-        case .strategicReview: "Strategic Review"
+        case .strategicReview: "Investment Review"
         case .completionReview: "Completion Review"
         case .migration: "Earlier Activity Setup"
         }
@@ -437,6 +516,7 @@ public struct LiveTeamManagerConsultation: Codable, Equatable, Identifiable, Sen
     public var concern: String?
     public var nextMove: String?
     public var failure: String?
+    public var tokenUsage: RunTokenUsage?
 
     public init(
         id: UUID = UUID(),
@@ -448,7 +528,8 @@ public struct LiveTeamManagerConsultation: Codable, Equatable, Identifiable, Sen
         evidence: String? = nil,
         concern: String? = nil,
         nextMove: String? = nil,
-        failure: String? = nil
+        failure: String? = nil,
+        tokenUsage: RunTokenUsage? = nil
     ) {
         self.id = id
         self.name = name
@@ -460,6 +541,7 @@ public struct LiveTeamManagerConsultation: Codable, Equatable, Identifiable, Sen
         self.concern = concern
         self.nextMove = nextMove
         self.failure = failure
+        self.tokenUsage = tokenUsage
     }
 }
 
@@ -473,8 +555,8 @@ public enum LiveTeamReviewOutcome: String, Codable, Equatable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .kept: "Strategy retained"
-        case .revised: "Strategy revised"
+        case .kept: "Product bet renewed"
+        case .revised: "New product bet funded"
         case .completed: "Goal confirmed complete"
         case .continueWork: "More work found"
         case .rejectedPause: "Autonomous pause rejected"
@@ -515,6 +597,7 @@ public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
     public var resultingRevision: Int?
     public var resultingDefinition: LiveTeamDefinition?
     public var completedAt: Date?
+    public var controlTokenUsage: RunTokenUsage?
 
     public init(
         id: UUID = UUID(),
@@ -528,7 +611,8 @@ public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
         decision: LiveTeamReviewDecision? = nil,
         resultingRevision: Int? = nil,
         resultingDefinition: LiveTeamDefinition? = nil,
-        completedAt: Date? = nil
+        completedAt: Date? = nil,
+        controlTokenUsage: RunTokenUsage? = nil
     ) {
         self.id = id
         self.mode = mode
@@ -542,6 +626,7 @@ public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
         self.resultingRevision = resultingRevision
         self.resultingDefinition = resultingDefinition
         self.completedAt = completedAt
+        self.controlTokenUsage = controlTokenUsage
     }
 
     public var completedConsultationCount: Int {
@@ -595,19 +680,22 @@ public struct LiveTeamCoordinatorDecision: Codable, Equatable, Sendable {
     public var disposition: LiveTeamCoordinatorDisposition
     public var evidence: String
     public var progressEvidence: LiveTeamProgressEvidence
+    public var tokenUsage: RunTokenUsage?
 
     public init(
         handoff: String,
         runLabel: String,
         disposition: LiveTeamCoordinatorDisposition,
         evidence: String,
-        progressEvidence: LiveTeamProgressEvidence = .none
+        progressEvidence: LiveTeamProgressEvidence = .none,
+        tokenUsage: RunTokenUsage? = nil
     ) {
         self.handoff = handoff
         self.runLabel = runLabel
         self.disposition = disposition
         self.evidence = evidence
         self.progressEvidence = progressEvidence
+        self.tokenUsage = tokenUsage
     }
 }
 
@@ -617,19 +705,22 @@ public struct LiveTeamMemberSnapshot: Codable, Equatable, Sendable {
     public let revision: Int
     public let cycle: Int
     public let sessionSlotID: String
+    public let productBet: CompanyProductBet?
 
     public init(
         member: LiveTeamMember,
         workingGoal: String,
         revision: Int,
         cycle: Int,
-        sessionSlotID: String
+        sessionSlotID: String,
+        productBet: CompanyProductBet? = nil
     ) {
         self.member = member
         self.workingGoal = workingGoal
         self.revision = revision
         self.cycle = max(cycle, 1)
         self.sessionSlotID = sessionSlotID
+        self.productBet = productBet
     }
 }
 
@@ -654,6 +745,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
     public var boardGoalAmendmentPendingReview: Bool
     public var strategicReviewAfterBoundary: LiveTeamOverseerRequest?
     public var boardDirectionReason: String?
+    public var definitionHistory: [LiveTeamDefinition]
 
     public init(
         overseer: LiveTeamOverseerConfiguration,
@@ -675,7 +767,8 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         memberFailureCounts: [String: Int] = [:],
         boardGoalAmendmentPendingReview: Bool = false,
         strategicReviewAfterBoundary: LiveTeamOverseerRequest? = nil,
-        boardDirectionReason: String? = nil
+        boardDirectionReason: String? = nil,
+        definitionHistory: [LiveTeamDefinition] = []
     ) {
         self.overseer = overseer
         self.currentDefinition = currentDefinition
@@ -697,6 +790,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         self.boardGoalAmendmentPendingReview = boardGoalAmendmentPendingReview
         self.strategicReviewAfterBoundary = strategicReviewAfterBoundary
         self.boardDirectionReason = boardDirectionReason
+        self.definitionHistory = definitionHistory
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -720,6 +814,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
         case boardGoalAmendmentPendingReview
         case strategicReviewAfterBoundary
         case boardDirectionReason
+        case definitionHistory
     }
 
     public init(from decoder: any Decoder) throws {
@@ -804,7 +899,11 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
             boardDirectionReason: try container.decodeIfPresent(
                 String.self,
                 forKey: .boardDirectionReason
-            )
+            ),
+            definitionHistory: try container.decodeIfPresent(
+                [LiveTeamDefinition].self,
+                forKey: .definitionHistory
+            ) ?? []
         )
     }
 
@@ -848,6 +947,7 @@ public struct LiveTeamState: Codable, Equatable, Sendable {
             boardDirectionReason,
             forKey: .boardDirectionReason
         )
+        try container.encode(definitionHistory, forKey: .definitionHistory)
     }
 }
 
@@ -864,35 +964,12 @@ public struct LiveTeamTargetOption: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct LiveTeamOversightPolicy: Sendable, Equatable {
-    public var periodicRoundInterval: Int
-    public var periodicWorkerTurnInterval: Int
-    public var minimumPeriodicReviewInterval: TimeInterval
     public var repeatedFailureThreshold: Int
 
     public init(
-        periodicRoundInterval: Int = 3,
-        periodicWorkerTurnInterval: Int = 12,
-        minimumPeriodicReviewInterval: TimeInterval = 10 * 60,
         repeatedFailureThreshold: Int = 2
     ) {
-        self.periodicRoundInterval = max(periodicRoundInterval, 1)
-        self.periodicWorkerTurnInterval = max(periodicWorkerTurnInterval, 1)
-        self.minimumPeriodicReviewInterval = max(minimumPeriodicReviewInterval, 0)
         self.repeatedFailureThreshold = max(repeatedFailureThreshold, 1)
-    }
-
-    public func periodicReviewIsDue(
-        roundsSinceReview: Int,
-        workerTurnsSinceReview: Int,
-        lastReviewAt: Date?,
-        now: Date = .now
-    ) -> Bool {
-        let countThresholdReached = roundsSinceReview >= periodicRoundInterval
-            || workerTurnsSinceReview >= periodicWorkerTurnInterval
-        guard countThresholdReached else { return false }
-        guard minimumPeriodicReviewInterval > 0,
-              let lastReviewAt else { return true }
-        return now.timeIntervalSince(lastReviewAt) >= minimumPeriodicReviewInterval
     }
 }
 
@@ -1023,19 +1100,22 @@ public struct LiveTeamStrategicDecision: Codable, Equatable, Sendable {
     public var evidence: String
     public var proposedDefinition: LiveTeamDefinition?
     public var preferredNextMemberID: String?
+    public var tokenUsage: RunTokenUsage?
 
     public init(
         action: LiveTeamStrategicAction,
         reason: String,
         evidence: String,
         proposedDefinition: LiveTeamDefinition? = nil,
-        preferredNextMemberID: String? = nil
+        preferredNextMemberID: String? = nil,
+        tokenUsage: RunTokenUsage? = nil
     ) {
         self.action = action
         self.reason = reason
         self.evidence = evidence
         self.proposedDefinition = proposedDefinition
         self.preferredNextMemberID = preferredNextMemberID
+        self.tokenUsage = tokenUsage
     }
 }
 
@@ -1049,11 +1129,18 @@ public struct LiveTeamCompletionDecision: Codable, Equatable, Sendable {
     public var outcome: LiveTeamCompletionOutcome
     public var evidence: String
     public var reason: String
+    public var tokenUsage: RunTokenUsage?
 
-    public init(outcome: LiveTeamCompletionOutcome, evidence: String, reason: String) {
+    public init(
+        outcome: LiveTeamCompletionOutcome,
+        evidence: String,
+        reason: String,
+        tokenUsage: RunTokenUsage? = nil
+    ) {
         self.outcome = outcome
         self.evidence = evidence
         self.reason = reason
+        self.tokenUsage = tokenUsage
     }
 }
 

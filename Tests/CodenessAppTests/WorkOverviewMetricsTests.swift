@@ -5,6 +5,124 @@ import CodenessCore
 
 struct WorkOverviewMetricsTests {
     @Test
+    func companyMetricsSeparateProductTokensFromAllControlTokens() throws {
+        let target = AgentTarget(providerID: .codex, model: "gpt-company")
+        let chiefExecutive = metricsPerson(
+            name: "CEO One",
+            positionID: .chiefExecutive,
+            assignment: "Own investment decisions.",
+            tokens: 20
+        )
+        let formerChiefExecutive = metricsPerson(
+            name: "CEO Zero",
+            positionID: .chiefExecutive,
+            assignment: "Fund the first product bet.",
+            tokens: 5
+        )
+        let developer = metricsPerson(
+            name: "Dev One",
+            positionID: .developer,
+            assignment: "Build the product.",
+            tokens: 30
+        )
+        let member = LiveTeamMember(
+            id: "build",
+            name: "Ship Core Value",
+            instructions: developer.assignment,
+            target: target,
+            runPolicy: .everyCycle,
+            sessionPolicy: .ownMemory,
+            positionID: .developer,
+            person: developer
+        )
+        let definition = LiveTeamDefinition(
+            revision: 1,
+            workingGoal: "Ship core value.",
+            members: [member],
+            coordinator: .init(target: target, instructions: "Route directly."),
+            strategicReason: "Build first.",
+            operatingModelVersion: 2,
+            overseerPerson: chiefExecutive,
+            formerPeople: [formerChiefExecutive],
+            productBet: .init(
+                headline: "Ship core value",
+                valuePromise: "A user can exercise it.",
+                showcase: "Integrated demonstration",
+                integrationTarget: "Main product",
+                killCondition: "Stop if users cannot exercise it."
+            ),
+            setupTokenUsage: usage(10)
+        )
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: 1,
+            cycle: 1,
+            sessionSlotID: "member:build",
+            productBet: definition.productBet
+        )
+        let run = RunRecord(
+            sequence: 1,
+            role: .implementer,
+            kind: .implementation,
+            status: .completed,
+            threadID: nil,
+            model: target.model,
+            effort: "high",
+            prompt: "Build it.",
+            startedAt: .now,
+            tokenUsage: usage(100),
+            liveTeamMember: snapshot
+        )
+        let review = LiveTeamReviewRecord(
+            mode: .strategicReview,
+            trigger: "Investment boundary",
+            sourceRunID: run.id,
+            baseRevision: 1,
+            status: .completed,
+            consultations: [LiveTeamManagerConsultation(
+                name: developer.profile.fullName,
+                mandate: developer.assignment,
+                status: .completed,
+                tokenUsage: usage(50)
+            )],
+            decision: .init(
+                outcome: .kept,
+                summary: "Continue",
+                reason: "Product evidence is strong.",
+                evidence: "The demonstration works."
+            ),
+            completedAt: .now,
+            controlTokenUsage: usage(40)
+        )
+        let activity = ActivityRecord(
+            goal: "Ship the product.",
+            prompts: .builtInDefaults,
+            status: .running,
+            runs: [run],
+            liveTeam: LiveTeamState(
+                overseer: .init(target: target, instructions: "Own the goal."),
+                currentDefinition: definition,
+                reviews: [review],
+                definitionHistory: [definition]
+            )
+        )
+
+        let metrics = WorkOverviewMetrics(
+            activity: activity,
+            repositoryUpdatedAt: .now,
+            now: .now
+        )
+
+        #expect(metrics.productTokenUsage?.totalTokens == 100)
+        #expect(metrics.controlTokenUsage?.totalTokens == 155)
+        #expect(metrics.totalTokenUsage?.totalTokens == 255)
+        #expect(metrics.recordedTokenRunCount == 1)
+        #expect(metrics.investmentDecisionCount == 1)
+        #expect(metrics.tokensPerInvestmentDecision == 255)
+    }
+
+    @Test
     func liveTeamMetricsAggregateByMemberIdentityAndCountCycles() throws {
         let startedAt = Date(timeIntervalSince1970: 30_000)
         let target = AgentTarget(providerID: .codex, model: "gpt-live")
@@ -360,4 +478,40 @@ struct WorkOverviewMetricsTests {
             agentTarget: step.target
         )
     }
+}
+
+private func usage(_ tokens: Int64) -> RunTokenUsage {
+    RunTokenUsage(totalTokens: tokens, inputTokens: tokens, outputTokens: 0)
+}
+
+private func metricsPerson(
+    name: String,
+    positionID: CompanyPositionID,
+    assignment: String,
+    tokens: Int64
+) -> CompanyPerson {
+    CompanyPerson(
+        positionID: positionID,
+        profile: CompanyPersonaProfile(
+            fullName: name,
+            background: "Built real products.",
+            formativeSuccess: "Shipped something people used.",
+            formativeScar: "Watched process displace value.",
+            convictions: ["Build first.", "Exercise the result.", "Reject mediocrity."],
+            personalStake: "Wants the product to matter.",
+            workingStyle: "Direct and ambitious.",
+            conflictStyle: "Argues clearly from evidence.",
+            blindSpot: "Moves too quickly.",
+            evidenceThatChangesTheirMind: "Observed user behavior.",
+            ingredients: .init(
+                spark: "A real launch",
+                riskPosture: "bold reversible bets",
+                conflictStyle: "direct",
+                craftObsession: "visible value",
+                ambition: "build the reference product"
+            )
+        ),
+        assignment: assignment,
+        generationTokenUsage: usage(tokens)
+    )
 }

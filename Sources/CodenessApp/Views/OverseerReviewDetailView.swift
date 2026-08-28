@@ -51,7 +51,7 @@ struct OverseerReviewDetailView: View {
     }
 
     private var reviewReason: some View {
-        reviewSection("Why This Review Happened", symbol: "questionmark.circle") {
+        ReviewDisclosureSection("Why This Decision Happened", symbol: "questionmark.circle") {
             Text(review.trigger)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -59,7 +59,7 @@ struct OverseerReviewDetailView: View {
     }
 
     private var consultation: some View {
-        reviewSection("Staff Consultation", symbol: "person.3.sequence.fill") {
+        ReviewDisclosureSection("Company Check-in", symbol: "person.3.sequence.fill") {
             if review.consultations.isEmpty {
                 HStack(spacing: 10) {
                     if review.status == .selectingManagers {
@@ -68,8 +68,8 @@ struct OverseerReviewDetailView: View {
                     }
                     Text(
                         review.status == .failed
-                            ? "No manager list was available."
-                            : "The Overseer is selecting the relevant manager perspectives."
+                            ? "No company check-in was available."
+                            : "The CEO is gathering short reports from the current company."
                     )
                     .foregroundStyle(.secondary)
                 }
@@ -84,7 +84,7 @@ struct OverseerReviewDetailView: View {
     }
 
     private var overseerDecision: some View {
-        reviewSection("Overseer Judgment", symbol: "eye.fill") {
+        ReviewDisclosureSection("CEO Investment Decision", symbol: "crown.fill") {
             if let decision = review.decision {
                 VStack(alignment: .leading, spacing: 12) {
                     Label(decision.outcome.displayName, systemImage: decisionSymbol(decision))
@@ -114,20 +114,38 @@ struct OverseerReviewDetailView: View {
     }
 
     private func resultingSetup(_ definition: LiveTeamDefinition) -> some View {
-        reviewSection("Resulting Agent Setup", symbol: "person.3.fill") {
+        ReviewDisclosureSection("Funded Company", symbol: "person.3.fill") {
             VStack(alignment: .leading, spacing: 14) {
                 detail("Working goal", text: definition.workingGoal)
                 detail("Strategic reason", text: definition.strategicReason)
+                if let bet = definition.productBet {
+                    detail("Product bet", text: """
+                    \(bet.headline)
+
+                    Value: \(bet.valuePromise)
+                    Showcase: \(bet.showcase)
+                    Integration target: \(bet.integrationTarget)
+                    Stop condition: \(bet.killCondition)
+                    Funding: \(bet.fundedTokenLimit.formatted()) tokens or \(bet.maximumTurns) turns
+                    """)
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Agents")
+                    Text("People")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     ForEach(definition.members) { member in
                         VStack(alignment: .leading, spacing: 7) {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(member.name)
+                                Text(member.person?.profile.fullName ?? member.name)
                                     .fontWeight(.medium)
+                                if let person = member.person {
+                                    Text(person.position.title)
+                                        .font(.caption)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.tint.opacity(0.12), in: Capsule())
+                                }
                                 Text(member.runPolicy.displayName)
                                     .font(.caption)
                                     .padding(.horizontal, 6)
@@ -164,26 +182,11 @@ struct OverseerReviewDetailView: View {
                         + definition.coordinator.target.model
                 )
                 detail(
-                    "Strategy reviews",
+                    "CEO investment decisions",
                     text: "Target: \(definition.overseerTarget.providerID.rawValue) · "
                         + definition.overseerTarget.model
                 )
             }
-        }
-    }
-
-    private func reviewSection<Content: View>(
-        _ title: String,
-        symbol: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        GroupBox {
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
-        } label: {
-            Label(title, systemImage: symbol)
-                .font(.headline)
         }
     }
 
@@ -200,10 +203,10 @@ struct OverseerReviewDetailView: View {
 
     private var statusText: String {
         switch review.status {
-        case .selectingManagers: "Selecting managers"
+        case .selectingManagers: "Gathering company"
         case .consultingManagers:
-            "Consulting \(review.completedConsultationCount) of \(review.consultations.count)"
-        case .overseerDeciding: "Overseer deciding"
+            "Hearing \(review.completedConsultationCount) of \(review.consultations.count)"
+        case .overseerDeciding: "CEO deciding"
         case .completed: review.decision?.outcome.displayName ?? "Completed"
         case .failed: "Interrupted"
         }
@@ -229,9 +232,9 @@ struct OverseerReviewDetailView: View {
     private var decisionPendingText: String {
         switch review.status {
         case .selectingManagers, .consultingManagers:
-            "The Overseer will decide after the consultation."
+            "The CEO will decide after the company check-in."
         case .overseerDeciding:
-            "The Overseer is weighing the reports against the fixed user goal and durable evidence."
+            "The CEO is weighing product evidence, token return, and the fixed user goal."
         case .completed, .failed:
             "No decision was recorded."
         }
@@ -245,6 +248,37 @@ struct OverseerReviewDetailView: View {
         case .continueWork: "hammer.circle.fill"
         case .rejectedPause: "arrow.uturn.forward.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+private struct ReviewDisclosureSection<Content: View>: View {
+    let title: String
+    let symbol: String
+    let content: Content
+    @State private var isExpanded = false
+
+    init(
+        _ title: String,
+        symbol: String,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.symbol = symbol
+        self.content = content()
+    }
+
+    var body: some View {
+        GroupBox {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 10)
+            } label: {
+                Label(title, systemImage: symbol)
+                    .font(.headline)
+            }
+            .padding(8)
         }
     }
 }

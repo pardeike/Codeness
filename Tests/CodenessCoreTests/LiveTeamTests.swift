@@ -4,6 +4,181 @@ import Testing
 
 struct LiveTeamModelTests {
     @Test
+    func predefinedPositionCatalogCoversEveryPositionExactlyOnce() {
+        #expect(
+            Set(CompanyPositionCatalog.positions.map(\.id))
+                == Set(CompanyPositionID.allCases)
+        )
+        #expect(
+            Set(CompanyPositionCatalog.positions.map(\.title)).count
+                == CompanyPositionCatalog.positions.count
+        )
+        #expect(CompanyPositionCatalog.position(.developer).title == "Developer")
+        #expect(CompanyPositionCatalog.position(.artDirector).title == "Art Director")
+    }
+
+    @Test
+    func personaRequirementsRejectIndifferenceAndKeepRandomIngredientsReproducible() {
+        var firstGenerator = SeededTestGenerator(seed: 42)
+        var secondGenerator = SeededTestGenerator(seed: 42)
+        #expect(
+            CompanyPersonaIngredients.random(using: &firstGenerator)
+                == CompanyPersonaIngredients.random(using: &secondGenerator)
+        )
+
+        var person = testCompanyPerson(
+            name: "Avery Vale",
+            positionID: .developer,
+            assignment: "Build the product."
+        )
+        #expect(person.profile.validationMessage == nil)
+        person.profile.workingStyle = "A neutral facilitator who avoids disagreement."
+        #expect(
+            person.profile.validationMessage
+                == "A company persona cannot be neutral, indifferent, or invested in mediocrity."
+        )
+    }
+
+    @Test
+    func companyDefinitionRoundTripPreservesFormerPeopleAndFundingState() throws {
+        var definition = companyLiveTeamDefinition()
+        var formerChiefExecutive = testCompanyPerson(
+            name: "Former CEO",
+            positionID: .chiefExecutive,
+            assignment: "Fund the original product bet."
+        )
+        formerChiefExecutive.hiredRevision = definition.revision
+        formerChiefExecutive.generationTokenUsage = RunTokenUsage(
+            totalTokens: 30,
+            inputTokens: 20,
+            outputTokens: 10
+        )
+        definition.formerPeople = [formerChiefExecutive]
+        definition.setupTokenUsage = RunTokenUsage(
+            totalTokens: 40,
+            inputTokens: 30,
+            outputTokens: 10
+        )
+
+        let data = try JSONEncoder().encode(definition)
+        let decoded = try JSONDecoder().decode(LiveTeamDefinition.self, from: data)
+
+        #expect(decoded == definition)
+        #expect(decoded.validationMessage == nil)
+    }
+
+    @Test
+    func companyLanguageAndProductBetSurvivePersistedTextNormalization() throws {
+        let definition = companyLiveTeamDefinition()
+        let member = try #require(definition.members.first)
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: definition.revision,
+            cycle: 1,
+            sessionSlotID: "member:\(member.id)",
+            productBet: definition.productBet
+        )
+        let run = RunRecord(
+            sequence: 1,
+            role: .implementer,
+            kind: .implementation,
+            status: .completed,
+            threadID: nil,
+            model: member.target.model,
+            effort: "high",
+            prompt: "Build it.",
+            startedAt: .now,
+            liveTeamMember: snapshot
+        )
+        var activity = ActivityRecord(
+            goal: "Build the product.",
+            prompts: .builtInDefaults,
+            status: .running,
+            runs: [run],
+            liveTeam: LiveTeamState(
+                overseer: .init(target: member.target, instructions: "Own the goal."),
+                currentDefinition: definition
+            )
+        )
+
+        LiveTeamProductLanguage.normalizePersistedControlText(in: &activity)
+
+        #expect(
+            activity.liveTeam?.currentDefinition?.strategicReason
+                == definition.strategicReason
+        )
+        #expect(activity.runs.first?.liveTeamMember?.productBet == definition.productBet)
+    }
+
+    @Test
+    func productMotorAdvancesWithoutControlTokensUntilInvestmentBoundary() throws {
+        var definition = companyLiveTeamDefinition()
+        #expect(CompanyProductBet(
+            headline: "Build it",
+            valuePromise: "A user can use it.",
+            showcase: "Working product",
+            integrationTarget: "Main surface",
+            killCondition: "Direct use disproves the bet.",
+            maximumTurns: 2
+        ).maximumTurns == 6)
+        definition.productBet?.maximumTurns = 6
+        let member = try #require(definition.members.last)
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: definition.workingGoal,
+            revision: definition.revision,
+            cycle: 1,
+            sessionSlotID: "member:\(member.id)",
+            productBet: definition.productBet
+        )
+        let checkpoint = LiveTeamCheckpoint(
+            memberID: member.id,
+            cycle: 2,
+            revision: definition.revision
+        )
+        let run: (Int) -> RunRecord = { sequence in
+            RunRecord(
+                sequence: sequence,
+                role: .implementer,
+                kind: .implementation,
+                status: .completed,
+                threadID: nil,
+                model: member.target.model,
+                effort: "high",
+                prompt: "Build it.",
+                startedAt: .now,
+                tokenUsage: .init(
+                    totalTokens: 20_000,
+                    inputTokens: 18_000,
+                    outputTokens: 2_000
+                ),
+                liveTeamMember: snapshot
+            )
+        }
+
+        let advancing = CompanyProductMotor.decision(
+            sourceResult: "Shipped a visible interaction.",
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: checkpoint,
+            runs: [run(1)]
+        )
+        #expect(advancing.disposition == .continueTeam)
+        #expect(advancing.tokenUsage == nil)
+
+        let boundary = CompanyProductMotor.decision(
+            sourceResult: "Integrated and exercised the slice.",
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: checkpoint,
+            runs: (1...6).map(run)
+        )
+        #expect(boundary.disposition == .requestOversight)
+        #expect(boundary.evidence.contains("6-turn investment boundary"))
+    }
+
+    @Test
     func schedulerUsesStableMemberIdentityAndSkipsCompletedOnceMembers() throws {
         let definition = liveTeamDefinition()
         let initial = try #require(
@@ -154,41 +329,6 @@ struct LiveTeamModelTests {
     }
 
     @Test
-    func periodicReviewUsesElapsedTimeOnlyAsACooldown() {
-        let policy = LiveTeamOversightPolicy(
-            periodicRoundInterval: 3,
-            periodicWorkerTurnInterval: 12,
-            minimumPeriodicReviewInterval: 10 * 60
-        )
-        let now = Date(timeIntervalSinceReferenceDate: 20_000)
-
-        #expect(!policy.periodicReviewIsDue(
-            roundsSinceReview: 2,
-            workerTurnsSinceReview: 11,
-            lastReviewAt: now.addingTimeInterval(-20 * 60),
-            now: now
-        ))
-        #expect(!policy.periodicReviewIsDue(
-            roundsSinceReview: 3,
-            workerTurnsSinceReview: 12,
-            lastReviewAt: now.addingTimeInterval(-9 * 60),
-            now: now
-        ))
-        #expect(policy.periodicReviewIsDue(
-            roundsSinceReview: 3,
-            workerTurnsSinceReview: 0,
-            lastReviewAt: now.addingTimeInterval(-10 * 60),
-            now: now
-        ))
-        #expect(policy.periodicReviewIsDue(
-            roundsSinceReview: 0,
-            workerTurnsSinceReview: 12,
-            lastReviewAt: nil,
-            now: now
-        ))
-    }
-
-    @Test
     func runtimeRejectsDuplicateTargetIdentifiersBeforeRouting() {
         let target = testTarget()
         let runtime = LiveTeamRuntimeConfiguration(
@@ -268,11 +408,24 @@ struct LiveTeamModelTests {
     @Test
     func sessionInstructionsRemainValidWhenMembersShareOneConversation() {
         let instructions = LiveTeamPromptBuilder.sessionInstructions()
-        #expect(instructions.contains("Each turn supplies your current name"))
+        #expect(instructions.contains("personality, position, assignment"))
         #expect(instructions.contains("do not delegate it to sub-agents"))
-        #expect(instructions.contains("unless the assignment explicitly requires delegation"))
+        #expect(instructions.contains("visible, usable, integrated product value"))
         #expect(!instructions.contains("Implement member"))
         #expect(!instructions.contains("Review member"))
+    }
+}
+
+private struct SeededTestGenerator: RandomNumberGenerator {
+    var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        state = state &* 6_364_136_223_846_793_005 &+ 1
+        return state
     }
 }
 
@@ -335,32 +488,33 @@ struct AgentLiveTeamRouterTests {
         #expect(decision.disposition == .continueTeam)
 
         let requests = await provider.requests()
-        #expect(requests.count == 2)
-        #expect(requests[0].prompt.contains(boardGoal))
-        #expect(!requests[1].prompt.contains(boardGoal))
-        let goalPosition = try #require(requests[0].prompt.range(of: "FIXED USER GOAL"))
+        #expect(requests.count == 4)
+        let bootstrapRequest = try #require(requests.first(where: {
+            $0.outputSchema.objectValue?["properties"]?.objectValue?["productBet"] != nil
+                && $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] == nil
+        }))
+        let coordinatorRequest = try #require(requests.first(where: {
+            $0.developerInstructions.contains("route local agent work")
+        }))
+        let personaRequests = requests.filter {
+            $0.outputSchema.objectValue?["properties"]?.objectValue?["personalStake"] != nil
+        }
+        #expect(personaRequests.count == 2)
+        #expect(personaRequests[0].prompt.contains(boardGoal))
+        #expect(!personaRequests[1].prompt.contains(boardGoal))
+        #expect(bootstrapRequest.prompt.contains(boardGoal))
+        #expect(!coordinatorRequest.prompt.contains(boardGoal))
+        let goalPosition = try #require(bootstrapRequest.prompt.range(of: "FIXED USER GOAL"))
         let feedbackPosition = try #require(
-            requests[0].prompt.range(of: "RECENT SUBORDINATE EVIDENCE")
+            bootstrapRequest.prompt.range(of: "RECENT SUBORDINATE EVIDENCE")
         )
         #expect(goalPosition.lowerBound > feedbackPosition.lowerBound)
-        #expect(requests[0].developerInstructions.contains("strategic control"))
-        #expect(requests[0].developerInstructions.contains("model"))
-        #expect(requests[0].developerInstructions.contains("binding for every Codeness agent"))
-        #expect(requests[0].developerInstructions.contains("affirmative evidence"))
-        #expect(requests[0].developerInstructions.contains("subordinate working material"))
-        #expect(requests[0].developerInstructions.contains("every reversible internal stage"))
-        #expect(requests[0].developerInstructions.contains("sole authority source"))
-        #expect(requests[0].developerInstructions.contains("advice and evidence, not decisions"))
-        #expect(requests[0].developerInstructions.contains("opportunity cost"))
-        #expect(requests[0].developerInstructions.contains("does not increase their authority"))
-        #expect(requests[0].developerInstructions.contains("Repeated support work"))
-        #expect(requests[0].developerInstructions.contains("Do not add independent review after every small change"))
-        #expect(requests[0].developerInstructions.contains("outcome-led headline"))
-        #expect(requests[1].developerInstructions.contains("route local agent work"))
-        #expect(requests[1].developerInstructions.contains("evidence and advice, not authority"))
-        #expect(requests[1].developerInstructions.contains("Do not turn suggestions"))
-        #expect(requests[1].developerInstructions.contains("Do not nominate completion while another assigned agent remains unfinished"))
-        #expect(requests[1].developerInstructions.contains("outcome-led headline"))
+        #expect(bootstrapRequest.developerInstructions.contains("strategic control"))
+        #expect(bootstrapRequest.developerInstructions.contains("sole authority source"))
+        #expect(bootstrapRequest.developerInstructions.contains("value and learning per total token cost"))
+        #expect(bootstrapRequest.developerInstructions.contains("choose only from this catalog"))
+        #expect(coordinatorRequest.developerInstructions.contains("route local agent work"))
+        #expect(coordinatorRequest.developerInstructions.contains("evidence and advice, not authority"))
     }
 
     @Test
@@ -388,7 +542,7 @@ struct AgentLiveTeamRouterTests {
         }
         #expect(reviews.count == 2)
         #expect(reviews[1].prompt.contains("CORRECTION RETRY"))
-        #expect(reviews[1].prompt.contains("work-routing configuration is invalid"))
+        #expect(reviews[1].prompt.contains("an agent has missing, extra, or invalid fields"))
         #expect(reviews[1].outputSchema == reviews[0].outputSchema)
     }
 
@@ -419,7 +573,7 @@ struct AgentLiveTeamRouterTests {
     }
 
     @Test
-    func strategicReviewConsultsFreshManagersInParallelWithoutSharingFixedGoal() async throws {
+    func strategicReviewConsultsPersistedCompanyPeopleInParallelWithoutSharingFixedGoal() async throws {
         let provider = LiveTeamUtilityProvider(consultationDelay: .milliseconds(50))
         let registry = AgentProviderRegistry(providers: [provider])
         let router = AgentLiveTeamRouter(providers: registry)
@@ -441,23 +595,19 @@ struct AgentLiveTeamRouterTests {
 
         #expect(decision.action == .keep)
         let requests = await provider.requests()
-        let selection = try #require(requests.first(where: {
-            $0.developerInstructions.contains("opening a short staff consultation")
-        }))
         let reports = requests.filter {
-            $0.developerInstructions.contains("one fresh, independent advisory manager")
+            $0.developerInstructions.contains("persisted named company person")
                 && !$0.prompt.contains("CORRECTION RETRY")
         }
         let finalReview = try #require(requests.first(where: {
             $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
         }))
 
-        #expect(selection.prompt.contains(context.userGoal))
         #expect(reports.count == 2)
         #expect(reports.allSatisfy { !$0.prompt.contains(context.userGoal) })
         #expect(reports.allSatisfy { $0.target == target })
         #expect(reports.allSatisfy { $0.developerInstructions.contains("have no authority") })
-        #expect(finalReview.prompt.contains("STAFF CONSULTATION"))
+        #expect(finalReview.prompt.contains("COMPANY CHECK-IN"))
         #expect(finalReview.prompt.contains("Creative direction is stalled"))
         #expect(finalReview.prompt.contains("Engineering has a working vertical path"))
         #expect(finalReview.prompt.contains(context.userGoal))
@@ -471,7 +621,7 @@ struct AgentLiveTeamRouterTests {
             Issue.record("The manager list must be the first visible review update.")
             return
         }
-        #expect(managers.map(\.name) == ["Creative Director", "Engineering Director"])
+        #expect(managers.map(\.name) == ["Mira Voss", "Eli Navarro"])
         let completed: [(Int, LiveTeamManagerConsultation)] = progress
             .dropFirst()
             .dropLast()
@@ -489,7 +639,7 @@ struct AgentLiveTeamRouterTests {
 
     @Test
     func strategicReviewPreservesAnUnavailableManagerWithoutLosingOtherAdvice() async throws {
-        let provider = LiveTeamUtilityProvider(unavailablePersona: "Creative Director")
+        let provider = LiveTeamUtilityProvider(unavailablePersona: "Mira Voss")
         let registry = AgentProviderRegistry(providers: [provider])
         let router = AgentLiveTeamRouter(providers: registry)
         let target = testTarget()
@@ -506,41 +656,40 @@ struct AgentLiveTeamRouterTests {
         #expect(decision.action == .keep)
         let requests = await provider.requests()
         let creativeReports = requests.filter {
-            $0.developerInstructions.contains("one fresh, independent advisory manager")
-                && $0.prompt.contains("Creative Director")
+            $0.developerInstructions.contains("persisted named company person")
+                && $0.prompt.contains("WHO YOU ARE\nMira Voss")
         }
         #expect(creativeReports.count == 2)
         let finalReview = try #require(requests.first(where: {
             $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
         }))
-        #expect(finalReview.prompt.contains("Creative Director"))
+        #expect(finalReview.prompt.contains("Mira Voss"))
         #expect(finalReview.prompt.contains("unavailable after retry"))
         #expect(finalReview.prompt.contains("Engineering has a working vertical path"))
     }
 
     @Test
-    func strategicReviewDoesNotSilentlySkipAnEntireFailedConsultation() async {
-        let provider = LiveTeamUtilityProvider(unavailablePersona: "Director")
+    func strategicReviewContinuesWhenEveryCompanyCheckInIsUnavailable() async throws {
+        let provider = LiveTeamUtilityProvider(unavailablePersona: "ALL")
         let registry = AgentProviderRegistry(providers: [provider])
         let router = AgentLiveTeamRouter(providers: registry)
         let target = testTarget()
 
-        await #expect(throws: AgentProviderError.self) {
-            try await router.reviewStrategy(
-                strategicContext(target: target),
-                configuration: LiveTeamOverseerConfiguration(
-                    target: target,
-                    instructions: "Keep executive control decisive."
-                ),
-                cwd: "/tmp/live-team-failed-staff-consultation"
-            )
-        }
+        let decision = try await router.reviewStrategy(
+            strategicContext(target: target),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep executive control decisive."
+            ),
+            cwd: "/tmp/live-team-failed-staff-consultation"
+        )
+        #expect(decision.action == .keep)
 
         let requests = await provider.requests()
         #expect(requests.filter {
-            $0.developerInstructions.contains("one fresh, independent advisory manager")
-        }.count == 4)
-        #expect(!requests.contains(where: {
+            $0.developerInstructions.contains("persisted named company person")
+        }.count >= 2)
+        #expect(requests.contains(where: {
             $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
         }))
     }
@@ -567,8 +716,8 @@ struct AgentLiveTeamRouterTests {
         let finalReview = try #require(requests.first(where: {
             $0.outputSchema.objectValue?["properties"]?.objectValue?["outcome"] != nil
         }))
-        #expect(finalReview.prompt.contains("STAFF CONSULTATION"))
-        #expect(finalReview.prompt.contains("Creative Director"))
+        #expect(finalReview.prompt.contains("COMPANY CHECK-IN"))
+        #expect(finalReview.prompt.contains("Mira Voss"))
         #expect(finalReview.prompt.contains(context.userGoal))
     }
 
@@ -701,9 +850,15 @@ struct AgentLiveTeamRouterTests {
         #expect(schemaUsesStrictObjectProperties(
             AgentLiveTeamRouter.strategicSchema(targetOptions: targetOptions)
         ))
+        #expect(schemaUsesStrictObjectProperties(
+            AgentLiveTeamRouter.companyDefinitionSchema(targetOptions: targetOptions)
+        ))
+        #expect(schemaUsesStrictObjectProperties(
+            AgentLiveTeamRouter.companyStrategicSchema(targetOptions: targetOptions)
+        ))
+        #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.personaSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.coordinatorSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.completionSchema))
-        #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.staffSelectionSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.staffReportSchema))
         #expect(schemaEnumValues(
             AgentLiveTeamRouter.coordinatorSchema,
@@ -733,21 +888,27 @@ struct AgentLiveTeamRouterTests {
       "reason": "The next stage needs a replacement setup.",
       "evidence": "The current agents have finished.",
       "workingGoal": "Continue the fixed goal.",
+      "productBet": {
+        "headline": "Ship the next unit",
+        "valuePromise": "A user can exercise the next feature.",
+        "showcase": "An integrated feature demonstration",
+        "integrationTarget": "The primary product surface",
+        "killCondition": "Stop if it produces no visible value.",
+        "fundingUnits": 4,
+        "maximumTurns": 6
+      },
       "members": [
         {
           "id": "deliver",
           "name": "Deliver",
           "instructions": "Implement the next reversible unit.",
-          "targetID": "primary",
+          "targetID": "missing",
           "runPolicy": "once",
           "sessionPolicy": "ownMemory",
-          "sharedGroupID": null
+          "sharedGroupID": null,
+          "positionID": "developer"
         }
       ],
-      "coordinator": {
-        "targetID": "missing",
-        "instructions": "Route the next turn."
-      },
       "overseerTargetID": "primary",
       "preferredNextMemberID": "deliver"
     }
@@ -759,8 +920,8 @@ struct AgentLiveTeamRouterTests {
       "reason": "The current setup still has useful work.",
       "evidence": "An eligible agent can continue.",
       "workingGoal": null,
+      "productBet": null,
       "members": null,
-      "coordinator": null,
       "overseerTargetID": null,
       "preferredNextMemberID": null
     }
@@ -848,23 +1009,27 @@ private actor LiveTeamUtilityProvider: AgentProviding {
 
     func runUtility(_ request: AgentUtilityRequest) async -> AgentUtilityResult {
         utilityRequests.append(request)
-        if request.developerInstructions.contains("opening a short staff consultation") {
+        if request.developerInstructions.contains("Create one memorable startup colleague") {
             return AgentUtilityResult(output: """
             {
-              "personas": [
-                {
-                  "name": "Creative Director",
-                  "mandate": "Judge whether the experience is becoming a coherent product."
-                },
-                {
-                  "name": "Engineering Director",
-                  "mandate": "Judge implementation progress, technical risk, and the next production move."
-                }
-              ]
+              "fullName": "Rhea Calder",
+              "background": "Built ambitious products with small teams.",
+              "formativeSuccess": "Shipped a product customers immediately adopted.",
+              "formativeScar": "Lost a year to cautious consensus and paperwork.",
+              "convictions": [
+                "Working product evidence beats status prose.",
+                "Bold ideas earn trust by becoming usable.",
+                "Mediocrity is an expensive choice."
+              ],
+              "personalStake": "Wants this company to create work people seek out.",
+              "workingStyle": "Fast, visual, direct, and evidence hungry.",
+              "conflictStyle": "Challenges weak assumptions without hiding disagreement.",
+              "blindSpot": "Can underestimate final integration cost.",
+              "evidenceThatChangesTheirMind": "A real user session or measured product failure."
             }
-            """)
+            """, tokenUsage: .init(totalTokens: 100, inputTokens: 80, outputTokens: 20))
         }
-        if request.developerInstructions.contains("one fresh, independent advisory manager") {
+        if request.developerInstructions.contains("persisted named company person") {
             activeConsultations += 1
             maximumActiveConsultations = max(
                 maximumActiveConsultations,
@@ -875,10 +1040,13 @@ private actor LiveTeamUtilityProvider: AgentProviding {
             }
             activeConsultations -= 1
             if let unavailablePersona,
-               request.prompt.contains(unavailablePersona) {
+               (unavailablePersona == "ALL"
+                    || request.prompt.contains(
+                        "WHO YOU ARE\n\(unavailablePersona)"
+                    )) {
                 return AgentUtilityResult(output: "invalid report")
             }
-            if request.prompt.contains("Creative Director") {
+            if request.prompt.contains("WHO YOU ARE\nMira Voss") {
                 return AgentUtilityResult(output: """
                 {
                   "involvement": "essential",
@@ -920,8 +1088,8 @@ private actor LiveTeamUtilityProvider: AgentProviding {
               "reason": "The current setup still has useful product work.",
               "evidence": "The staff reports and durable result support forward motion.",
               "workingGoal": null,
+              "productBet": null,
               "members": null,
-              "coordinator": null,
               "overseerTargetID": null,
               "preferredNextMemberID": null
             }
@@ -940,6 +1108,15 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         {
           "workingGoal": "Implement and verify one durable feature unit.",
           "strategicReason": "A single delivery member is sufficient to begin.",
+          "productBet": {
+            "headline": "Show one durable feature",
+            "valuePromise": "A user can exercise the feature directly.",
+            "showcase": "A working integrated feature demonstration",
+            "integrationTarget": "The repository's primary product surface",
+            "killCondition": "Stop if the exercised feature does not create user value.",
+            "fundingUnits": 4,
+            "maximumTurns": 6
+          },
           "members": [
             {
               "id": "deliver",
@@ -948,13 +1125,10 @@ private actor LiveTeamUtilityProvider: AgentProviding {
               "targetID": "primary",
               "runPolicy": "everyCycle",
               "sessionPolicy": "ownMemory",
-              "sharedGroupID": null
+              "sharedGroupID": null,
+              "positionID": "developer"
             }
           ],
-          "coordinator": {
-            "targetID": "primary",
-            "instructions": "Manage local flow only."
-          },
           "overseerTargetID": "primary"
         }
         """)
@@ -969,7 +1143,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
 private func strategicContext(target: AgentTarget) -> LiveTeamOverseerContext {
     LiveTeamOverseerContext(
         userGoal: "Finish the project autonomously.",
-        currentDefinition: liveTeamDefinition(),
+        currentDefinition: companyLiveTeamDefinition(),
         coordinatorHandoff: "The current agents finished their work.",
         recentEvidence: [],
         editHistory: [],
@@ -977,6 +1151,96 @@ private func strategicContext(target: AgentTarget) -> LiveTeamOverseerContext {
             LiveTeamTargetOption(id: "primary", label: "Primary", target: target)
         ],
         triggerReason: "The current agents are exhausted."
+    )
+}
+
+private func companyLiveTeamDefinition() -> LiveTeamDefinition {
+    let target = testTarget()
+    let chiefExecutive = testCompanyPerson(
+        name: "Rhea Calder",
+        positionID: .chiefExecutive,
+        assignment: "Own the goal and invest in the highest-return product bet."
+    )
+    let artDirector = testCompanyPerson(
+        name: "Mira Voss",
+        positionID: .artDirector,
+        assignment: "Make the experience distinctive and immediately visible."
+    )
+    let developer = testCompanyPerson(
+        name: "Eli Navarro",
+        positionID: .developer,
+        assignment: "Build and exercise the integrated product slice."
+    )
+    return LiveTeamDefinition(
+        revision: 2,
+        workingGoal: "Ship and exercise an integrated product slice.",
+        members: [
+            LiveTeamMember(
+                id: "art",
+                name: "Make It Distinctive",
+                instructions: artDirector.assignment,
+                target: target,
+                runPolicy: .once,
+                sessionPolicy: .ownMemory,
+                positionID: .artDirector,
+                person: artDirector
+            ),
+            LiveTeamMember(
+                id: "build",
+                name: "Ship Product Slice",
+                instructions: developer.assignment,
+                target: target,
+                runPolicy: .everyCycle,
+                sessionPolicy: .ownMemory,
+                positionID: .developer,
+                person: developer
+            )
+        ],
+        coordinator: .init(target: target, instructions: "Route direct product work."),
+        strategicReason: "The smallest team that can create an integrated demonstration.",
+        operatingModelVersion: 2,
+        overseerPerson: chiefExecutive,
+        productBet: CompanyProductBet(
+            headline: "Show the real product",
+            valuePromise: "A user can experience the core value directly.",
+            showcase: "An integrated, runnable demonstration",
+            integrationTarget: "The repository's main product surface",
+            killCondition: "Stop if two exercised slices fail to produce visible value."
+        )
+    )
+}
+
+private func testCompanyPerson(
+    name: String,
+    positionID: CompanyPositionID,
+    assignment: String
+) -> CompanyPerson {
+    CompanyPerson(
+        positionID: positionID,
+        profile: CompanyPersonaProfile(
+            fullName: name,
+            background: "Built ambitious products with small teams.",
+            formativeSuccess: "Shipped a product customers immediately adopted.",
+            formativeScar: "Lost a year to cautious consensus and paperwork.",
+            convictions: [
+                "Working product evidence beats status prose.",
+                "Bold ideas earn trust by becoming usable.",
+                "Mediocrity is an expensive choice."
+            ],
+            personalStake: "Wants this company to create work people actively seek out.",
+            workingStyle: "Fast, visual, direct, and evidence hungry.",
+            conflictStyle: "Challenges weak assumptions without hiding disagreement.",
+            blindSpot: "Can underestimate the final integration cost.",
+            evidenceThatChangesTheirMind: "A real user session or measured product failure.",
+            ingredients: CompanyPersonaIngredients(
+                spark: "A risky launch that worked",
+                riskPosture: "bold reversible bets",
+                conflictStyle: "direct and energetic",
+                craftObsession: "delight visible in seconds",
+                ambition: "build the reference product"
+            )
+        ),
+        assignment: assignment
     )
 }
 

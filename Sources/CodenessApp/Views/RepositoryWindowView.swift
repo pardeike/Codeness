@@ -128,6 +128,9 @@ struct RepositoryWindowView: View {
                 coordinator: coordinator,
                 suggestedGoal: coordinator.record.activityDraft?.goal ?? ""
             )
+        } else if let person = coordinator.selectedCompanyPerson {
+            CompanyPersonDetailView(coordinator: coordinator, person: person)
+                .id(person.id)
         } else if let review = coordinator.selectedReview {
             OverseerReviewDetailView(review: review)
                 .id(review.id)
@@ -180,6 +183,15 @@ struct RepositoryWindowView: View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 List(selection: timelineSelectionBinding) {
+                    if !coordinator.companyPeople.isEmpty {
+                        Section("Company") {
+                            ForEach(coordinator.companyPeople) { person in
+                                CompanyPersonRow(person: person)
+                                    .tag(person.id)
+                                    .id(person.id)
+                            }
+                        }
+                    }
                     if let activity = coordinator.activity {
                         ForEach(RunGroupingPolicy.workUnits(for: activity.runs)) { group in
                             Section {
@@ -281,9 +293,16 @@ struct RepositoryWindowView: View {
 
     private var timelineSelectionBinding: Binding<UUID?> {
         Binding(
-            get: { coordinator.selectedReviewID ?? coordinator.selectedRunID },
+            get: {
+                coordinator.selectedPersonID
+                    ?? coordinator.selectedReviewID
+                    ?? coordinator.selectedRunID
+            },
             set: { id in
                 if let id,
+                   coordinator.companyPeople.contains(where: { $0.id == id }) {
+                    coordinator.selectCompanyPerson(id)
+                } else if let id,
                    coordinator.activity?.liveTeam?.reviews.contains(where: {
                        $0.id == id
                    }) == true {
@@ -459,11 +478,13 @@ struct RepositoryWindowView: View {
             controlTitles.append(immediateControl.buttonTitle)
         }
         return RepositoryWindowMetrics.optimalSidebarWidth(
-            rowTitles: runs.map(\.displayName) + (coordinator.activity?.liveTeam?.reviews ?? [])
-                .map(\.sidebarTitle),
+            rowTitles: coordinator.companyPeople.map(\.profile.fullName)
+                + runs.map(\.displayName)
+                + (coordinator.activity?.liveTeam?.reviews ?? []).map(\.sidebarTitle),
             rowMetadata: runs.map {
                 runSidebarMetadata($0, targetName: application.targetDisplayName)
-            } + (coordinator.activity?.liveTeam?.reviews ?? []).map(\.sidebarDetail),
+            } + coordinator.companyPeople.map(\.position.title)
+                + (coordinator.activity?.liveTeam?.reviews ?? []).map(\.sidebarDetail),
             sectionTitles: groups.map(\.title),
             controlTitles: controlTitles
         )
@@ -620,6 +641,34 @@ private enum RunListScrollAnchor {
     static let bottom = "run-list-follow-bottom"
 }
 
+private struct CompanyPersonRow: View {
+    let person: CompanyPerson
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: person.positionID == .chiefExecutive
+                ? "crown.fill"
+                : "person.fill")
+                .foregroundStyle(
+                    person.positionID == .chiefExecutive ? Color.orange : Color.secondary
+                )
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(person.profile.fullName)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                Text(person.position.title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+        .help("Show \(person.profile.fullName)'s story, personality, and assignment")
+    }
+}
+
 private struct RunListTopEdgeProtection: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -683,11 +732,11 @@ private extension LiveTeamReviewRecord {
     var sidebarDetail: String {
         switch status {
         case .selectingManagers:
-            "Selecting managers"
+            "Gathering company"
         case .consultingManagers:
-            "Consulting managers · \(completedConsultationCount) of \(consultations.count)"
+            "Company check-in · \(completedConsultationCount) of \(consultations.count)"
         case .overseerDeciding:
-            "Overseer deciding"
+            "CEO deciding"
         case .completed, .failed:
             "\(mode.reviewDisplayName) · \(decision?.summary ?? "Review finished")"
         }
@@ -697,7 +746,7 @@ private extension LiveTeamReviewRecord {
 private extension LiveTeamOverseerMode {
     var reviewDisplayName: String {
         switch self {
-        case .strategicReview: "Strategy review"
+        case .strategicReview: "Investment review"
         case .completionReview: "Completion review"
         case .bootstrap: "Initial setup"
         case .migration: "Earlier activity setup"
@@ -810,6 +859,9 @@ private func runSidebarMetadata(
     _ run: RunRecord,
     targetName: (AgentTarget) -> String
 ) -> String {
+    if let person = run.liveTeamMember?.member.person {
+        return "\(person.profile.fullName) · \(person.position.title)"
+    }
     let target = run.agentTarget.map {
         targetName($0)
     } ?? run.kind.displayName
@@ -839,11 +891,17 @@ private struct RunRow: View {
                     }
                 }
                 HStack(spacing: 5) {
-                    Text(run.agentTarget.map {
-                        application.targetDisplayName($0)
-                    } ?? run.kind.displayName)
-                    Text("·")
-                    Text(run.status.displayName)
+                    if let person = run.liveTeamMember?.member.person {
+                        Text(person.profile.fullName)
+                        Text("·")
+                        Text(person.position.title)
+                    } else {
+                        Text(run.agentTarget.map {
+                            application.targetDisplayName($0)
+                        } ?? run.kind.displayName)
+                        Text("·")
+                        Text(run.status.displayName)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

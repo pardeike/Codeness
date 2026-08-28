@@ -42,6 +42,9 @@ struct WorkOverviewView: View {
                 if let liveTeam = activity.liveTeam {
                     liveTeamOverview(activity: activity, state: liveTeam)
                 }
+                if metrics.usesLiveTeam {
+                    productReturn(metrics)
+                }
                 compactSummary(metrics)
                 workSummary
                 goal(activity.goal)
@@ -168,16 +171,53 @@ struct WorkOverviewView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 14) {
                 if let definition = state.currentDefinition {
+                    if let bet = definition.productBet {
+                        let fundedUsage = CompanyProductMotor.usage(
+                            for: definition,
+                            runs: activity.runs
+                        )
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label(bet.headline, systemImage: "bolt.fill")
+                                .font(.headline)
+                            Text(bet.valuePromise)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("Showcase: \(bet.showcase)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            ProgressView(
+                                value: Double(fundedUsage.totalTokens),
+                                total: Double(bet.fundedTokenLimit)
+                            )
+                            Text(
+                                "\(WorkOverviewFormatting.tokens(fundedUsage.totalTokens)) of \(WorkOverviewFormatting.tokens(bet.fundedTokenLimit)) funded tokens used"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
                     Text(definition.strategicReason)
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     VStack(alignment: .leading, spacing: 8) {
+                        if let chiefExecutive = definition.overseerPerson {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(chiefExecutive.profile.fullName)
+                                    .fontWeight(.medium)
+                                Text(chiefExecutive.position.title)
+                                    .font(.caption)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(.orange.opacity(0.14), in: Capsule())
+                                Spacer()
+                            }
+                        }
                         ForEach(definition.members) { member in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(member.name)
+                                Text(member.person?.profile.fullName ?? member.name)
                                     .fontWeight(.medium)
-                                Text(member.runPolicy.displayName)
+                                Text(member.person?.position.title ?? member.runPolicy.displayName)
                                     .font(.caption)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -203,7 +243,44 @@ struct WorkOverviewView: View {
             }
             .padding(8)
         } label: {
-            Label("Agents", systemImage: "person.3.sequence.fill")
+            Label("Company", systemImage: "person.3.sequence.fill")
+                .font(.headline)
+        }
+    }
+
+    private func productReturn(_ metrics: WorkOverviewMetrics) -> some View {
+        GroupBox {
+            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) {
+                GridRow {
+                    Text("Product work")
+                    Text(metrics.productTokenUsage.map {
+                        WorkOverviewFormatting.tokens($0.totalTokens)
+                    } ?? "—")
+                        .monospacedDigit()
+                }
+                GridRow {
+                    Text("Company control")
+                    Text(metrics.controlTokenUsage.map {
+                        WorkOverviewFormatting.tokens($0.totalTokens)
+                    } ?? "—")
+                        .monospacedDigit()
+                }
+                GridRow {
+                    Text("Investment decisions")
+                    Text("\(metrics.investmentDecisionCount)")
+                        .monospacedDigit()
+                }
+                GridRow {
+                    Text("Tokens per decision")
+                    Text(metrics.tokensPerInvestmentDecision.map {
+                        WorkOverviewFormatting.tokens($0)
+                    } ?? "—")
+                        .monospacedDigit()
+                }
+            }
+            .padding(8)
+        } label: {
+            Label("Product Return", systemImage: "chart.line.uptrend.xyaxis")
                 .font(.headline)
         }
     }
@@ -563,6 +640,10 @@ struct WorkOverviewMetrics: Equatable {
     let totalTokenUsage: RunTokenUsage?
     let usesGenericWorkflow: Bool
     let usesLiveTeam: Bool
+    let productTokenUsage: RunTokenUsage?
+    let controlTokenUsage: RunTokenUsage?
+    let investmentDecisionCount: Int
+    let tokensPerInvestmentDecision: Int64?
 
     init(
         activity: ActivityRecord,
@@ -570,7 +651,15 @@ struct WorkOverviewMetrics: Equatable {
         now: Date
     ) {
         if let definition = activity.liveTeam?.currentDefinition {
-            phases = definition.members.map { member in
+            var phaseMembers = definition.members
+            for run in activity.runs {
+                guard let member = run.liveTeamMember?.member,
+                      !phaseMembers.contains(where: { $0.id == member.id }) else {
+                    continue
+                }
+                phaseMembers.append(member)
+            }
+            phases = phaseMembers.map { member in
                 Self.phase(
                     id: member.id,
                     name: member.name,
@@ -627,11 +716,60 @@ struct WorkOverviewMetrics: Equatable {
         elapsedMilliseconds = Self.milliseconds(from: activity.createdAt, to: endDate)
         self.repositoryUpdatedAt = repositoryUpdatedAt
         isFinished = activity.completedAt != nil
-        recordedTokenRunCount = phases.reduce(0) { $0 + $1.tokenRunCount }
-        let recordedUsage = phases.compactMap(\.tokenUsage)
-        totalTokenUsage = recordedUsage.isEmpty
+        let productUsageValues = activity.runs.compactMap(\.tokenUsage)
+        productTokenUsage = productUsageValues.isEmpty
             ? nil
-            : recordedUsage.reduce(.zero) { $0.adding($1) }
+            : productUsageValues.reduce(RunTokenUsage.zero) { $0.adding($1) }
+
+        let definitions = Self.companyDefinitions(activity)
+        var peopleByID: [UUID: CompanyPerson] = [:]
+        for definition in definitions {
+            if let person = definition.overseerPerson {
+                peopleByID[person.id] = person
+            }
+            for person in definition.members.compactMap(\.person) {
+                peopleByID[person.id] = person
+            }
+            for person in definition.formerPeople {
+                peopleByID[person.id] = person
+            }
+        }
+        var controlValues = definitions.filter { $0.revision == 1 }
+            .compactMap(\.setupTokenUsage)
+        controlValues += peopleByID.values.compactMap(\.generationTokenUsage)
+        controlValues += activity.runs.compactMap(\.coordinatorDecision?.tokenUsage)
+        controlValues += (activity.liveTeam?.reviews ?? []).compactMap(\.controlTokenUsage)
+        controlValues += (activity.liveTeam?.reviews ?? []).flatMap(\.consultations)
+            .compactMap(\.tokenUsage)
+        controlTokenUsage = controlValues.isEmpty
+            ? nil
+            : controlValues.reduce(RunTokenUsage.zero) { $0.adding($1) }
+
+        investmentDecisionCount = (activity.liveTeam?.reviews ?? []).count {
+            $0.status == .completed
+        }
+        let allUsage = [productTokenUsage, controlTokenUsage].compactMap { $0 }
+        totalTokenUsage = allUsage.isEmpty
+            ? nil
+            : allUsage.reduce(RunTokenUsage.zero) { $0.adding($1) }
+        recordedTokenRunCount = productUsageValues.count
+        tokensPerInvestmentDecision = investmentDecisionCount > 0
+            ? (totalTokenUsage?.totalTokens ?? 0) / Int64(investmentDecisionCount)
+            : nil
+    }
+
+    private static func companyDefinitions(_ activity: ActivityRecord) -> [LiveTeamDefinition] {
+        var byRevision: [Int: LiveTeamDefinition] = [:]
+        for definition in activity.liveTeam?.definitionHistory ?? [] {
+            byRevision[definition.revision] = definition
+        }
+        for definition in (activity.liveTeam?.reviews ?? []).compactMap(\.resultingDefinition) {
+            byRevision[definition.revision] = definition
+        }
+        if let current = activity.liveTeam?.currentDefinition {
+            byRevision[current.revision] = current
+        }
+        return byRevision.values.sorted { $0.revision < $1.revision }
     }
 
     private static func phase(

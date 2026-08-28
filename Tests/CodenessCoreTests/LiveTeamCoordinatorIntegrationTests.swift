@@ -447,7 +447,7 @@ struct LiveTeamCoordinatorIntegrationTests {
         try await waitUntil { coordinator.record.activity?.status == .paused }
 
         #expect(await overseer.recordedStrategicContexts().isEmpty)
-        #expect(coordinator.statusMessage == "Paused before strategic review")
+        #expect(coordinator.statusMessage == "Paused before investment review")
         #expect(
             coordinator.record.activity?.liveTeam?.lastStrategicReviewAt
                 == reviewDateBeforePause
@@ -464,6 +464,66 @@ struct LiveTeamCoordinatorIntegrationTests {
 
         #expect(await overseer.recordedStrategicContexts().count == 2)
         #expect(await provider.runRequests().count == 2)
+    }
+
+    @Test
+    func productCompanyResumesDirectWorkWithoutReviewUntilInvestmentBoundary() async throws {
+        let fixture = try makeFixture(
+            goal: "Keep building product value until the funded boundary."
+        )
+        defer { fixture.remove() }
+        let definition = companyLiveDefinition(maximumTurns: 6)
+        let gate = FirstRunGate()
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            firstRunGate: gate
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal,
+            strategicDecision: LiveTeamStrategicDecision(
+                action: .complete,
+                reason: "The funded demonstration satisfies the fixed goal.",
+                evidence: "Six direct product turns produced durable product evidence."
+            )
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: fixture.goal)
+        await gate.waitUntilBlocked()
+        coordinator.setPauseAfterCurrent(true)
+        await gate.release()
+        try await waitUntil { coordinator.record.activity?.status == .paused }
+
+        #expect(await provider.runRequests().count == 1)
+        #expect(await coordinatorRouter.routeCount() == 0)
+        #expect(await overseer.recordedStrategicContexts().isEmpty)
+        #expect(
+            coordinator.record.activity?.liveTeam?.currentDefinition?.members.first?
+                .person?.experience.first?.detail.contains("Worker result 1") == true
+        )
+        guard case .perform? = coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
+            Issue.record("Pause did not preserve the next direct product assignment.")
+            return
+        }
+
+        await coordinator.resume()
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+
+        #expect(await provider.runRequests().count == 6)
+        #expect(await coordinatorRouter.routeCount() == 0)
+        #expect(await overseer.recordedStrategicContexts().count == 1)
+        #expect(coordinator.record.activity?.liveTeam?.reviews.count == 1)
     }
 
     @Test
@@ -1177,7 +1237,7 @@ struct LiveTeamCoordinatorIntegrationTests {
         )
         await coordinator.load()
 
-        #expect(coordinator.statusMessage == "Paused before strategic review")
+        #expect(coordinator.statusMessage == "Paused before investment review")
         guard case .invokeOverseer(let resumeRequest)? =
             coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
             Issue.record("The older pause was not repaired to an Overseer checkpoint.")
@@ -1726,6 +1786,82 @@ private func liveDefinition(members: [LiveTeamMember]) -> LiveTeamDefinition {
         members: members,
         coordinator: liveCoordinatorConfiguration(),
         strategicReason: "This is the smallest coherent team for the current evidence."
+    )
+}
+
+private func companyLiveDefinition(maximumTurns: Int) -> LiveTeamDefinition {
+    let chiefExecutive = companyPerson(
+        name: "Mara Voss",
+        positionID: .chiefExecutive,
+        assignment: "Own the fixed goal and product investment."
+    )
+    let developer = companyPerson(
+        name: "Ivo Chen",
+        positionID: .developer,
+        assignment: "Build and exercise the integrated product."
+    )
+    let member = LiveTeamMember(
+        id: "build",
+        name: "Ship Visible Value",
+        instructions: developer.assignment,
+        target: liveTarget(),
+        runPolicy: .everyCycle,
+        sessionPolicy: .ownMemory,
+        positionID: .developer,
+        person: developer
+    )
+    return LiveTeamDefinition(
+        revision: 1,
+        workingGoal: "Build and exercise the integrated product.",
+        members: [member],
+        coordinator: liveCoordinatorConfiguration(),
+        strategicReason: "Direct product work has the highest expected return.",
+        operatingModelVersion: 2,
+        overseerPerson: chiefExecutive,
+        productBet: CompanyProductBet(
+            headline: "Ship visible value",
+            valuePromise: "The product can be exercised directly.",
+            showcase: "A working integrated demonstration",
+            integrationTarget: "The repository's main product",
+            killCondition: "Stop if direct use disproves the value promise.",
+            fundedTokenLimit: 1_000_000,
+            maximumTurns: maximumTurns
+        )
+    )
+}
+
+private func companyPerson(
+    name: String,
+    positionID: CompanyPositionID,
+    assignment: String
+) -> CompanyPerson {
+    CompanyPerson(
+        positionID: positionID,
+        profile: CompanyPersonaProfile(
+            fullName: name,
+            background: "Built ambitious products under real delivery pressure.",
+            formativeSuccess: "Shipped a result customers immediately adopted.",
+            formativeScar: "Once polished the wrong feature instead of testing the core bet.",
+            convictions: [
+                "Working product evidence beats status prose.",
+                "One integrated bet beats disconnected prototypes.",
+                "Strong opinions must yield to direct evidence."
+            ],
+            personalStake: "Wants this product to become the reference result.",
+            workingStyle: "Fast, direct, and relentlessly product-focused.",
+            conflictStyle: "Challenges timid choices with a working alternative.",
+            blindSpot: "Can underestimate the cost of changing a promising direction.",
+            evidenceThatChangesTheirMind: "Observed product behavior and repeated user use.",
+            ingredients: CompanyPersonaIngredients(
+                spark: "A breakthrough shipped early.",
+                riskPosture: "Bold reversible bets.",
+                conflictStyle: "Direct and energetic.",
+                craftObsession: "A product people ask to use again.",
+                ambition: "Build the reference product."
+            )
+        ),
+        assignment: assignment,
+        hiredRevision: 1
     )
 }
 

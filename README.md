@@ -4,14 +4,13 @@
   <p><strong>Give Codeness a goal and supervise autonomous work from one native macOS window.</strong></p>
 </div>
 
-Codeness coordinates locally installed Codex and Claude Code command-line agents, plus an optional OpenAI-compatible endpoint. You describe the complete outcome once. Codeness prepares the working goal, chooses a small ordered set of agents, routes work between them, and changes that setup when evidence shows it should.
+Codeness coordinates locally installed Codex and Claude Code command-line agents, plus an optional OpenAI-compatible endpoint. You describe the complete outcome once. Codeness appoints a persistent CEO, funds a concrete product bet, hires a small team into familiar company positions, and keeps building until the CEO can prove the goal complete.
 
 ## Why Codeness?
 
 - Start with the outcome. Provider, model, cost, memory, and authority limits belong in the same goal.
-- Let Codeness choose and adjust the agents instead of configuring a fixed process first.
-- Give each agent its own memory, a deliberately shared conversation, or a fresh conversation every turn.
-- Inspect every turn, handoff, change, timing measurement, and token count. Pause, steer, edit the fixed goal, and resume from saved state.
+- Let the CEO choose and adjust a named company instead of configuring a fixed process first.
+- Inspect each person's story, convictions, assignment, track record, turns, investment decisions, and token cost. Pause, steer, edit the fixed goal, and resume from saved state.
 - Keep repository ownership explicit. Codeness initializes Git when the selected folder is not already in a repository. It does not create worktrees, stash, commit, reset, or add orchestration files itself. Its agents may do so only when the goal and their instructions authorize it.
 
 ## How it works
@@ -20,21 +19,23 @@ Codeness coordinates locally installed Codex and Claude Code command-line agents
 Your goal
     |
     v
-Codeness prepares a working goal, agents, targets, and memory choices
+Codeness appoints a CEO and funds one concrete product bet
     |
     v
-An agent takes one bounded turn; Codeness chooses the next handoff
+Named people build and exercise the integrated product
     |
     v
-The Overseer adjusts the agents when evidence warrants it
+At the funding boundary, the company reports and the CEO invests again
     |
     v
-The Overseer completes only when the fixed goal has no work left
+Only the CEO completes when the fixed goal has no work left
 ```
 
-Recurring agents return once per round. One-time agents retire after their first accepted turn unless their responsibility or the working goal changes. Agent changes take effect only between turns, after the current state is saved. Each strategy or completion review appears as a selectable chapter in the turn list. Its detail view shows the consulted manager perspectives, their short reports, the Overseer's judgment, and any resulting agent setup without asking for approval.
+The CEO and every employee are persistent people with a generated background, successes, scars, convictions, stake, working style, conflict style, blind spot, and evidence that can change their mind. Positions come from fixed ordinary catalogs such as CEO, Developer, Product Manager, Art Director, Research Lead, and Industrial Designer. Codeness never invents an overfitted job title; the person's current assignment carries the project-specific detail.
 
-Codeness reviews strategy after three rounds or twelve agent turns, after repeated failure, when local routing asks for help, and before final completion. Automatic periodic reviews also have a ten-minute cooldown, so fast rounds cannot create a review loop; time alone never starts work. Internal stage boundaries never ask the user for direction.
+Ordinary successful turns use a deterministic product motor and do not spend another model call on routing. Investment review occurs only when a funded token or turn boundary is reached, the team presents an integrated demonstration, the goal changes, a material blocker or unrunnable setup needs executive action, or completion must be judged. Resume continues the saved checkpoint; it never creates a review by itself. Every investment review appears as a selectable chapter showing the current company's short reports, the CEO's decision, and the newly funded bet.
+
+Personas are deliberately non-neutral. They are prompted and validated to be opinionated, ambitious, personally invested, and unwilling to settle for mediocre work. The CEO balances that creative pressure with evidence and return: bold ideas must become a visible, usable, tested, integrated product rather than an endless idea contest or prototype trail.
 
 The implementation and tradeoffs are recorded in [Goal-directed orchestration](Documentation/live-loop-redesign.md).
 
@@ -72,7 +73,7 @@ Use `CODENESS_CODESIGN_IDENTITY` for another Developer ID identity and `CODENESS
 1. Choose **File > New Project…** to name and locate a new empty folder, or choose **Open Workspace…** for an existing folder. Codeness initializes Git if needed.
 2. Describe the complete desired outcome. Include restrictions such as “use only Codex gpt-5.6-terra,” spending limits, memory requirements, and publishing authority.
 3. Select **Start**.
-4. Follow agent turns and Codeness's current read-only agent setup in the window.
+4. Follow the company, funded product bet, investment decisions, and product turns in the window.
 
 The selected folder is not silently replaced by a parent Git root. Different subfolders of one working tree can have independent Codeness documents.
 
@@ -81,10 +82,12 @@ The selected folder is not silently replaced by a parent Git root. Different sub
 - **Pause** stops after the current result and handoff reach a saved boundary. Any strategy or completion review requested by that handoff waits for Resume.
 - **Stop Now** interrupts the active turn. Resume recovers from the saved assignment and current repository state.
 - **Change Goal** takes effect immediately while paused or between turns while running, then triggers a strategy review.
-- Codeness chooses one-time or recurring agents and their memory policy as part of its strategy.
+- Codeness chooses one-time or recurring assignments and their memory policy as part of each funded bet.
 - **Start Over** is available after completion. It archives the activity, releases its sessions, and prefills a new activity with the previous or amended goal. Repository files stay untouched.
 
-An ordinary handoff can nominate completion but cannot finish the activity. The Overseer uses the fixed goal and saved evidence at the same strategic decision point that controls the agent setup.
+An employee can present a demonstration or report remaining work but cannot finish the activity. The CEO uses the fixed goal and durable evidence at the same investment decision point that controls the company. The CEO can be replaced from the Company list without interrupting current product work; the new person owns future investment decisions.
+
+The overview separates product-work tokens from company-control tokens. Control includes setup, persona generation, legacy routing calls, company check-ins, retries that returned usage, and CEO decisions. Historical company definitions are retained so former hires and earlier control costs do not disappear when the company changes.
 
 Agent tool and file operations run without Codeness approval prompts. Agents are instructed to make reversible internal decisions themselves and report unavailable external authority to Codeness instead of asking the user to manage a stage. Standard-mode agents and compatible-provider tools are not sandboxed; they have the account-level file and process access of Codeness.
 
@@ -118,13 +121,13 @@ Codeness stores activity state, agent changes, turn payloads, transcripts, recov
 
 **File → Save** flushes Codeness metadata only. It never replaces the selected repository as a document.
 
-**File → Export Workspace…** creates a Finder-native `.codeness` file. Running work first pauses at a coherent checkpoint. The export contains the goal, current agent setup, change history, turns, transcripts, recovery checkpoints, and window state. It excludes the repository itself, provider authentication, command-line installations, and app-wide preferences.
+**File → Export Workspace…** creates a Finder-native `.codeness` file. Running work first pauses at a coherent checkpoint. The export contains the goal, company and persona history, funded bets, investment decisions, turns, transcripts, recovery checkpoints, and window state. It excludes the repository itself, provider authentication, command-line installations, and app-wide preferences.
 
 Opening or importing the file on another Mac uses the original repository path when available and otherwise asks for its location. Imported work opens paused with fresh provider conversations because provider session identifiers are local to the source Mac. Existing Codeness state is backed up before replacement.
 
 Codeness continuously saves crash-recovery boundaries. Closing a window or quitting stops active provider work and saves a resumable state; no activity continues invisibly in the background. Reopened active documents remain paused until explicitly resumed.
 
-Active documents made by earlier versions adapt automatically on open and remain paused for review. If one has no usable goal, Codeness asks only for that goal. Completed and cancelled older activities remain unchanged as history.
+Active documents made by earlier versions keep their goal, turns, sessions, and recovery point. They convert once at the next completed round or other natural investment boundary, not merely because the user reopened or resumed the app. If one has no usable goal, Codeness asks only for that goal. Completed and cancelled older activities remain unchanged as history.
 
 ## Development
 

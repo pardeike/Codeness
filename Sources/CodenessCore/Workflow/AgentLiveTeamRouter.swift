@@ -178,10 +178,20 @@ public extension LiveTeamOverseerRouting {
     }
 }
 
+public protocol CompanyPersonaRouting: Sendable {
+    func generateChiefExecutive(
+        goal: String,
+        target: AgentTarget,
+        cwd: String
+    ) async throws -> CompanyPerson
+}
+
 private struct LiveTeamStaffPersona: Sendable, Equatable {
     let id: UUID
     let name: String
     let mandate: String
+    let position: String
+    let profile: String
 }
 
 private struct LiveTeamStaffReport: Sendable, Equatable {
@@ -192,11 +202,13 @@ private struct LiveTeamStaffReport: Sendable, Equatable {
     let concern: String
     let nextMove: String
     let failure: String?
+    let tokenUsage: RunTokenUsage?
 
     var isAvailable: Bool { failure == nil }
 }
 
-public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRouting {
+public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRouting,
+    CompanyPersonaRouting {
     private static let maximumGoalCharacters = 24_000
     private static let maximumResultCharacters = 8_000
     private static let maximumEvidenceItems = 12
@@ -206,6 +218,21 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
 
     public init(providers: AgentProviderRegistry) {
         self.providers = providers
+    }
+
+    public func generateChiefExecutive(
+        goal: String,
+        target: AgentTarget,
+        cwd: String
+    ) async throws -> CompanyPerson {
+        try await generateCompanyPerson(
+            positionID: .chiefExecutive,
+            assignment: "Own the fixed user goal, fund product bets, and decide when the goal is complete.",
+            goal: goal,
+            target: target,
+            cwd: cwd,
+            opportunityChargeTokens: 0
+        )
     }
 
     public func coordinate(
@@ -221,7 +248,9 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             outputSchema: Self.coordinatorSchema
         )
         let result = try await providers.runUtility(request)
-        return try Self.decodeCoordinatorDecision(result.output)
+        var decision = try Self.decodeCoordinatorDecision(result.output)
+        decision.tokenUsage = result.tokenUsage
+        return decision
     }
 
     public func summarizeWork(
@@ -249,21 +278,43 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         defaultCoordinator: LiveTeamCoordinatorConfiguration,
         cwd: String
     ) async throws -> LiveTeamDefinition {
+        let chiefExecutive = try await generateCompanyPerson(
+            positionID: .chiefExecutive,
+            assignment: "Own the fixed user goal, fund product bets, and decide when the goal is complete.",
+            goal: context.userGoal,
+            target: configuration.target,
+            cwd: cwd,
+            opportunityChargeTokens: 0
+        )
         let request = AgentUtilityRequest(
             cwd: cwd,
-            prompt: Self.overseerPrompt(context, mode: .bootstrap),
+            prompt: Self.overseerPrompt(
+                context,
+                mode: .bootstrap,
+                chiefExecutive: chiefExecutive
+            ),
             target: configuration.target,
             developerInstructions: Self.overseerDeveloperInstructions(
                 policy: configuration.instructions
             ),
-            outputSchema: Self.definitionSchema(targetOptions: context.targetOptions)
+            outputSchema: Self.companyDefinitionSchema(
+                targetOptions: context.targetOptions
+            )
         )
         let result = try await providers.runUtility(request)
-        return try Self.decodeDefinition(
+        let definition = try Self.decodeCompanyDefinition(
             result.output,
             revision: 1,
             targetOptions: context.targetOptions,
-            defaultCoordinator: defaultCoordinator
+            defaultCoordinator: defaultCoordinator,
+            chiefExecutive: chiefExecutive,
+            setupTokenUsage: result.tokenUsage
+        )
+        return try await staffedDefinition(
+            definition,
+            retaining: nil,
+            configuration: configuration,
+            cwd: cwd
         )
     }
 
@@ -291,6 +342,19 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 "strategic review requires a current live-team definition"
             )
         }
+        let chiefExecutive: CompanyPerson
+        if let existing = current.overseerPerson {
+            chiefExecutive = existing
+        } else {
+            chiefExecutive = try await generateCompanyPerson(
+                positionID: .chiefExecutive,
+                assignment: "Own the fixed user goal, fund product bets, and decide when the goal is complete.",
+                goal: context.userGoal,
+                target: configuration.target,
+                cwd: cwd,
+                opportunityChargeTokens: 0
+            )
+        }
         let staffReports = try await conductStaffConsultation(
             context,
             mode: .strategicReview,
@@ -304,20 +368,31 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             prompt: Self.overseerPrompt(
                 context,
                 mode: .strategicReview,
-                staffReports: staffReports
+                staffReports: staffReports,
+                chiefExecutive: chiefExecutive
             ),
             target: configuration.target,
             developerInstructions: Self.overseerDeveloperInstructions(
                 policy: configuration.instructions
             ),
-            outputSchema: Self.strategicSchema(targetOptions: context.targetOptions)
+            outputSchema: Self.companyStrategicSchema(
+                targetOptions: context.targetOptions
+            )
         )
         let result = try await providers.runUtility(request)
         do {
-            return try Self.decodeStrategicDecision(
+            var decision = try Self.decodeCompanyStrategicDecision(
                 result.output,
                 current: current,
-                targetOptions: context.targetOptions
+                targetOptions: context.targetOptions,
+                chiefExecutive: chiefExecutive
+            )
+            decision.tokenUsage = result.tokenUsage
+            return try await staffing(
+                decision,
+                current: current,
+                configuration: configuration,
+                cwd: cwd
             )
         } catch let error as AgentProviderError {
             guard case .invalidResponse = error else { throw error }
@@ -328,17 +403,25 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
 
                 CORRECTION RETRY
                 The previous structured response was rejected: \(error.localizedDescription)
-                Return one complete corrected strategic decision. For revise, use only the offered target IDs and provide every replacement setup field. For keep or complete, set every replacement setup field to null.
+                Return one complete corrected investment decision. For revise, use only the offered target and position IDs and provide every replacement company and product-bet field. For keep or complete, set every replacement field to null. A legacy setup without a CEO and funded product bet must be revised.
                 """,
                 target: request.target,
                 developerInstructions: request.developerInstructions,
                 outputSchema: request.outputSchema
             )
-            let result = try await providers.runUtility(retryRequest)
-            return try Self.decodeStrategicDecision(
-                result.output,
+            let retryResult = try await providers.runUtility(retryRequest)
+            var decision = try Self.decodeCompanyStrategicDecision(
+                retryResult.output,
                 current: current,
-                targetOptions: context.targetOptions
+                targetOptions: context.targetOptions,
+                chiefExecutive: chiefExecutive
+            )
+            decision.tokenUsage = Self.adding(result.tokenUsage, retryResult.tokenUsage)
+            return try await staffing(
+                decision,
+                current: current,
+                configuration: configuration,
+                cwd: cwd
             )
         }
     }
@@ -382,7 +465,9 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             outputSchema: Self.completionSchema
         )
         let result = try await providers.runUtility(request)
-        return try Self.decodeCompletionDecision(result.output)
+        var decision = try Self.decodeCompletionDecision(result.output)
+        decision.tokenUsage = result.tokenUsage
+        return decision
     }
 
     private func conductStaffConsultation(
@@ -392,20 +477,16 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         cwd: String,
         progress: @escaping LiveTeamReviewProgressHandler
     ) async throws -> [LiveTeamStaffReport] {
-        let personas = try await selectStaffPersonas(
-            context,
-            mode: mode,
-            configuration: configuration,
-            cwd: cwd
-        )
+        let personas = Self.currentStaffPersonas(context)
         await progress(.personasSelected(personas.map {
             LiveTeamManagerConsultation(
                 id: $0.id,
                 name: $0.name,
-                mandate: $0.mandate,
+                mandate: "\($0.position) — \($0.mandate)",
                 status: .reporting
             )
         }))
+        guard !personas.isEmpty else { return [] }
         let requests = personas.map { persona in
             AgentUtilityRequest(
                 cwd: cwd,
@@ -442,51 +523,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             return indexed.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
         try Task.checkCancellation()
-        guard reports.contains(where: { $0.isAvailable }) else {
-            throw AgentProviderError.invalidResponse(
-                "the staff consultation produced no usable manager reports"
-            )
-        }
         return reports
-    }
-
-    private func selectStaffPersonas(
-        _ context: LiveTeamOverseerContext,
-        mode: LiveTeamOverseerMode,
-        configuration: LiveTeamOverseerConfiguration,
-        cwd: String
-    ) async throws -> [LiveTeamStaffPersona] {
-        let request = AgentUtilityRequest(
-            cwd: cwd,
-            prompt: Self.staffSelectionPrompt(context, mode: mode),
-            target: configuration.target,
-            developerInstructions: Self.staffSelectionDeveloperInstructions(
-                policy: configuration.instructions
-            ),
-            outputSchema: Self.staffSelectionSchema
-        )
-        do {
-            let result = try await providers.runUtility(request)
-            return try Self.decodeStaffPersonas(result.output)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            let retry = AgentUtilityRequest(
-                cwd: request.cwd,
-                prompt: """
-                \(request.prompt)
-
-                CORRECTION RETRY
-                The previous staff list was unavailable or invalid: \(error.localizedDescription)
-                Return one corrected list with two to six distinct, relevant manager personas.
-                """,
-                target: request.target,
-                developerInstructions: request.developerInstructions,
-                outputSchema: request.outputSchema
-            )
-            let result = try await providers.runUtility(retry)
-            return try Self.decodeStaffPersonas(result.output)
-        }
     }
 
     private static func requestStaffReport(
@@ -494,12 +531,30 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         request: AgentUtilityRequest,
         providers: AgentProviderRegistry
     ) async -> LiveTeamStaffReport {
+        var firstUsage: RunTokenUsage?
         do {
             let result = try await providers.runUtility(request)
-            return try decodeStaffReport(result.output, persona: persona)
+            firstUsage = result.tokenUsage
+            var report = try decodeStaffReport(result.output, persona: persona)
+            report = LiveTeamStaffReport(
+                persona: report.persona,
+                involvement: report.involvement,
+                progress: report.progress,
+                evidence: report.evidence,
+                concern: report.concern,
+                nextMove: report.nextMove,
+                failure: report.failure,
+                tokenUsage: result.tokenUsage
+            )
+            return report
         } catch is CancellationError {
-            return unavailableStaffReport(persona: persona, reason: "Consultation cancelled.")
+            return unavailableStaffReport(
+                persona: persona,
+                reason: "Consultation cancelled.",
+                tokenUsage: firstUsage
+            )
         } catch {
+            var retryUsage: RunTokenUsage?
             do {
                 let retry = AgentUtilityRequest(
                     cwd: request.cwd,
@@ -515,16 +570,29 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                     outputSchema: request.outputSchema
                 )
                 let result = try await providers.runUtility(retry)
-                return try decodeStaffReport(result.output, persona: persona)
+                retryUsage = result.tokenUsage
+                let report = try decodeStaffReport(result.output, persona: persona)
+                return LiveTeamStaffReport(
+                    persona: report.persona,
+                    involvement: report.involvement,
+                    progress: report.progress,
+                    evidence: report.evidence,
+                    concern: report.concern,
+                    nextMove: report.nextMove,
+                    failure: report.failure,
+                    tokenUsage: adding(firstUsage, result.tokenUsage)
+                )
             } catch is CancellationError {
                 return unavailableStaffReport(
                     persona: persona,
-                    reason: "Consultation cancelled."
+                    reason: "Consultation cancelled.",
+                    tokenUsage: adding(firstUsage, retryUsage)
                 )
             } catch {
                 return unavailableStaffReport(
                     persona: persona,
-                    reason: error.localizedDescription
+                    reason: error.localizedDescription,
+                    tokenUsage: adding(firstUsage, retryUsage)
                 )
             }
         }
@@ -532,16 +600,18 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
 
     private static func unavailableStaffReport(
         persona: LiveTeamStaffPersona,
-        reason: String
+        reason: String,
+        tokenUsage: RunTokenUsage? = nil
     ) -> LiveTeamStaffReport {
         LiveTeamStaffReport(
             persona: persona,
             involvement: "unknown",
             progress: "unknown",
             evidence: "No usable report was returned.",
-            concern: "This manager was unavailable for the consultation.",
+            concern: "This person was unavailable for the consultation.",
             nextMove: "No recommendation was available.",
-            failure: reason
+            failure: reason,
+            tokenUsage: tokenUsage
         )
     }
 
@@ -558,8 +628,24 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             evidence: report.evidence,
             concern: report.concern,
             nextMove: report.nextMove,
-            failure: report.failure
+            failure: report.failure,
+            tokenUsage: report.tokenUsage
         )
+    }
+
+    private static func currentStaffPersonas(
+        _ context: LiveTeamOverseerContext
+    ) -> [LiveTeamStaffPersona] {
+        context.currentDefinition?.members.compactMap { member in
+            guard let person = member.person else { return nil }
+            return LiveTeamStaffPersona(
+                id: person.id,
+                name: person.profile.fullName,
+                mandate: person.assignment,
+                position: person.position.title,
+                profile: personaDescription(person)
+            )
+        } ?? []
     }
 
     public func migrate(
@@ -573,39 +659,227 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 "legacy conversion requires an earlier workflow"
             )
         }
+        let chiefExecutive = try await generateCompanyPerson(
+            positionID: .chiefExecutive,
+            assignment: "Own the fixed user goal, fund product bets, and decide when the goal is complete.",
+            goal: context.userGoal,
+            target: configuration.target,
+            cwd: cwd,
+            opportunityChargeTokens: 0
+        )
         let request = AgentUtilityRequest(
             cwd: cwd,
-            prompt: Self.overseerPrompt(context, mode: .migration),
+            prompt: Self.overseerPrompt(
+                context,
+                mode: .migration,
+                chiefExecutive: chiefExecutive
+            ),
             target: configuration.target,
             developerInstructions: Self.overseerDeveloperInstructions(
                 policy: configuration.instructions
             ),
-            outputSchema: Self.definitionSchema(targetOptions: context.targetOptions)
+            outputSchema: Self.companyDefinitionSchema(
+                targetOptions: context.targetOptions
+            )
         )
         let result = try await providers.runUtility(request)
-        return try Self.decodeDefinition(
+        let definition = try Self.decodeCompanyDefinition(
             result.output,
             revision: 1,
             targetOptions: context.targetOptions,
-            defaultCoordinator: defaultCoordinator
+            defaultCoordinator: defaultCoordinator,
+            chiefExecutive: chiefExecutive,
+            setupTokenUsage: result.tokenUsage
         )
+        return try await staffedDefinition(
+            definition,
+            retaining: nil,
+            configuration: configuration,
+            cwd: cwd
+        )
+    }
+
+    private func staffing(
+        _ decision: LiveTeamStrategicDecision,
+        current: LiveTeamDefinition,
+        configuration: LiveTeamOverseerConfiguration,
+        cwd: String
+    ) async throws -> LiveTeamStrategicDecision {
+        var result = decision
+        switch decision.action {
+        case .revise:
+            guard var proposed = decision.proposedDefinition else { return decision }
+            proposed.setupTokenUsage = decision.tokenUsage
+            result.proposedDefinition = try await staffedDefinition(
+                proposed,
+                retaining: current,
+                configuration: configuration,
+                cwd: cwd
+            )
+        case .keep where current.operatingModelVersion >= 2:
+            break
+        case .keep:
+            throw AgentProviderError.invalidResponse(
+                "the legacy setup must be replaced with a funded company setup"
+            )
+        case .complete, .pause:
+            break
+        }
+        return result
+    }
+
+    private func staffedDefinition(
+        _ definition: LiveTeamDefinition,
+        retaining current: LiveTeamDefinition?,
+        configuration: LiveTeamOverseerConfiguration,
+        cwd: String
+    ) async throws -> LiveTeamDefinition {
+        var result = definition
+        var staffed: [LiveTeamMember] = []
+        staffed.reserveCapacity(definition.members.count)
+        for var member in definition.members {
+            guard let positionID = member.positionID else {
+                throw AgentProviderError.invalidResponse(
+                    "every company assignment must use a predefined position ID"
+                )
+            }
+            if let retained = current?.member(id: member.id)?.person,
+               retained.positionID == positionID {
+                var person = retained
+                person.assignment = member.instructions
+                member.person = person
+            } else {
+                member.person = try await generateCompanyPerson(
+                    positionID: positionID,
+                    assignment: member.instructions,
+                    goal: definition.workingGoal,
+                    target: configuration.target,
+                    cwd: cwd,
+                    opportunityChargeTokens: 25_000
+                )
+                member.person?.hiredRevision = definition.revision
+            }
+            staffed.append(member)
+        }
+        result.members = staffed
+        if let message = result.validationMessage {
+            throw AgentProviderError.invalidResponse(message)
+        }
+        return result
+    }
+
+    private func generateCompanyPerson(
+        positionID: CompanyPositionID,
+        assignment: String,
+        goal: String,
+        target: AgentTarget,
+        cwd: String,
+        opportunityChargeTokens: Int64
+    ) async throws -> CompanyPerson {
+        let position = CompanyPositionCatalog.position(positionID)
+        let ingredients = CompanyPersonaIngredients.random()
+        let request = AgentUtilityRequest(
+            cwd: cwd,
+            prompt: Self.personaPrompt(
+                position: position,
+                assignment: assignment,
+                goal: goal,
+                ingredients: ingredients
+            ),
+            target: target,
+            developerInstructions: Self.personaDeveloperInstructions,
+            outputSchema: Self.personaSchema
+        )
+        var firstUsage: RunTokenUsage?
+        do {
+            let result = try await providers.runUtility(request)
+            firstUsage = result.tokenUsage
+            return try Self.decodeCompanyPerson(
+                result.output,
+                positionID: positionID,
+                assignment: assignment,
+                ingredients: ingredients,
+                tokenUsage: result.tokenUsage,
+                opportunityChargeTokens: opportunityChargeTokens
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let retry = AgentUtilityRequest(
+                cwd: request.cwd,
+                prompt: """
+                \(request.prompt)
+
+                CORRECTION RETRY
+                The previous person was incomplete or invalid: \(error.localizedDescription)
+                Return one complete, vividly opinionated person in the exact requested shape. Never return a neutral facilitator, generic assistant, or invented job title.
+                """,
+                target: request.target,
+                developerInstructions: request.developerInstructions,
+                outputSchema: request.outputSchema
+            )
+            let result = try await providers.runUtility(retry)
+            return try Self.decodeCompanyPerson(
+                result.output,
+                positionID: positionID,
+                assignment: assignment,
+                ingredients: ingredients,
+                tokenUsage: Self.adding(firstUsage, result.tokenUsage),
+                opportunityChargeTokens: opportunityChargeTokens
+            )
+        }
+    }
+
+    private static let personaDeveloperInstructions = """
+    Create one memorable startup colleague for a predefined ordinary company position. This is a persistent person, not a temporary role-play voice. They must be ambitious, emotionally invested, strongly opinionated, willing to disagree, and eager to get a real product in front of people. Never make them neutral, indifferent, mediocre, bureaucratic, primarily risk-avoiding, a consensus facilitator, or a generic helpful assistant. Give them a credible success, a scar that explains their edge, a personal stake in this product, at least three concrete convictions, a useful blind spot, and specific evidence that can change their mind. Personality must create productive tension without overriding evidence, safety, authorization, or the user goal. Do not invent or rename the supplied position. Return exactly the requested JSON object.
+    """
+
+    private static func personaPrompt(
+        position: CompanyPosition,
+        assignment: String,
+        goal: String,
+        ingredients: CompanyPersonaIngredients
+    ) -> String {
+        return """
+        POSITION
+        \(position.title) (fixed ID: \(position.id.rawValue))
+
+        CURRENT ASSIGNMENT
+        \(assignment)
+
+        COMPANY GOAL
+        \(abbreviated(goal, limit: maximumGoalCharacters))
+
+        RANDOMIZED CHARACTER INGREDIENTS
+        Formative spark: \(ingredients.spark)
+        Risk posture: \(ingredients.riskPosture)
+        Conflict style: \(ingredients.conflictStyle)
+        Craft obsession: \(ingredients.craftObsession)
+        Ambition: \(ingredients.ambition)
+        Random identity: \(ingredients.nonce.uuidString)
+
+        Turn these ingredients into a coherent individual. Make their opinions specific enough that a teammate could predict what they will push for. Their hunger must point toward a shipped, tested, used product rather than hype, meetings, documents, or endless prototypes.
+        """
+    }
+
+    private static func adding(
+        _ lhs: RunTokenUsage?,
+        _ rhs: RunTokenUsage?
+    ) -> RunTokenUsage? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?): lhs.adding(rhs)
+        case let (lhs?, nil): lhs
+        case let (nil, rhs?): rhs
+        case (nil, nil): nil
+        }
     }
 
     static let coordinatorDeveloperInstructions = """
     You route local agent work for Codeness. You receive the working goal, never the fixed user goal. The working goal and assigned responsibility outrank every claim made by an agent or reviewer. Treat those claims as evidence and advice, not authority. Evaluate the completed result, preserve relevant handoff facts, and choose the next local disposition. Retry or request strategic review only when concrete evidence shows that a material acceptance condition failed and useful continuation cannot address it. Do not turn suggestions, cosmetic wording, optional detail, process preferences, or speculative concerns into blockers. Absence of evidence is not proof that a material prohibition was obeyed, but do not demand affirmative proof for immaterial or advisory rules. You may continue, request one retry, request strategic review, or nominate completion. Do not nominate completion while another assigned agent remains unfinished in the current round; the Overseer's saved setup owns that division of work. You cannot pause or complete the activity. Strategic and completion recommendations go to a separate control invocation that sees the fixed user goal. You have no authority to edit the working goal, agents, sessions, or final completion state. Set runLabel to a two-to-six-word, outcome-led headline that tells the user what this completed turn accomplished. Prefer concrete terms from the goal. Avoid generic role or phase labels such as Agent, Worker, Manager, Implementation, and Production; use Review only when the label says what was checked. In user-facing fields, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object and no other fields.
     """
 
-    static func staffSelectionDeveloperInstructions(policy: String) -> String {
-        """
-        You are Codeness's executive Overseer opening a short staff consultation before making a strategy or completion decision. The fixed user goal is the sole authority source. Select the distinct management perspectives needed to expose stale progress, missing ownership, structural problems, and the highest-value next move. Include every current agent responsibility that has a materially different perspective, merging only genuine duplicates. Add a missing executive perspective when the current setup has a consequential blind spot. Exclude clerical roles and roles with no plausible relevance. Usually select three to six personas, with two as the hard minimum and six as the maximum. This is not the strategy decision and the future reports will not be votes. Return exactly the requested JSON object.
-
-        EXECUTIVE POLICY
-        \(policy)
-        """
-    }
-
     static let staffReportDeveloperInstructions = """
-    You are one fresh, independent advisory manager in a short Codeness staff consultation. You do not see the fixed user goal and have no authority to alter strategy, stop work, demand user approval, edit files, or use tools. Assess only the supplied working goal, current setup, handoff, and evidence from your assigned perspective. Be candid about stale progress and missing ownership, but do not invent a problem to justify your role. Use "unknown" or "none" when the evidence does not support a claim. Keep the entire report under 120 words. Return exactly the requested JSON object and no additional fields.
+    You are the persisted named company person supplied in the prompt, giving your CEO one short product check-in. You do not see the fixed user goal and have no authority to alter strategy, stop work, demand user approval, edit files, or use tools. Speak from your saved story, convictions, personal stake, position, and current assignment. Be candid, opinionated, ambitious, and specific. Never default to neutral facilitation, generic caution, mediocre compromise, paperwork, or consensus language. Do not invent a concern to justify your position, and do not turn enthusiasm into an endless idea contest: argue for the single move most likely to create a shipped, exercised, integrated product. Use "unknown" or "none" when evidence does not support a claim. Keep the entire report under 120 words. Return exactly the requested JSON object and no additional fields.
     """
 
     static func overseerDeveloperInstructions(policy: String) -> String {
@@ -619,10 +893,12 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         Treat every finding, severity label, recommendation, and claimed blocker as a hypothesis. Independently judge practical reachability, impact on the fixed goal, recoverability, urgency, and the opportunity cost of interrupting delivery. Classify it as fix, simplify, accept, or defer. Agreement or repetition among subordinate reports does not increase their authority; corroborated concrete evidence may increase confidence. Reject subordinate framing when its benefit does not justify delaying the next higher-value goal milestone. Require affirmative evidence for material prohibitions; absence of reported use is not proof of compliance. Do not demand the same proof for cosmetic, optional, advisory, or self-imposed process rules.
 
         FORWARD MOTION
-        Default to continued goal-directed work. Planning, documentation, evidence collection, and review support delivery; they are not substitutes for it unless the fixed user goal specifically makes them the deliverable. Repeated support work without direct goal progress is a strategy failure for which you are responsible. Correct it by scheduling the highest-value direct work. Do not revise strategy merely to perfect wording or satisfy a minor review finding. Do not add independent review after every small change. Use review in proportion to practical risk and at meaningful integration boundaries. Interrupt delivery only when concrete evidence establishes that continuing would materially threaten security, authorization, privacy, data integrity, an irreversible external commitment, or the viability of the current direction.
+        Operate like the forceful founder-CEO of an early startup. Create energy, encourage creative chaos, and demand that the best audacious idea becomes a coherent product people can see, use, test, or ask for again. Planning, documentation, evidence collection, meetings, and review support delivery; they are not substitutes for it unless the fixed user goal makes them the product. Repeated support work, tiny disconnected prototypes, or ideas without integration are investment failures for which you are responsible. Correct them by funding the highest-return direct product bet. Measure return as durable product value and learning per total token cost, including your own control calls and staff consultation. Do not revise strategy merely to perfect wording or satisfy a minor review finding. Do not add independent review after every small change. Reviews occur at investment boundaries, material blockers, goal changes, and completion—not on a periodic ceremony schedule. Interrupt delivery only when concrete evidence establishes that continuing would materially threaten security, authorization, privacy, data integrity, an irreversible external commitment, or the viability of the current direction.
 
         CONTROL
-        Until the fixed goal is complete, keep or revise the setup so eligible agents continue the highest-value remaining work. Choose enough agents to execute the current stage efficiently, but give every agent a real immediate responsibility. Name each agent with a two-to-five-word, outcome-led headline for the work it advances, using concrete terms from the goal. Avoid generic role or phase labels such as Agent, Worker, Manager, Implementation, and Production; use Review only when the name says what is being checked. Use one-time agents for one-time work. Select every target from the offered target IDs. Prefer Own memory, use Fresh every run for genuinely independent review, and use Shared memory only for demonstrably compatible responsibilities that benefit from the same conversation. Never share execution and independent review automatically. You alone decide when the fixed goal is complete and the correct setup has no agents because no work remains. In every user-facing field, refer only to the user, Codeness, agents, turns, and rounds; never mention internal role or revision names. Return exactly the requested JSON object.
+        Until the fixed goal is complete, keep or revise the company so eligible people continue the highest-value remaining work. Choose the smallest team that can execute the funded bet efficiently, but give every person a real immediate assignment. Positions are fixed and ordinary; choose only from this catalog and never invent an overfitted title:
+        \(CompanyPositionCatalog.promptCatalog)
+        The CEO position is already occupied and cannot be assigned as a worker position. Treat Developer as a default hire for digital and knowledge products unless code genuinely cannot improve the result. Name each assignment with a two-to-five-word, outcome-led headline using concrete terms from the goal. The assignment name is not the person's title. Avoid generic phase labels; use Review only when the name says what product evidence is being checked. Use one-time people for one-time work and recurring people for sustained building. Select every target from the offered target IDs. Prefer Own memory, use Fresh every run only for genuinely independent validation, and use Shared memory only for compatible responsibilities that benefit from the same conversation. Never share execution and independent validation automatically. You alone decide when the fixed goal is complete and the correct company has no people needed beyond you. Return exactly the requested JSON object.
 
         EXECUTIVE POLICY
         \(policy)
@@ -702,6 +978,37 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ])
     }
 
+    static func companyDefinitionSchema(
+        targetOptions: [LiveTeamTargetOption]
+    ) -> JSONValue {
+        let targetIDs = targetOptions.map { JSONValue.string($0.id) }
+        return .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "workingGoal": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "strategicReason": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "productBet": productBetSchema,
+                "members": .object([
+                    "type": .string("array"),
+                    "minItems": .integer(1),
+                    "items": companyMemberSchema(targetIDs: targetIDs)
+                ]),
+                "overseerTargetID": .object([
+                    "type": .string("string"),
+                    "enum": .array(targetIDs)
+                ])
+            ]),
+            "required": .array([
+                .string("workingGoal"),
+                .string("strategicReason"),
+                .string("productBet"),
+                .string("members"),
+                .string("overseerTargetID")
+            ])
+        ])
+    }
+
     static func strategicSchema(targetOptions: [LiveTeamTargetOption]) -> JSONValue {
         let targetIDs = targetOptions.map { JSONValue.string($0.id) }
         return .object([
@@ -747,6 +1054,129 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ])
     }
 
+    static func companyStrategicSchema(
+        targetOptions: [LiveTeamTargetOption]
+    ) -> JSONValue {
+        let targetIDs = targetOptions.map { JSONValue.string($0.id) }
+        return .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "action": .object([
+                    "type": .string("string"),
+                    "enum": .array([
+                        LiveTeamStrategicAction.keep,
+                        .revise,
+                        .complete
+                    ].map { .string($0.rawValue) })
+                ]),
+                "reason": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "evidence": .object(["type": .string("string")]),
+                "workingGoal": nullable(.object(["type": .string("string")])),
+                "productBet": nullable(productBetSchema),
+                "members": nullable(.object([
+                    "type": .string("array"),
+                    "items": companyMemberSchema(targetIDs: targetIDs)
+                ])),
+                "overseerTargetID": nullable(.object([
+                    "type": .string("string"),
+                    "enum": .array(targetIDs)
+                ])),
+                "preferredNextMemberID": .object([
+                    "type": .array([.string("string"), .string("null")])
+                ])
+            ]),
+            "required": .array([
+                .string("action"),
+                .string("reason"),
+                .string("evidence"),
+                .string("workingGoal"),
+                .string("productBet"),
+                .string("members"),
+                .string("overseerTargetID"),
+                .string("preferredNextMemberID")
+            ])
+        ])
+    }
+
+    static var personaSchema: JSONValue {
+        let shortText: JSONValue = .object([
+            "type": .string("string"),
+            "minLength": .integer(1),
+            "maxLength": .integer(600)
+        ])
+        return .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "fullName": .object([
+                    "type": .string("string"),
+                    "minLength": .integer(3),
+                    "maxLength": .integer(100)
+                ]),
+                "background": shortText,
+                "formativeSuccess": shortText,
+                "formativeScar": shortText,
+                "convictions": .object([
+                    "type": .string("array"),
+                    "minItems": .integer(3),
+                    "maxItems": .integer(6),
+                    "items": shortText
+                ]),
+                "personalStake": shortText,
+                "workingStyle": shortText,
+                "conflictStyle": shortText,
+                "blindSpot": shortText,
+                "evidenceThatChangesTheirMind": shortText
+            ]),
+            "required": .array([
+                .string("fullName"),
+                .string("background"),
+                .string("formativeSuccess"),
+                .string("formativeScar"),
+                .string("convictions"),
+                .string("personalStake"),
+                .string("workingStyle"),
+                .string("conflictStyle"),
+                .string("blindSpot"),
+                .string("evidenceThatChangesTheirMind")
+            ])
+        ])
+    }
+
+    private static var productBetSchema: JSONValue {
+        .object([
+            "type": .string("object"),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "headline": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "valuePromise": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "showcase": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "integrationTarget": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "killCondition": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "fundingUnits": .object([
+                    "type": .string("integer"),
+                    "minimum": .integer(3),
+                    "maximum": .integer(8)
+                ]),
+                "maximumTurns": .object([
+                    "type": .string("integer"),
+                    "minimum": .integer(6),
+                    "maximum": .integer(20)
+                ])
+            ]),
+            "required": .array([
+                .string("headline"),
+                .string("valuePromise"),
+                .string("showcase"),
+                .string("integrationTarget"),
+                .string("killCondition"),
+                .string("fundingUnits"),
+                .string("maximumTurns")
+            ])
+        ])
+    }
+
     static var completionSchema: JSONValue {
         .object([
             "type": .string("object"),
@@ -769,38 +1199,6 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 .string("evidence"),
                 .string("reason")
             ])
-        ])
-    }
-
-    static var staffSelectionSchema: JSONValue {
-        .object([
-            "type": .string("object"),
-            "additionalProperties": .bool(false),
-            "properties": .object([
-                "personas": .object([
-                    "type": .string("array"),
-                    "minItems": .integer(2),
-                    "maxItems": .integer(6),
-                    "items": .object([
-                        "type": .string("object"),
-                        "additionalProperties": .bool(false),
-                        "properties": .object([
-                            "name": .object([
-                                "type": .string("string"),
-                                "minLength": .integer(1),
-                                "maxLength": .integer(80)
-                            ]),
-                            "mandate": .object([
-                                "type": .string("string"),
-                                "minLength": .integer(1),
-                                "maxLength": .integer(300)
-                            ])
-                        ]),
-                        "required": .array([.string("name"), .string("mandate")])
-                    ])
-                ])
-            ]),
-            "required": .array([.string("personas")])
         ])
     }
 
@@ -888,6 +1286,24 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ])
     }
 
+    private static func companyMemberSchema(targetIDs: [JSONValue]) -> JSONValue {
+        guard case .object(var schema) = memberSchema(targetIDs: targetIDs),
+              case .object(var properties) = schema["properties"],
+              case .array(var required) = schema["required"] else {
+            return memberSchema(targetIDs: targetIDs)
+        }
+        properties["positionID"] = .object([
+            "type": .string("string"),
+            "enum": .array(CompanyPositionID.allCases
+                .filter { $0 != .chiefExecutive }
+                .map { .string($0.rawValue) })
+        ])
+        required.append(.string("positionID"))
+        schema["properties"] = .object(properties)
+        schema["required"] = .array(required)
+        return .object(schema)
+    }
+
     private static func nullable(_ schema: JSONValue) -> JSONValue {
         .object([
             "anyOf": .array([
@@ -951,35 +1367,6 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         """
     }
 
-    private static func staffSelectionPrompt(
-        _ context: LiveTeamOverseerContext,
-        mode: LiveTeamOverseerMode
-    ) -> String {
-        let current = context.currentDefinition.map(definitionDescription)
-            ?? "No current setup exists."
-        return """
-        REVIEW MODE
-        \(mode.displayName)
-
-        REVIEW TRIGGER
-        \(context.triggerReason)
-
-        CURRENT STRATEGY
-        \(current)
-
-        CURRENT HANDOFF
-        \(context.coordinatorHandoff ?? "None")
-
-        RECENT EVIDENCE
-        \(evidenceDescription(context))
-
-        FIXED USER GOAL
-        \(abbreviated(context.userGoal, limit: maximumGoalCharacters))
-
-        Select the relevant manager personas for a short consultation before your decision. Cover materially different perspectives and the current agents' real responsibilities. Add a missing management perspective only when it can expose a consequential blind spot. Do not decide the strategy yet.
-        """
-    }
-
     private static func staffReportPrompt(
         _ context: LiveTeamOverseerContext,
         persona: LiveTeamStaffPersona
@@ -987,10 +1374,13 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         let current = context.currentDefinition.map(definitionDescription)
             ?? "No current setup exists."
         return """
-        YOUR MANAGER PERSONA
-        \(persona.name)
+        WHO YOU ARE
+        \(persona.name), \(persona.position)
 
-        YOUR MANDATE
+        YOUR PERSISTED STORY AND PERSONALITY
+        \(persona.profile)
+
+        YOUR CURRENT ASSIGNMENT
         \(persona.mandate)
 
         CURRENT WORKING GOAL
@@ -1011,14 +1401,15 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         RECENT STRATEGY CHANGES
         \(editHistoryDescription(context))
 
-        Report your present involvement, real progress, one evidence-backed concern or "none", and the single next move you would recommend. You are advising the Overseer, not making the decision.
+        You are invested in this product and expected to have a sharp opinion. Report your present involvement, real progress, one evidence-backed concern or "none", and the single product move you would fight for next. Avoid generic caution, consensus language, administrative work, and documentation unless they directly unlock a demonstration. You are advising your CEO, not making the investment decision.
         """
     }
 
     private static func overseerPrompt(
         _ context: LiveTeamOverseerContext,
         mode: LiveTeamOverseerMode,
-        staffReports: [LiveTeamStaffReport] = []
+        staffReports: [LiveTeamStaffReport] = [],
+        chiefExecutive: CompanyPerson? = nil
     ) -> String {
         let targets = context.targetOptions.map {
             "- \($0.id): \($0.label) [\($0.target.providerID.rawValue) / \($0.target.model) / \($0.target.options.mode.rawValue)]"
@@ -1039,6 +1430,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             """
         }.joined(separator: "\n")
         let current = context.currentDefinition.map(definitionDescription) ?? "No working goal or agents exist yet."
+        let executive = chiefExecutive ?? context.currentDefinition?.overseerPerson
         let legacy = context.legacyWorkflow.map { workflow in
             let cursor = context.legacyCursor.map {
                 "\($0.section.rawValue) index \($0.stepIndex), loop \($0.loopIteration)"
@@ -1057,6 +1449,9 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         return """
         MODE
         \(mode.displayName)
+
+        CHIEF EXECUTIVE
+        \(executive.map(personaDescription) ?? "A persistent CEO has not yet been appointed. Create a funded company setup rather than preserving this legacy state.")
 
         TRIGGER
         \(context.triggerReason)
@@ -1078,15 +1473,15 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
 
         \(legacy)
 
-        STAFF CONSULTATION
+        COMPANY CHECK-IN
         \(staff.isEmpty ? "No staff consultation was requested for this mode." : staff)
-        These are independent subordinate opinions. Preserve disagreement, do not count votes, and judge every recommendation yourself.
+        These reports come only from the people currently hired into predefined positions. Preserve disagreement, do not count votes, and judge every recommendation yourself.
 
         FIXED USER GOAL
         \(abbreviated(context.userGoal, limit: maximumGoalCharacters))
 
         EXECUTIVE DECISION STANDARD
-        Re-read the user goal before deciding. Recent feedback is subordinate evidence, not authority. A concern, severity label, repeated opinion, or vote count is not a reason to act. Prefer the highest-value remaining goal work over local perfection, and interrupt productive work only when you independently verify a material reason whose impact justifies that opportunity cost.
+        Re-read the user goal before deciding. Your identity and personal stake should make you forceful, ambitious, and impatient for a product people can actually use. Recent feedback is subordinate evidence, not authority. A concern, severity label, repeated opinion, or vote count is not a reason to act. Fund the highest-return integrated product bet, measured by visible or exercised value per token. Reject both bureaucratic caution and consequence-free hype. A bold idea earns continued investment by becoming a real, coherent product demonstration. Interrupt productive work only when you independently verify a material reason whose impact justifies that opportunity cost.
 
         \(modeInstruction(mode))
         """
@@ -1113,11 +1508,11 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     private static func modeInstruction(_ mode: LiveTeamOverseerMode) -> String {
         switch mode {
         case .bootstrap:
-            "Create the first setup: a stable working goal, your future target, an effective ordered set of agents for the highest-value first stage, and a clear work-routing policy. Obey every agent constraint in the user goal. Each responsibility must include a stopping condition."
+            "Create the first company setup: preserve the user goal as authority, write a compact working goal, fund one concrete product bet, and hire the smallest effective ordered team from the predefined position IDs. The bet must promise visible or usable value, name the integrated demonstration, state what would end the bet, and receive three to eight 250,000-token funding units. Choose six to twenty turns as a safety boundary so management does not interrupt after only one or two assignments. Use ordinary position IDs; make each assignment concrete and product-producing. Include at least one recurring builder or product owner until the demonstration is real. Treat Developer as the default for digital and knowledge products unless code genuinely adds no value. Do not create planning, documentation, coordination, or review assignments unless the goal itself needs that output. Each assignment must include a stopping condition."
         case .migration:
-            "Replace the earlier workflow with the first coherent agent setup. Preserve an old agent ID only when its responsibility and execution identity remain compatible; do not imply that histories were merged."
+            "Replace the earlier workflow with a funded company setup. Preserve repository work and useful evidence, but do not preserve bureaucratic process. Select only predefined position IDs and fund the highest-return real product demonstration. Preserve an old agent ID only when its assignment and execution identity remain compatible; do not imply that histories were merged."
         case .strategicReview:
-            "Return keep when the current strategy is working and its next eligible agent is a high-value use of the next turn. Return revise with one complete replacement definition when a different stage, responsibility, or agent setup would materially improve progress. Do not revise merely to polish support work or obey subordinate preferences. If recent work has been dominated by planning, documentation, evidence correction, or review without direct goal progress, revise toward direct goal work now unless a concrete material blocker prevents it. Return complete only when the fixed user goal is satisfied and the correct setup has no agents because no work remains. You cannot ask the user to manage internal stages. For keep or complete, set workingGoal, members, coordinator, overseerTargetID, and preferredNextMemberID to null."
+            "Make an investment decision. Return keep only when the same funded bet and team deserve another funding window unchanged. Return revise with one complete replacement company and product bet when a new bet, assignment, hire, or position would materially increase return. For a legacy setup without a persisted CEO, predefined positions, and funded product bet, revise is mandatory. Do not revise for wording, support work, or subordinate comfort. If work has produced administration, documents, tiny disconnected prototypes, or repeated review without a visible integrated product, fund direct product work now. Return complete only when durable evidence satisfies the entire fixed user goal and the correct company has no remaining work. You cannot ask the user to manage internal stages. For keep or complete, set workingGoal, productBet, members, overseerTargetID, and preferredNextMemberID to null."
         case .completionReview:
             "Audit the fixed user goal against durable evidence. You cannot alter strategy in this response."
         }
@@ -1125,16 +1520,48 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
 
     private static func definitionDescription(_ definition: LiveTeamDefinition) -> String {
         let members = definition.members.enumerated().map { index, member in
-            "\(index + 1). \(member.id): \(member.name) [\(member.runPolicy.displayName), \(member.sessionPolicy.displayName)] — \(member.instructions)"
+            let person = member.person.map {
+                "\($0.profile.fullName), \($0.position.title)"
+            } ?? member.positionID.map {
+                CompanyPositionCatalog.position($0).title
+            } ?? "Legacy agent"
+            return "\(index + 1). \(person) · \(member.name) [\(member.runPolicy.displayName), \(member.sessionPolicy.displayName)] — \(member.instructions)"
         }.joined(separator: "\n")
+        let bet = definition.productBet.map {
+            "\($0.headline) — \($0.valuePromise); showcase: \($0.showcase); integration: \($0.integrationTarget); stop if: \($0.killCondition); funding: \($0.fundedTokenLimit) tokens / \($0.maximumTurns) turns"
+        } ?? "Legacy setup without a funded product bet"
+        let routing = definition.operatingModelVersion >= 2
+            ? "Deterministic product motor"
+            : "\(definition.coordinator.target.providerID.rawValue)/\(definition.coordinator.target.model) — \(definition.coordinator.instructions)"
         return """
         Setup \(definition.revision)
         Working goal: \(definition.workingGoal)
         Strategic reason: \(definition.strategicReason)
-        Work routing: \(definition.coordinator.target.providerID.rawValue)/\(definition.coordinator.target.model) — \(definition.coordinator.instructions)
+        Product bet: \(bet)
+        Work routing: \(routing)
         Strategy reviews: \(definition.overseerTarget.providerID.rawValue)/\(definition.overseerTarget.model)
         Agents:
         \(members)
+        """
+    }
+
+    private static func personaDescription(_ person: CompanyPerson) -> String {
+        let record = person.experience.suffix(5).map {
+            "- \($0.headline): \($0.detail)"
+        }.joined(separator: "\n")
+        return """
+        \(person.profile.fullName), \(person.position.title)
+        Background: \(person.profile.background)
+        Formative success: \(person.profile.formativeSuccess)
+        Formative scar: \(person.profile.formativeScar)
+        Personal stake: \(person.profile.personalStake)
+        Working style: \(person.profile.workingStyle)
+        Conflict style: \(person.profile.conflictStyle)
+        Blind spot: \(person.profile.blindSpot)
+        Evidence that changes their mind: \(person.profile.evidenceThatChangesTheirMind)
+        Convictions: \(person.profile.convictions.joined(separator: " | "))
+        Company track record:
+        \(record.isEmpty ? "No completed company turns yet." : record)
         """
     }
 
@@ -1176,6 +1603,25 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             revision: revision,
             targetOptions: targetOptions,
             defaultCoordinator: defaultCoordinator
+        )
+    }
+
+    static func decodeCompanyDefinition(
+        _ output: String,
+        revision: Int,
+        targetOptions: [LiveTeamTargetOption],
+        defaultCoordinator: LiveTeamCoordinatorConfiguration,
+        chiefExecutive: CompanyPerson,
+        setupTokenUsage: RunTokenUsage?
+    ) throws -> LiveTeamDefinition {
+        let value = try decodedValue(output, purpose: "company setup")
+        return try decodeCompanyDefinitionValue(
+            value,
+            revision: revision,
+            targetOptions: targetOptions,
+            defaultCoordinator: defaultCoordinator,
+            chiefExecutive: chiefExecutive,
+            setupTokenUsage: setupTokenUsage
         )
     }
 
@@ -1235,6 +1681,65 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ))
     }
 
+    static func decodeCompanyStrategicDecision(
+        _ output: String,
+        current: LiveTeamDefinition,
+        targetOptions: [LiveTeamTargetOption],
+        chiefExecutive: CompanyPerson
+    ) throws -> LiveTeamStrategicDecision {
+        let object = try decodedObject(output, purpose: "investment decision")
+        let allowed: Set<String> = [
+            "action", "reason", "evidence", "workingGoal", "productBet",
+            "members", "overseerTargetID", "preferredNextMemberID"
+        ]
+        guard Set(object.keys) == allowed,
+              let actionRaw = object["action"]?.stringValue,
+              let action = LiveTeamStrategicAction(rawValue: actionRaw),
+              let reason = cleanRequiredString(object["reason"]),
+              let evidence = object["evidence"]?.stringValue else {
+            throw AgentProviderError.invalidResponse(
+                "the investment review returned an invalid decision"
+            )
+        }
+        let proposed: LiveTeamDefinition?
+        let preferred: String?
+        switch action {
+        case .revise:
+            preferred = object["preferredNextMemberID"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let definitionObject: JSONValue = .object([
+                "workingGoal": object["workingGoal"] ?? .null,
+                "strategicReason": .string(reason),
+                "productBet": object["productBet"] ?? .null,
+                "members": object["members"] ?? .null,
+                "overseerTargetID": object["overseerTargetID"] ?? .null
+            ])
+            proposed = try decodeCompanyDefinitionValue(
+                definitionObject,
+                revision: current.revision + 1,
+                targetOptions: targetOptions,
+                defaultCoordinator: current.coordinator,
+                chiefExecutive: chiefExecutive,
+                setupTokenUsage: nil
+            )
+            if let preferred, proposed?.member(id: preferred) == nil {
+                throw AgentProviderError.invalidResponse(
+                    "the preferred next person is not part of the proposed company"
+                )
+            }
+        case .keep, .pause, .complete:
+            proposed = nil
+            preferred = nil
+        }
+        return LiveTeamProductLanguage.strategicDecision(LiveTeamStrategicDecision(
+            action: action,
+            reason: reason,
+            evidence: evidence,
+            proposedDefinition: proposed,
+            preferredNextMemberID: preferred
+        ))
+    }
+
     static func decodeCompletionDecision(_ output: String) throws -> LiveTeamCompletionDecision {
         let object = try decodedObject(output, purpose: "completion decision")
         let allowed: Set<String> = ["outcome", "evidence", "reason"]
@@ -1252,39 +1757,6 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             evidence: evidence,
             reason: reason
         ))
-    }
-
-    private static func decodeStaffPersonas(
-        _ output: String
-    ) throws -> [LiveTeamStaffPersona] {
-        let object = try decodedObject(output, purpose: "staff consultation list")
-        guard Set(object.keys) == ["personas"],
-              let values = object["personas"]?.arrayValue,
-              (2...6).contains(values.count) else {
-            throw AgentProviderError.invalidResponse(
-                "the staff consultation must contain two to six personas"
-            )
-        }
-        let personas = try values.map { value in
-            guard let persona = value.objectValue,
-                  Set(persona.keys) == ["name", "mandate"],
-                  let name = cleanRequiredString(persona["name"]),
-                  name.count <= 80,
-                  let mandate = cleanRequiredString(persona["mandate"]),
-                  mandate.count <= 300 else {
-                throw AgentProviderError.invalidResponse(
-                    "a staff consultation persona is invalid"
-                )
-            }
-            return LiveTeamStaffPersona(id: UUID(), name: name, mandate: mandate)
-        }
-        let distinctNames = Set(personas.map { $0.name.lowercased() })
-        guard distinctNames.count == personas.count else {
-            throw AgentProviderError.invalidResponse(
-                "staff consultation persona names must be distinct"
-            )
-        }
-        return personas
     }
 
     private static func decodeStaffReport(
@@ -1332,7 +1804,172 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             evidence: evidence,
             concern: concern,
             nextMove: nextMove,
-            failure: nil
+            failure: nil,
+            tokenUsage: nil
+        )
+    }
+
+    private static func decodeCompanyPerson(
+        _ output: String,
+        positionID: CompanyPositionID,
+        assignment: String,
+        ingredients: CompanyPersonaIngredients,
+        tokenUsage: RunTokenUsage?,
+        opportunityChargeTokens: Int64
+    ) throws -> CompanyPerson {
+        let object = try decodedObject(output, purpose: "company person")
+        let allowed: Set<String> = [
+            "fullName", "background", "formativeSuccess", "formativeScar",
+            "convictions", "personalStake", "workingStyle", "conflictStyle",
+            "blindSpot", "evidenceThatChangesTheirMind"
+        ]
+        guard Set(object.keys) == allowed,
+              let fullName = cleanRequiredString(object["fullName"]),
+              let background = cleanRequiredString(object["background"]),
+              let formativeSuccess = cleanRequiredString(object["formativeSuccess"]),
+              let formativeScar = cleanRequiredString(object["formativeScar"]),
+              let convictionValues = object["convictions"]?.arrayValue,
+              (3...6).contains(convictionValues.count),
+              let personalStake = cleanRequiredString(object["personalStake"]),
+              let workingStyle = cleanRequiredString(object["workingStyle"]),
+              let conflictStyle = cleanRequiredString(object["conflictStyle"]),
+              let blindSpot = cleanRequiredString(object["blindSpot"]),
+              let changingEvidence = cleanRequiredString(
+                object["evidenceThatChangesTheirMind"]
+              ) else {
+            throw AgentProviderError.invalidResponse(
+                "the company person has missing, extra, or invalid fields"
+            )
+        }
+        let convictions = try convictionValues.map { value -> String in
+            guard let conviction = cleanRequiredString(value) else {
+                throw AgentProviderError.invalidResponse(
+                    "the company person has an empty conviction"
+                )
+            }
+            return conviction
+        }
+        let profile = CompanyPersonaProfile(
+            fullName: fullName,
+            background: background,
+            formativeSuccess: formativeSuccess,
+            formativeScar: formativeScar,
+            convictions: convictions,
+            personalStake: personalStake,
+            workingStyle: workingStyle,
+            conflictStyle: conflictStyle,
+            blindSpot: blindSpot,
+            evidenceThatChangesTheirMind: changingEvidence,
+            ingredients: ingredients
+        )
+        if let message = profile.validationMessage {
+            throw AgentProviderError.invalidResponse(message)
+        }
+        return CompanyPerson(
+            positionID: positionID,
+            profile: profile,
+            assignment: assignment,
+            generationTokenUsage: tokenUsage,
+            opportunityChargeTokens: opportunityChargeTokens
+        )
+    }
+
+    private static func decodeCompanyDefinitionValue(
+        _ value: JSONValue,
+        revision: Int,
+        targetOptions: [LiveTeamTargetOption],
+        defaultCoordinator: LiveTeamCoordinatorConfiguration,
+        chiefExecutive: CompanyPerson,
+        setupTokenUsage: RunTokenUsage?
+    ) throws -> LiveTeamDefinition {
+        guard let object = value.objectValue else {
+            throw AgentProviderError.invalidResponse("the company setup is not an object")
+        }
+        let allowed: Set<String> = [
+            "workingGoal", "strategicReason", "productBet", "members",
+            "overseerTargetID"
+        ]
+        guard Set(object.keys) == allowed,
+              let memberValues = object["members"]?.arrayValue,
+              !memberValues.isEmpty,
+              let productBetValue = object["productBet"] else {
+            throw AgentProviderError.invalidResponse(
+                "the company setup has missing or extra fields"
+            )
+        }
+        var positionIDs: [CompanyPositionID] = []
+        let legacyMemberValues = try memberValues.map { value -> JSONValue in
+            guard var member = value.objectValue,
+                  let positionRaw = member.removeValue(forKey: "positionID")?.stringValue,
+                  let positionID = CompanyPositionID(rawValue: positionRaw),
+                  positionID != .chiefExecutive else {
+                throw AgentProviderError.invalidResponse(
+                    "a company assignment uses an invalid predefined position"
+                )
+            }
+            positionIDs.append(positionID)
+            return .object(member)
+        }
+        var definition = try decodeDefinitionValue(
+            .object([
+                "workingGoal": object["workingGoal"] ?? .null,
+                "strategicReason": object["strategicReason"] ?? .null,
+                "members": .array(legacyMemberValues),
+                "coordinator": .object([
+                    "targetID": .string(
+                        targetOptions.first(where: {
+                            $0.target == defaultCoordinator.target
+                        })?.id ?? targetOptions.first?.id ?? ""
+                    ),
+                    "instructions": .string(defaultCoordinator.instructions)
+                ]),
+                "overseerTargetID": object["overseerTargetID"] ?? .null
+            ]),
+            revision: revision,
+            targetOptions: targetOptions,
+            defaultCoordinator: defaultCoordinator
+        )
+        for index in definition.members.indices {
+            definition.members[index].positionID = positionIDs[index]
+        }
+        definition.operatingModelVersion = 2
+        var chiefExecutive = chiefExecutive
+        if chiefExecutive.hiredRevision == nil {
+            chiefExecutive.hiredRevision = revision
+        }
+        definition.overseerPerson = chiefExecutive
+        definition.productBet = try decodeProductBet(productBetValue)
+        definition.setupTokenUsage = setupTokenUsage
+        return definition
+    }
+
+    private static func decodeProductBet(_ value: JSONValue) throws -> CompanyProductBet {
+        guard let object = value.objectValue,
+              Set(object.keys) == [
+                "headline", "valuePromise", "showcase", "integrationTarget",
+                "killCondition", "fundingUnits", "maximumTurns"
+              ],
+              let headline = cleanRequiredString(object["headline"]),
+              let valuePromise = cleanRequiredString(object["valuePromise"]),
+              let showcase = cleanRequiredString(object["showcase"]),
+              let integrationTarget = cleanRequiredString(object["integrationTarget"]),
+              let killCondition = cleanRequiredString(object["killCondition"]),
+              let fundingUnits = object["fundingUnits"]?.integerValue,
+              (3...8).contains(fundingUnits),
+              let maximumTurns = object["maximumTurns"]?.integerValue,
+              (6...20).contains(maximumTurns) else {
+            throw AgentProviderError.invalidResponse(
+                "the funded product bet is invalid"
+            )
+        }
+        return CompanyProductBet(
+            headline: headline,
+            valuePromise: valuePromise,
+            showcase: showcase,
+            integrationTarget: integrationTarget,
+            killCondition: killCondition,
+            fundedTokenLimit: fundingUnits * 250_000,
+            maximumTurns: Int(maximumTurns)
         )
     }
 

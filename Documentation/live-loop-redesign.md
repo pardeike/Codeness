@@ -1,262 +1,182 @@
-# Goal-directed orchestration
+# Product-company orchestration
 
 Status: implemented in Codeness
 
-Origin: UnityBridge intervention, 2026-08-27
+Decision date: 2026-08-28
 
-## Decision
+## Purpose
 
-Codeness starts from one user goal instead of a predefined process. It prepares a working goal, chooses an ordered set of agents and their memory policies, routes each completed turn, reviews strategy periodically, and checks completion against the original goal.
+Codeness is a universal company simulator for producing a real result from one user goal. It is not a process designer, a document generator, or a perpetual management meeting.
 
-The user configures no template, role preset, or per-repository model matrix. Provider, model, cost, memory, and authority restrictions belong in the goal.
+The operating model is designed around two pressures that both force delivery:
 
-## Product language
+- top-down return on investment: the CEO allocates tokens only to work that advances the fixed user goal;
+- personal product investment: every hired person has opinions, ambition, a stake in the result, and a desire to show working product value.
 
-The interface uses five connected terms:
+Creative energy is welcome, but ideas earn continued investment by becoming a coherent product people can see, use, test, or make a concrete decision from. This prevents both known local minima: bureaucratic caution with no product, and an endless contest of exciting prototypes with no integrated delivery.
 
-- **Goal:** the user's definition of success, restrictions, and authority.
-- **Agents:** the visible set of bounded responsibilities Codeness prepared.
-- **Turn:** one agent execution.
-- **Round:** one pass through every recurring agent.
-- **Memory:** the provider conversation an agent retains, shares, or recreates.
+## User contract
 
-The interface says **agent change**, not revision. It does not expose the internal strategic or local-routing roles. Codeness is the subject in explanations: “Codeness reviews the strategy” and “Codeness prepares the next handoff.”
+The user has only these operating interactions:
 
-Older source types retain names such as `LiveTeam*`, `member`, `cycle`, and `revision` for persisted compatibility. They are implementation vocabulary, not product copy. Old fixed-process types remain only to decode and adapt saved documents.
+1. Create a new named folder or open an existing folder or repository, then define the fixed user goal. Codeness initializes Git when needed.
+2. Pause, quit, reopen, and resume at durable boundaries.
+3. Steer a running person or edit the fixed user goal.
+4. After completion, amend the goal and start over while retaining the repository contents.
 
-## Internal architecture
+The user does not approve internal stages, hires, investment decisions, reviews, or reversible implementation choices. The user goal is preserved verbatim. Working goals, bets, assignments, people, and decisions are repository-adjacent Codeness state, not additions to the user goal.
 
-Two control agents have deliberately different authority. Their source names are retained here because this is an engineering document:
+## Company model
 
-| Internal role | Responsibility | May change strategy? | Sees the user goal? |
-| --- | --- | --- | --- |
-| Overseer | Creates the working goal and agents, reviews strategy, audits completion | Yes | Yes |
-| Coordinator | Evaluates one completed turn and prepares the next local action | No | No |
-| Agent | Performs one bounded responsibility | No | No |
+Every new activity begins with a generated persistent CEO. The CEO is the only model invocation that sees the complete user goal and the only authority that can complete the activity.
 
-The Overseer acts like the strategic controller. It may change the working goal, agent order and responsibilities, targets, schedules, and memory policies. At the same decision point, it may conclude that the fixed user goal is satisfied and the correct setup has no agents because no work remains; that completes the activity. It cannot change the user goal or invent authority absent from it.
+The CEO funds one product bet and hires the smallest team needed to pursue it. Every employee is a persistent named person. A person contains:
 
-The Coordinator is the local manager. It receives the working goal, the completed result, bounded recent handoffs, and the proposed next agent. It may continue, retry once, request a strategy review, or suggest that the goal may be complete. Strategy and completion suggestions always go to the Overseer; the Coordinator cannot set the activity to Paused or Completed. Its response schema contains no strategy edit or final-completion field.
+- full name and predefined position;
+- background, formative success, and formative scar;
+- concrete convictions and personal stake;
+- working and conflict styles;
+- a useful blind spot;
+- evidence that can change their mind;
+- randomized character ingredients used to create them;
+- actual generation-token cost and a virtual hiring opportunity charge;
+- an append-only company track record; and
+- the current project-specific assignment.
 
-This separation is the main feedback-loop control. Frequent local handoffs cannot repeatedly reinterpret the task. Strategy changes happen only in the less frequent control path that can compare evidence with the original goal.
+The immutable profile keeps a person recognizable across strategy changes. Their assignment and track record evolve with the work.
 
-## User interaction contract
+### Non-indifference requirement
 
-The user creates or opens a project, defines the fixed goal, pauses or resumes work, steers an active agent, and edits the fixed goal. Codeness owns working goals, stage choices, agent setup, routing, review cadence, and completion judgment. After completion, Start Over archives the Codeness activity and returns to the goal editor without changing repository contents.
+Personas must be ambitious, emotionally invested, strongly opinionated, willing to disagree, and impatient to show a real product. Persona prompts and structural validation reject neutral facilitators, indifferent colleagues, generic assistants, consensus-first managers, and characters invested in mediocrity.
 
-File > New Project asks for a folder name and location, creates that empty folder, initializes Git, and opens its goal editor. Opening an existing folder also initializes Git when the folder is not already in a repository.
+Strong personality is not permission to ignore evidence, safety, authorization, or the user goal. Every person has explicit evidence that can change their mind. Productive disagreement is valuable; consequence-free hype is not.
 
-## Start
+### Fixed positions
 
-The first screen contains one question, one goal editor, and Start. A short caption reminds the user to include provider, model, cost, or memory limits.
+The model may choose only predefined ordinary company positions. It never invents a goal-specific title. The assignment carries the specific work.
 
-After Start:
+Universal positions include CEO, Product Manager, Producer, Developer, Designer, Researcher, QA Tester, and Operations Manager. Fixed sector catalogs add familiar software, creative and media, research and data, physical-product, and business and market positions such as Technical Lead, Art Director, Data Analyst, Mechanical Engineer, and Marketing Manager.
 
-1. Codeness saves the goal.
-2. The Overseer creates the first working goal and smallest useful agent setup.
-3. Codeness validates and saves that entire setup before creating an agent session.
-4. The first eligible agent begins.
+The CEO position is appointed separately and cannot be returned as an employee position. The user may replace the CEO from the Company list. Replacement generates and persists a new person and affects future investment decisions without interrupting current product work.
 
-Malformed control output leaves the activity paused with the goal intact. Codeness does not invent a fallback setup.
+## Funded product bets
 
-The first control turn must choose a target before any model can interpret the goal. Codeness recognizes one unambiguous, non-negated provider or exact model identifier and uses it for that first turn. Otherwise it uses the first ready target. This is intentionally a small convenience, not a general language-policy parser.
+One product bet contains:
 
-## Agent setup
+- an outcome-led headline;
+- the user or product value promised;
+- the integrated demonstration to show;
+- the repository surface into which it must integrate;
+- a condition that should end or redirect the bet;
+- a token budget in 250,000-token funding units; and
+- a maximum-turn safety boundary.
 
-Each saved setup contains:
+The CEO normally allocates three to eight funding units and six to twenty turns. Six turns is a hard minimum so a review cannot recur after only one or two assignments. The turn boundary is a fallback when a provider cannot report complete token usage; tokens remain the primary cost signal.
 
-- one working goal;
-- an ordered list of agents;
-- one target and bounded responsibility per agent;
-- a target and policy for local work routing;
-- a target for future strategy and completion reviews;
-- one schedule and one memory policy per agent;
-- a reason for the strategy; and
-- an identity-based checkpoint naming the next agent.
+Assignments must produce or exercise the real product. Plans, documentation, status prose, evidence collection, meetings, and reviews are support work and do not count as product value unless the user goal makes them the deliverable or they directly unlock the integrated demonstration.
 
-Schedules are:
+## Lightweight orchestration motor
 
-- **Once:** retire after one accepted turn.
-- **Every round:** remain eligible on each subsequent pass.
+Normal successful turns do not call a model coordinator. A deterministic product motor:
 
-A completed Once agent becomes eligible again only if its own responsibility or the working goal changes. Unrelated agent changes do not replay it.
+1. saves the completed worker result;
+2. marks completed one-time assignments;
+3. calculates the next eligible saved assignment;
+4. measures tokens and turns under the current bet;
+5. carries the factual result forward as the next handoff; and
+6. either starts the next person or opens an investment boundary.
 
-Agents perform their saved responsibility directly. They do not delegate it to sub-agents or launch additional agents unless that responsibility explicitly requires delegation; the Overseer's saved setup owns the division of work.
+This removes the previous per-turn management call and its tendency to reinterpret every result as a reason for more ceremony.
 
-## Normal operation
+The motor opens an investment boundary when:
 
-After each agent turn, Codeness saves the result before asking for the next handoff. The local-routing decision is then saved before Codeness starts another turn. These are separate durability barriers.
+- the funded token budget is consumed;
+- the maximum-turn boundary is reached;
+- no person remains eligible;
+- a person explicitly reports that an integrated demonstration is ready;
+- a material blocker or repeated failure requires executive action;
+- the user changed the goal; or
+- completion must be judged.
 
-The normal path is:
+Resume is not a review trigger. Pause saves the exact next action, and Resume continues it. There is no periodic round, turn, or elapsed-time review schedule.
 
-```text
-agent turn
-    |
-    v
-saved result
-    |
-    v
-local routing: continue, retry, strategy review, or completion check
-    |
-    v
-saved routing decision
-    |
-    v
-next agent turn or Overseer review
-```
+Older saved agent loops retain their exact recovery point. They convert once at the next completed round or another natural executive boundary. Opening or resuming alone does not create the conversion review.
 
-One local retry is allowed. Repeated failure becomes strategy evidence rather than an unlimited retry loop. A completion suggestion cannot bypass another unfinished agent in the current round; Codeness runs that saved responsibility first unless a strategy boundary is independently due. Because only the Overseer sees the fixed user goal, it alone chooses the next internal stage and decides when no work remains.
+## Investment review
 
-## Strategy cadence and feedback limits
+At an investment boundary, every currently hired employee gives one short report in parallel. No model call selects or invents meeting participants. No fresh generic manager personas are created. Each report uses the employee's persisted story, convictions, assignment, and company track record.
 
-Strategy review occurs:
+Reports cover involvement, progress, evidence, one concern or none, and the single next product move the person would fight for. They are advice, not votes. Missing or invalid reports remain visible as unavailable and never block the CEO from deciding.
 
-- at initial setup;
-- after the user changes the goal;
-- when local routing requests it;
-- after two failures by the same agent;
-- when no agent can run;
-- after three rounds or twelve agent turns, whichever comes first, provided ten minutes have passed since the previous strategy review; and
-- before completion.
+The CEO sees the fixed user goal, current product bet and company, durable run evidence and handoffs, token costs, prior company changes, and every available company report.
 
-Automatic strategy changes apply only between turns. A running turn retains the exact assignment, working goal, and memory binding it started with.
+The CEO then renews the current bet, funds a replacement bet and company, or completes the goal. Renewing a bet creates a new persisted funding revision so its token and turn budget starts cleanly. Only the CEO can stop the autonomous loop as complete.
 
-Pause lets the running action finish and saves the exact next action. Resume continues that durable checkpoint; it does not schedule a review merely because the user resumed. If a strategy review was independently due before the pause, it remains the saved next action.
+## Token return
 
-Before a strategy or completion decision, the Overseer selects the relevant management perspectives and collects their short independent reports concurrently. The reports expose involvement, progress, evidence, concerns, and a recommended next move. They are advisory evidence, not votes or new authority; the Overseer remains responsible for judging them against the fixed user goal.
+Codeness records two cost classes:
 
-The turn list presents each review as a compact selectable chapter around the agent turns it affected. Its detail view shows live consultation progress, every report, the Overseer's judgment, and the complete resulting agent setup when it changed. Earlier saved strategy changes that predate review records remain visible as compact chapter dividers. These are transparency surfaces, not approval points.
+- product work: every employee run;
+- company control: initial setup, persona generation, legacy coordinator calls, correction retries that report usage, company check-ins, and CEO decisions.
 
-Elapsed time is a cooldown, never a trigger. Codeness has no strategy-review timer. Fast rounds keep accumulating until the next turn boundary after the cooldown expires. A goal change, repeated failure, unrunnable setup, or completion claim bypasses the periodic cooldown because waiting cannot improve those decisions. The round limit, turn limit, cooldown, and repeated-failure threshold are internal orchestration values, not another user-facing settings form.
+The overview shows both classes, total tokens, completed investment decisions, and tokens per decision. Historical company definitions are retained so setup and former-person costs do not disappear when the company changes. Virtual hiring opportunity charges are displayed separately from actual provider token usage.
 
-To limit back-to-back automatic strategy churn, Codeness may keep the current setup until it completes one round, but only when that setup still has an eligible agent. An exhausted setup cannot be paused by the churn limit; the Overseer's replacement setup applies immediately.
+This is cost accounting, not a fabricated value score. Product value remains evidence-backed: an integrated result, exercised behavior, user or teammate use, an accepted demonstration, or concrete learning that changes the investment decision.
 
-The user may change the fixed goal at any time. A running agent finishes against its immutable assignment, then the Overseer revises the strategy against the changed goal before another agent starts.
+Provider usage can still be incomplete when a provider fails before returning usage. Codeness never invents missing token counts.
 
-## Memory choices
+## Prompt culture
 
-| Product choice | Behavior | Normal use |
-| --- | --- | --- |
-| Own memory | Reuse one private provider conversation | Long-running implementation or specialist work |
-| Fresh every turn | Start a new conversation each time | Independent review or audit |
-| Shared memory | Reuse one conversation across compatible agents | Closely coupled responsibilities that benefit from shared context |
+The CEO prompt establishes a forceful founder mindset:
 
-Shared memory requires the same provider and model. Autonomous agents always use normal execution mode because independent reviewers still need test, shell, and desktop-tool access. Codeness never merges, clones, or forks provider histories. Moving an agent into a shared group adopts that group's conversation. Moving it out starts a new private conversation.
+- the fixed user goal is the sole authority source;
+- subordinate concerns are hypotheses, not vetoes;
+- the company should be bold, energetic, playful, and eager to show work;
+- the best idea must become an integrated product;
+- repeated support work or disconnected prototypes are investment failures;
+- product value and learning per total token cost drive the next bet;
+- ordinary position IDs are mandatory; and
+- only the CEO can declare the goal complete.
 
-Session-level instructions are role-neutral because several compatible agents may use one shared conversation. Every turn supplies the current agent name, responsibility, working goal, round, and handoff. Implementation and independent review do not share by default.
+Employee prompts establish build-first behavior:
 
-The two control roles use fresh bounded invocations. Their durable memory is Codeness state, not a long provider conversation.
+- act from the persisted personality and convictions;
+- challenge timid or mediocre work;
+- improve the repository's actual product;
+- exercise or demonstrate the result;
+- avoid documentation unless it is the product or durable operating information;
+- do not launch sub-agents because Codeness owns orchestration; and
+- report concrete changes, exercised evidence, blockers, and the highest-value next move.
 
-## Completion
+The prompts are deliberately product-generic. Software and coding remain common positions and activities, but there is no game-specific language in the operating system.
 
-Local routing can only suggest that the goal may be complete. Codeness then activates the Overseer with the fixed user goal and bounded durable evidence, using the same strategic decision point that can keep or replace the agents.
+## Interface
 
-The Overseer may:
+The sidebar begins with a compact Company section. It lists the CEO and current employees by name and familiar position. Selecting a person opens a vertically scrolling detail view with their assignment, story, convictions, stake, work personality, track record, and hiring cost. Long text wraps. Detail groups are collapsed by default.
 
-- keep the current agents;
-- replace the working goal or agent setup;
-- complete the activity when the fixed user goal is satisfied and no agents are needed.
+Run rows retain short outcome-led headlines. Their metadata shows person name and position. Investment reviews remain visually distinct chapter rows and are selectable like turns. Their detail view contains collapsed sections for the trigger, company check-in, CEO decision, and resulting funded company.
 
-This makes stopping the loop a strategic setup decision owned by the only control role that sees the fixed user goal. Older saved completion-review checkpoints remain recoverable, but new work does not create them.
-
-The user can pause and later resume at a durable checkpoint. Working goals, agent instructions, handoffs, strategies, and stage gates are project documents that the Overseer may revise; they cannot create a user-approval requirement. Older saved strategy-direction pauses are repaired to an autonomous Overseer checkpoint without presenting a direction alert.
-
-## Existing documents
-
-Active documents from the fixed-process version adapt automatically on open:
-
-1. Codeness pauses scheduling.
-2. The old configuration, cursor, sessions, goal, and bounded evidence are supplied once to the strategic control path.
-3. Codeness validates and saves the resulting agents.
-4. The old active configuration fields are removed.
-5. The document remains paused until Resume.
-
-There is no migration choice, offer, or button. If no usable goal exists, Codeness asks only for the goal. A failed attempt preserves the old paused activity and Resume retries adaptation; it never falls back to new work through the old engine.
-
-An old conversation is retained only when the agent identity, responsibility, target, and Own-memory policy remain compatible. Completed and cancelled old activities remain readable history.
-
-## Removed product surface
-
-The prototype deletes:
-
-- built-in process JSON and its catalog loader;
-- process and prompt-template editors;
-- restore-built-in controls;
-- repository role/model presets;
-- manual agent, memory, strategy-review, and review-before-apply controls;
-- process choice at activity start; and
-- migration buttons and persisted migration-request flags.
-
-The Settings window now contains only agent-provider discovery, the optional OpenAI-compatible endpoint, and transcript presentation.
+The work overview shows the current bet, current company, product and control tokens, investment-decision count, and tokens per decision.
 
 ## Persistence and recovery
 
-- A turn owns an immutable launch setup, agent snapshot, working goal, and memory binding.
-- A pending goal or automatic agent change becomes authoritative only after it is saved.
-- A crash during a turn recovers against that turn's launch snapshot.
-- A removed active agent may finish because its running turn owns the old snapshot.
-- Provider sessions are released only when no saved turn, checkpoint, or agent references them.
-- Codeness never silently combines two saved setups or provider histories.
+- The fixed user goal is never rewritten by generated product detail.
+- A worker turn owns an immutable launch snapshot, including person, position, assignment, working goal, product bet, target, and memory binding.
+- Product results and deterministic routing decisions are saved before the next turn starts.
+- A company change applies only at a saved safe boundary.
+- Persona profiles, randomized ingredients, generation costs, track records, product bets, company-definition history, reports, and CEO decisions are Codable activity state.
+- A removed worker may finish the turn launched from the old snapshot.
 - Reopening active work pauses it until the user resumes.
+- Completed historical activities remain readable without forced migration.
 
-New goal-only records omit irrelevant legacy prompt defaults and false completion fields. Existing saved control text is normalized on load so old internal role names do not leak back into the interface. User goals and agent results are never rewritten.
+## Deliberate limits
 
-## Isolated prototype
-
-The development build is deliberately separate from production:
-
-- app: `/Applications/Codeness Prototype.app`;
-- bundle ID: `ap.codeness.prototype`;
-- state: `/Users/ap/Library/Application Support/Codeness Prototype`; and
-- no `.codeness` document registration.
-
-The prototype build script refuses to replace the app while it is running. The production app and `/Users/ap/Library/Application Support/Codeness` were not rebuilt, quit, edited, or relaunched during prototype work.
-
-## Demo evidence
-
-The first goal-only demo asked for a native Go maze-chase game while leaving the graphics library open and restricting every Codeness agent to Codex `gpt-5.6-terra`.
-
-The builder selected Ebitengine, implemented the app and deterministic logic tests, built a native Apple-silicon bundle, and launched it. A fresh reviewer found a real defect the builder missed: one enemy started inside a wall. It fixed the start tile, added a regression test, reran focused and full Go tests, rebuilt, and relaunched the app. Local routing nominated completion and a fresh completion audit accepted it.
-
-The automated evidence was independently rechecked: `go test ./...`, race detection, `go vet`, and `make build` passed. A native 640×682 macOS window was observed and then quit. Keyboard movement and complete win, loss, and restart interaction were not manually proved.
-
-The test found four important weaknesses:
-
-1. The initial structured-output schema made a nullable field optional instead of required-with-null. Codex rejected it correctly. The schema and error propagation are fixed and tested.
-2. The first prototype had a hidden Terra preference for the initial control turn. Every saved target happened to use Terra, but that did not prove the goal caused the choice. The hidden default was removed and explicit, negated, and absent-model cases are tested.
-3. The builder contacted the public Go module proxy despite “do not use external services” and omitted that fact from its report. Prompts now demand disclosure and positive evidence for prohibitions, but this remains soft enforcement.
-4. A later read-only compliance agent could not inspect Codeness's own target and session records. It correctly refused to certify Terra-only history or absence of publication. A bounded read-only control-evidence surface remains future work.
-
-A manual strategy review then replaced the completed builder and reviewer with one fresh compliance agent, proving that the agent setup can change substantially without a template. That review also found and fixed a decoding issue: Keep and Pause now ignore stray strategy fields; only an explicit strategy-change action can alter the setup.
-
-A second demo deliberately reused the same 2D repository with a new, ambiguous “make it 3D” goal. Codeness expanded the goal into genuine real-time 3D acceptance criteria and chose a persistent build agent plus a fresh independent reviewer. The builder replaced the flat presentation with a perspective renderer, built a native bundle, and successfully used BrrainzTools to launch and interact with it. This proves that ordinary prototype agent sessions received the expected shell environment and desktop tooling.
-
-The independent reviewer then exposed two Codeness defects. It was assigned Codex Plan mode, which made the turn read-only and prevented Go from creating work directories, GUI launch from obtaining a usable window context, and `command -v brrainztools` from finding the desktop tool. This was not a shell-setup regression: the prototype App Server had `/Users/ap/Scripts` on `PATH`, and the standard-mode builder used the same BrrainzTools executable successfully. Autonomous target selection and editing now omit Plan mode, saved active Plan targets normalize to Standard, and their read-only provider sessions are discarded before reuse.
-
-Codex nevertheless completed the review as a `plan` item and found a concrete unreachable objective tile. Codeness had accepted only final agent messages, so it displayed the completed review as Failed with “Codex turn ended with status completed.” Plan items are now accepted as terminal output when no agent message exists. The exact persisted failure shape repairs on open to a paused, handoff-pending result without replaying the reviewer or hiding the finding.
-
-The user's pause did succeed: the activity and pause flag were durable and no turn remained active. The misleading Failed badge came from terminal-output classification, not from continued work. The 3D goal remains incomplete because the review found a real game defect and current-bundle interaction evidence was stale. That is a valid review outcome, not a failed review turn.
-
-## Honest assessment
-
-Removing predefined processes is the right product direction. It makes Codeness simpler to start, lets long work adapt, and turns the successful UnityBridge intervention into a normal capability. Separating strategic control from local routing is essential; without it, every handoff could rewrite strategy and create a feedback loop.
-
-The current prototype is not ready to replace production without further work:
-
-- Model, authority, and action restrictions are mostly natural-language policy. The first-target selector handles only one clear provider or exact model. Important prohibitions still need independently observable evidence or hard enforcement.
-- An ambiguous goal can be expanded aggressively. The 3D demo working goal added audio, settings, menus, icon, packaging, and exhaustive interaction checks from “everything such an app should have.” That may be sensible, but it also shows how easily Codeness can manufacture scope.
-- A poor strategic controller can choose too many agents, the wrong working goal, or needless reviews. Change history and churn limits make this visible but do not remove judgment risk.
-- Round-based review can still be too frequent when agents finish almost instantly. A ten-minute cooldown now rate-limits only automatic periodic review; the useful value needs measurement from real runs.
-- Control invocations add cost even for one-agent tasks.
-- The first demo's two worker sessions reported roughly 902,000 and 579,000 cumulative tokens. Much of that is provider-global context, skills, and tool history rather than Codeness handoffs. Dynamic agents do not solve provider-level context loading.
-- Saved decisions improve explainability, but the same goal can still produce a different setup on another run.
-- Shared memory weakens independence and should remain rare.
-- `RepositoryCoordinator.swift` has absorbed too much live-orchestration logic. The prototype works, but this file should be split by responsibility before production adoption.
-- The UI overlap reported on the second demo came from macOS scroll-edge material covering the transcript header. Forcing a hard edge stopped the original overlap but produced a large blank material strip. The final prototype disables the transcript's top edge effect and gives the compact header its own stable background. Live capture shows the complete header during both completed and running turns.
-- Successful steering messages are now recorded in the ordered transcript. They appear as indented accent-colored `You steered` blocks, remain visible when routine reasoning is hidden, and return subsequent agent output to normal styling. Failed sends do not create a transcript entry.
-
-The highest-value next work is not more configuration. It is better evidence: a small read-only activity record for audit agents, measured strategy-review outcomes, and hard enforcement only for restrictions that repeatedly prove too important for prompt interpretation.
+- Persona quality and CEO judgment still depend on model behavior; the prompts and evidence structure constrain but cannot guarantee taste.
+- Token usage is exact only to the degree the provider returns usage.
+- Codeness does not create a synthetic value-point score. A later version may add accepted-demonstration annotations when there is a reliable acceptance event.
+- Employee execution remains ordered. Company reports run in parallel because they are short, independent, and read-only.
+- Legacy source names such as `LiveTeam`, `member`, `cycle`, and `revision` remain for persisted compatibility. They are not the intended product language.
 
 ## Non-goals
 
-This prototype does not add parallel agents, branches, dependency graphs, nested loops, a visual graph editor, a prompt language, or arbitrary agent code. One ordered set of agents with Once and Every-round schedules is enough to test the core design.
+This design does not add a visual workflow graph, arbitrary user-authored roles, nested orchestration, periodic management meetings, a bureaucracy settings panel, or unmanaged sub-agent trees. The product surface stays centered on the user goal, company, funded bet, product turns, investment decisions, and durable result.
