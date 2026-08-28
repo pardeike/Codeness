@@ -105,7 +105,7 @@ saved routing decision
 next agent turn or Overseer review
 ```
 
-One local retry is allowed. Repeated failure becomes strategy evidence rather than an unlimited retry loop. Because only the Overseer sees the fixed user goal, it alone chooses the next internal stage and decides when no work remains.
+One local retry is allowed. Repeated failure becomes strategy evidence rather than an unlimited retry loop. A completion suggestion cannot bypass another unfinished agent in the current round; Codeness runs that saved responsibility first unless a strategy boundary is independently due. Because only the Overseer sees the fixed user goal, it alone chooses the next internal stage and decides when no work remains.
 
 ## Strategy cadence and feedback limits
 
@@ -121,7 +121,7 @@ Strategy review occurs:
 
 Automatic strategy changes apply only between turns. A running turn retains the exact assignment, working goal, and memory binding it started with.
 
-Pause lets the running agent finish and saves the local-routing handoff, but it does not start an Overseer review from that handoff. Any pending strategy or completion review becomes the durable Resume checkpoint and runs only after the user resumes.
+Pause lets the running action finish and saves the exact next action. Resume continues that durable checkpoint; it does not schedule a review merely because the user resumed. If a strategy review was independently due before the pause, it remains the saved next action.
 
 Before a strategy or completion decision, the Overseer selects the relevant management perspectives and collects their short independent reports concurrently. The reports expose involvement, progress, evidence, concerns, and a recommended next move. They are advisory evidence, not votes or new authority; the Overseer remains responsible for judging them against the fixed user goal.
 

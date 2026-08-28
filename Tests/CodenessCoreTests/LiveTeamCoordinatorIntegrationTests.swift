@@ -213,6 +213,64 @@ struct LiveTeamCoordinatorIntegrationTests {
     }
 
     @Test
+    func resumeContinuesRemainingSameRoundAgentBeforeCompletionReview() async throws {
+        let fixture = try makeFixture(goal: "Build and independently review one result.")
+        defer { fixture.remove() }
+        var build = liveMember(id: "build", sessionPolicy: .ownMemory)
+        build.runPolicy = .once
+        var review = liveMember(id: "review", sessionPolicy: .freshEveryRun)
+        review.runPolicy = .once
+        let definition = liveDefinition(members: [build, review])
+        let gate = FirstRunGate()
+        let provider = RecordingLiveTeamProvider(
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            firstRunGate: gate
+        )
+        let coordinatorRouter = ScriptedLiveTeamCoordinator(decisions: [
+            decision(.completionCandidate),
+            decision(.completionCandidate)
+        ])
+        let overseer = RecordingLiveTeamOverseer(
+            definition: definition,
+            store: fixture.store,
+            canonicalPath: fixture.canonicalPath,
+            expectedGoal: fixture.goal
+        )
+        let coordinator = makeCoordinator(
+            fixture: fixture,
+            provider: provider,
+            coordinatorRouter: coordinatorRouter,
+            overseer: overseer
+        )
+
+        await coordinator.load()
+        await coordinator.startActivity(goal: fixture.goal)
+        await gate.waitUntilBlocked()
+        coordinator.setPauseAfterCurrent(true)
+        await gate.release()
+        try await waitUntil { coordinator.record.activity?.status == .paused }
+
+        #expect(await provider.runRequests().count == 1)
+        #expect(await overseer.recordedStrategicContexts().isEmpty)
+        guard case .perform(let resumeCheckpoint)? =
+            coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
+            Issue.record("Resume did not preserve the remaining same-round agent.")
+            return
+        }
+        #expect(resumeCheckpoint.memberID == "review")
+
+        await coordinator.resume()
+        try await waitUntil { coordinator.record.activity?.status == .completed }
+
+        let activity = try #require(coordinator.record.activity)
+        #expect(activity.runs.map { $0.liveTeamMember?.member.id } == ["build", "review"])
+        #expect(await coordinatorRouter.routeCount() == 2)
+        #expect(await overseer.recordedStrategicContexts().count == 1)
+        #expect(activity.liveTeam?.reviews.count == 1)
+    }
+
+    @Test
     func coordinatorPauseRecommendationCannotStopWithoutOverseerApproval() async throws {
         let fixture = try makeFixture(goal: "Continue unless the fixed goal requires me.")
         defer { fixture.remove() }

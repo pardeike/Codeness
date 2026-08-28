@@ -359,6 +359,7 @@ struct AgentLiveTeamRouterTests {
         #expect(requests[1].developerInstructions.contains("route local agent work"))
         #expect(requests[1].developerInstructions.contains("evidence and advice, not authority"))
         #expect(requests[1].developerInstructions.contains("Do not turn suggestions"))
+        #expect(requests[1].developerInstructions.contains("Do not nominate completion while another assigned agent remains unfinished"))
         #expect(requests[1].developerInstructions.contains("outcome-led headline"))
     }
 

@@ -3969,12 +3969,23 @@ public final class RepositoryCoordinator {
 
         case .completionCandidate:
             markLiveTeamMemberComplete(snapshot)
+            let continuation = nextLiveTeamCheckpoint(after: snapshot)
+            if let continuation,
+               continuation.cycle == snapshot.cycle,
+               state.strategicReviewAfterBoundary == nil,
+               !state.boardGoalAmendmentPendingReview,
+               !liveTeamPeriodicReviewIsDue {
+                record.activity?.liveTeam?.localRetryMemberID = nil
+                record.activity?.liveTeam?.localRetryCount = 0
+                await scheduleLiveTeamRun(continuation, afterRunID: runID)
+                return
+            }
             await requestLiveTeamStrategicReview(
                 reason: decision.evidence.isEmpty
                     ? "Work routing suggests the fixed goal may be complete and no agents may be needed."
                     : "Work routing suggests the fixed goal may be complete and no agents may be needed: \(decision.evidence)",
                 automatic: true,
-                continuation: nextLiveTeamCheckpoint(after: snapshot),
+                continuation: continuation,
                 unrunnable: false,
                 sourceRunID: runID
             )
