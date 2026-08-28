@@ -594,6 +594,11 @@ struct AgentLiveTeamRouterTests {
             cwd: "/tmp/live-team-router"
         )
         #expect(definition.members.first?.target == target)
+        #expect(definition.productBet?.audience == "People who need the feature")
+        #expect(
+            definition.productBet?.focusQuestion
+                == "Would the intended audience choose this feature over the closest alternative?"
+        )
 
         let snapshot = LiveTeamMemberSnapshot(
             member: try #require(definition.members.first),
@@ -763,6 +768,12 @@ struct AgentLiveTeamRouterTests {
         let progressRecorder = LiveTeamReviewProgressRecorder()
         let target = testTarget()
         let context = strategicContext(target: target)
+        let repository = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "codeness-focus-group-test.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repository) }
 
         let decision = try await router.reviewStrategy(
             context,
@@ -770,7 +781,7 @@ struct AgentLiveTeamRouterTests {
                 target: target,
                 instructions: "Keep executive control decisive."
             ),
-            cwd: "/tmp/live-team-staff-consultation",
+            cwd: repository.path,
             progress: { progress in
                 await progressRecorder.append(progress)
             }
@@ -778,6 +789,9 @@ struct AgentLiveTeamRouterTests {
 
         #expect(decision.action == .keep)
         let requests = await provider.requests()
+        let focusRequest = try #require(requests.first {
+            $0.developerInstructions.contains("simulate a small focus group")
+        })
         let reports = requests.filter {
             $0.developerInstructions.contains("persisted named company person")
                 && !$0.prompt.contains("CORRECTION RETRY")
@@ -788,25 +802,45 @@ struct AgentLiveTeamRouterTests {
 
         #expect(reports.count == 2)
         #expect(reports.allSatisfy { !$0.prompt.contains(context.userGoal) })
+        #expect(reports.allSatisfy { $0.prompt.contains("FOCUS GROUP") })
+        #expect(reports.allSatisfy { $0.prompt.contains("A close established alternative") })
         #expect(reports.allSatisfy { $0.target == target })
         #expect(reports.allSatisfy { $0.developerInstructions.contains("have no authority") })
         #expect(finalReview.prompt.contains("COMPANY CHECK-IN"))
+        #expect(finalReview.prompt.contains("FOCUS GROUP"))
+        #expect(finalReview.prompt.contains("A close established alternative"))
         #expect(finalReview.prompt.contains("Creative direction is stalled"))
         #expect(finalReview.prompt.contains("Engineering has a working vertical path"))
         #expect(finalReview.prompt.contains(context.userGoal))
         #expect(finalReview.prompt.contains("do not count votes"))
         #expect(finalReview.prompt.contains("vote count is not a reason to act"))
         #expect(await provider.maximumConcurrentConsultations() == 2)
+        #expect(focusRequest.allowsWebResearch)
+        #expect(focusRequest.cwd != repository.path)
+        #expect(!focusRequest.prompt.contains(repository.path))
+        #expect(!focusRequest.prompt.contains(context.userGoal))
+        #expect(!focusRequest.prompt.contains("Mira Voss"))
+        #expect(!FileManager.default.fileExists(atPath: focusRequest.cwd))
 
         let progress = await progressRecorder.values()
-        #expect(progress.count == 4)
-        guard case .personasSelected(let managers) = progress[0] else {
-            Issue.record("The manager list must be the first visible review update.")
+        #expect(progress.count == 5)
+        guard case .focusGroupCompleted(let focusGroup) = progress[0] else {
+            Issue.record("The focus group must report before the company check-in.")
+            return
+        }
+        #expect(focusGroup.researchBasis == .liveWeb)
+        #expect(focusGroup.participants.count == 4)
+        let reportPath = try #require(focusGroup.documentPath)
+        #expect(FileManager.default.fileExists(
+            atPath: repository.appendingPathComponent(reportPath).path
+        ))
+        guard case .personasSelected(let managers) = progress[1] else {
+            Issue.record("The manager list must follow the focus-group report.")
             return
         }
         #expect(managers.map(\.name) == ["Mira Voss", "Eli Navarro"])
         let completed: [(Int, LiveTeamManagerConsultation)] = progress
-            .dropFirst()
+            .dropFirst(2)
             .dropLast()
             .compactMap { update in
                 guard case .consultationCompleted(let index, let manager) = update else {
@@ -875,6 +909,59 @@ struct AgentLiveTeamRouterTests {
         #expect(requests.contains(where: {
             $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
         }))
+    }
+
+    @Test
+    func strategicReviewContinuesWhenTheIsolatedFocusGroupIsUnavailable() async throws {
+        let provider = LiveTeamUtilityProvider(focusGroupUnavailable: true)
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let progressRecorder = LiveTeamReviewProgressRecorder()
+        let target = testTarget()
+        let repository = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "codeness-unavailable-focus-group.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repository) }
+
+        let decision = try await router.reviewStrategy(
+            strategicContext(target: target),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep executive control decisive."
+            ),
+            cwd: repository.path,
+            progress: { progress in
+                await progressRecorder.append(progress)
+            }
+        )
+
+        #expect(decision.action == .keep)
+        let progress = await progressRecorder.values()
+        guard let firstProgress = progress.first,
+              case .focusGroupCompleted(let report) = firstProgress else {
+            Issue.record("An unavailable focus group must still finish before staff reports.")
+            return
+        }
+        #expect(report.failure != nil)
+        #expect(report.nextExperiment.contains("without waiting"))
+        let reportPath = try #require(report.documentPath)
+        #expect(FileManager.default.fileExists(
+            atPath: repository.appendingPathComponent(reportPath).path
+        ))
+        let requests = await provider.requests()
+        let staffRequests = requests.filter {
+            $0.developerInstructions.contains("persisted named company person")
+        }
+        #expect(staffRequests.count == 2)
+        #expect(staffRequests.allSatisfy {
+            $0.prompt.contains("Continue product work without waiting")
+        })
+        #expect(requests.contains {
+            $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] != nil
+                && $0.prompt.contains("Continue product work without waiting")
+        })
     }
 
     @Test
@@ -1042,6 +1129,7 @@ struct AgentLiveTeamRouterTests {
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.personaSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.coordinatorSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.completionSchema))
+        #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.focusGroupSchema))
         #expect(schemaUsesStrictObjectProperties(AgentLiveTeamRouter.staffReportSchema))
         #expect(schemaEnumValues(
             AgentLiveTeamRouter.coordinatorSchema,
@@ -1074,6 +1162,8 @@ struct AgentLiveTeamRouterTests {
       "productBet": {
         "headline": "Ship the next unit",
         "valuePromise": "A user can exercise the next feature.",
+        "audience": "People who need the next feature",
+        "focusQuestion": "Would the intended audience choose this feature over the closest alternative?",
         "showcase": "An integrated feature demonstration",
         "integrationTarget": "The primary product surface",
         "killCondition": "Stop if it produces no visible value.",
@@ -1146,11 +1236,13 @@ private actor LiveTeamReviewProgressRecorder {
 
 private actor LiveTeamUtilityProvider: AgentProviding {
     nonisolated let id: AgentProviderID = .codex
+    nonisolated let supportsLiveWebResearch = true
     private var utilityRequests: [AgentUtilityRequest] = []
     private var outputs: [String]
     private var personaNames: [String]
     private let consultationDelay: Duration
     private let unavailablePersona: String?
+    private let focusGroupUnavailable: Bool
     private var activeConsultations = 0
     private var maximumActiveConsultations = 0
 
@@ -1158,11 +1250,13 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         outputs: [String] = [],
         consultationDelay: Duration = .zero,
         unavailablePersona: String? = nil,
+        focusGroupUnavailable: Bool = false,
         personaNames: [String] = []
     ) {
         self.outputs = outputs
         self.consultationDelay = consultationDelay
         self.unavailablePersona = unavailablePersona
+        self.focusGroupUnavailable = focusGroupUnavailable
         self.personaNames = personaNames
     }
 
@@ -1224,6 +1318,64 @@ private actor LiveTeamUtilityProvider: AgentProviding {
               "evidenceThatChangesTheirMind": "A real user session or measured product failure."
             }
             """, tokenUsage: .init(totalTokens: 100, inputTokens: 80, outputTokens: 20))
+        }
+        if request.developerInstructions.contains("simulate a small focus group") {
+            if focusGroupUnavailable {
+                return AgentUtilityResult(output: "invalid focus group")
+            }
+            return AgentUtilityResult(output: """
+            {
+              "comparison": "A close established alternative",
+              "comparisonReason": "It serves the same audience need with a familiar interaction pattern.",
+              "sources": [
+                {
+                  "title": "Current comparison product overview",
+                  "url": "https://example.com/product",
+                  "publishedAt": "2026-08-01",
+                  "relevance": "Describes the current alternative and its user-facing interaction."
+                },
+                {
+                  "title": "Recent user reactions",
+                  "url": "https://example.com/reviews",
+                  "publishedAt": "2026-08-10",
+                  "relevance": "Shows what the audience praises and rejects."
+                }
+              ],
+              "participants": [
+                {
+                  "archetype": "Curious newcomer",
+                  "expectation": "Understand the value within a minute.",
+                  "choice": "currentProduct",
+                  "reaction": "The direct interaction makes the promise easier to grasp."
+                },
+                {
+                  "archetype": "Experienced category user",
+                  "expectation": "Familiar control with one memorable difference.",
+                  "choice": "comparison",
+                  "reaction": "The current evidence does not yet prove the distinctive interaction."
+                },
+                {
+                  "archetype": "Time-poor user",
+                  "expectation": "Reach useful value without setup work.",
+                  "choice": "currentProduct",
+                  "reaction": "The focused demonstration sounds faster to enter."
+                },
+                {
+                  "archetype": "Skeptical enthusiast",
+                  "expectation": "See a strong reason to switch.",
+                  "choice": "neither",
+                  "reaction": "Neither option proves a compelling repeat-use moment yet."
+                }
+              ],
+              "findings": [
+                "The current product promise is easier to understand than the alternative.",
+                "The distinctive repeat-use moment still needs visible proof."
+              ],
+              "verdict": "The direction is credible, but the next product slice must make its distinctive value unmistakable.",
+              "nextExperiment": "Build one complete repeat-use interaction and exercise it against the comparison expectation.",
+              "limitations": "Participants are simulated from a bounded test card and two web sources."
+            }
+            """, tokenUsage: .init(totalTokens: 50, inputTokens: 35, outputTokens: 15))
         }
         if request.developerInstructions.contains("persisted named company person") {
             activeConsultations += 1
@@ -1307,6 +1459,8 @@ private actor LiveTeamUtilityProvider: AgentProviding {
           "productBet": {
             "headline": "Show one durable feature",
             "valuePromise": "A user can exercise the feature directly.",
+            "audience": "People who need the feature",
+            "focusQuestion": "Would the intended audience choose this feature over the closest alternative?",
             "showcase": "A working integrated feature demonstration",
             "integrationTarget": "The repository's primary product surface",
             "killCondition": "Stop if the exercised feature does not create user value.",

@@ -87,19 +87,22 @@ public struct AgentUtilityRequest: Sendable, Equatable {
     public let target: AgentTarget
     public let developerInstructions: String
     public let outputSchema: JSONValue
+    public let allowsWebResearch: Bool
 
     public init(
         cwd: String,
         prompt: String,
         target: AgentTarget,
         developerInstructions: String,
-        outputSchema: JSONValue
+        outputSchema: JSONValue,
+        allowsWebResearch: Bool = false
     ) {
         self.cwd = cwd
         self.prompt = prompt
         self.target = target
         self.developerInstructions = developerInstructions
         self.outputSchema = outputSchema
+        self.allowsWebResearch = allowsWebResearch
     }
 }
 
@@ -245,6 +248,7 @@ public enum AgentProviderError: LocalizedError, Sendable {
 public protocol AgentProviding: Actor {
     nonisolated var id: AgentProviderID { get }
     nonisolated var displayName: String { get }
+    nonisolated var supportsLiveWebResearch: Bool { get }
 
     func prepareSession(_ request: AgentSessionRequest) async throws -> AgentSession
     func startRun(_ request: AgentRunRequest) async throws -> AgentRunHandle
@@ -276,6 +280,7 @@ public protocol AgentProviding: Actor {
 
 public extension AgentProviding {
     nonisolated var displayName: String { id.rawValue.capitalized }
+    nonisolated var supportsLiveWebResearch: Bool { false }
 
     func releaseSession(id: String) async -> Bool { false }
 
@@ -357,6 +362,10 @@ public actor AgentProviderRegistry {
         let admittedProvider = try admitLaunch(for: providerID)
         defer { finishLaunchAdmission(for: providerID) }
         return try await admittedProvider.runUtility(request)
+    }
+
+    public func supportsLiveWebResearch(for providerID: AgentProviderID) throws -> Bool {
+        try provider(providerID).supportsLiveWebResearch
     }
 
     /// Atomically rejects new work for one provider. Settings replacement then

@@ -124,6 +124,21 @@ struct WorkOverviewMetricsTests {
             sourceRunID: run.id,
             baseRevision: 1,
             status: .completed,
+            focusGroup: LiveTeamFocusGroupReport(
+                subject: "Integrated demonstration",
+                question: "Would the intended audience choose it?",
+                audience: "Intended users",
+                comparison: "Closest alternative",
+                comparisonReason: "It serves the same need.",
+                researchBasis: .liveWeb,
+                sources: [],
+                participants: [],
+                findings: [],
+                verdict: "Continue with one sharper interaction.",
+                nextExperiment: "Exercise the sharper interaction.",
+                limitations: "Simulated directional evidence.",
+                tokenUsage: usage(25)
+            ),
             consultations: [LiveTeamManagerConsultation(
                 name: developer.profile.fullName,
                 mandate: developer.assignment,
@@ -159,11 +174,11 @@ struct WorkOverviewMetricsTests {
         )
 
         #expect(metrics.productTokenUsage?.totalTokens == 100)
-        #expect(metrics.controlTokenUsage?.totalTokens == 155)
-        #expect(metrics.totalTokenUsage?.totalTokens == 255)
+        #expect(metrics.controlTokenUsage?.totalTokens == 180)
+        #expect(metrics.totalTokenUsage?.totalTokens == 280)
         #expect(metrics.recordedTokenRunCount == 1)
         #expect(metrics.investmentDecisionCount == 1)
-        #expect(metrics.tokensPerInvestmentDecision == 255)
+        #expect(metrics.tokensPerInvestmentDecision == 280)
     }
 
     @Test

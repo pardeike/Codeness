@@ -93,7 +93,8 @@ struct ClaudeAgentProviderTests {
                         "outcome": .object(["type": .string("string")])
                     ]),
                     "required": .array([.string("outcome")])
-                ])
+                ]),
+                allowsWebResearch: true
             )
         )
         try await Task.sleep(for: .milliseconds(100))
@@ -189,7 +190,9 @@ struct ClaudeAgentProviderTests {
         #expect(utilityArguments.contains("--no-session-persistence"))
         #expect(utilityArguments.contains("--json-schema"))
         #expect(utilityArguments.contains("--tools"))
-        #expect(utilityArguments.contains(""))
+        #expect(utilityArguments.contains("WebSearch,WebFetch"))
+        #expect(!utilityArguments.contains("Read"))
+        #expect(!utilityArguments.contains("Bash"))
         #expect(!utilityArguments.contains("--allow-dangerously-skip-permissions"))
         let utilityPermissionIndex = try #require(
             utilityArguments.firstIndex(of: "--permission-mode")
@@ -519,7 +522,7 @@ struct ClaudeAgentProviderTests {
             developerInstructions: "Continue the workflow."
         ))
 
-        await #expect(throws: (any Error).self) {
+        let launch = Task {
             try await provider.startRun(AgentRunRequest(
                 runID: UUID(),
                 session: session,
@@ -529,7 +532,10 @@ struct ClaudeAgentProviderTests {
             ))
         }
 
-        let process = try #require(try fixture.processRecords().first)
+        let process = try #require(try await waitForProcesses(fixture, count: 1).first)
+        await #expect(throws: (any Error).self) {
+            _ = try await launch.value
+        }
         try await waitForProcessTreeToDisappear(process)
         #expect(await provider.activeRunCount() == 0)
         await provider.shutdown()

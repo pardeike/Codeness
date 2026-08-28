@@ -330,6 +330,8 @@ public struct CompanyPerson: Codable, Equatable, Identifiable, Sendable {
 public struct CompanyProductBet: Codable, Equatable, Sendable {
     public var headline: String
     public var valuePromise: String
+    public var audience: String?
+    public var focusQuestion: String?
     public var showcase: String
     public var integrationTarget: String
     public var killCondition: String
@@ -339,6 +341,8 @@ public struct CompanyProductBet: Codable, Equatable, Sendable {
     public init(
         headline: String,
         valuePromise: String,
+        audience: String? = nil,
+        focusQuestion: String? = nil,
         showcase: String,
         integrationTarget: String,
         killCondition: String,
@@ -347,6 +351,8 @@ public struct CompanyProductBet: Codable, Equatable, Sendable {
     ) {
         self.headline = headline
         self.valuePromise = valuePromise
+        self.audience = audience
+        self.focusQuestion = focusQuestion
         self.showcase = showcase
         self.integrationTarget = integrationTarget
         self.killCondition = killCondition

@@ -11,6 +11,7 @@ struct OverseerReviewDetailView: View {
             VStack(alignment: .leading, spacing: 22) {
                 header
                 reviewReason
+                focusGroup
                 consultation
                 overseerDecision
                 if let definition = review.resultingDefinition {
@@ -63,14 +64,17 @@ struct OverseerReviewDetailView: View {
         ReviewDisclosureSection("Company Check-in", symbol: "person.3.sequence.fill") {
             if review.consultations.isEmpty {
                 HStack(spacing: 10) {
-                    if review.status == .selectingManagers {
+                    if review.status == .selectingManagers
+                        || review.status == .researchingFocusGroup {
                         ProgressView()
                             .controlSize(.small)
                     }
                     Text(
                         review.status == .failed
                             ? "No company check-in was available."
-                            : "The CEO is gathering short reports from the current company."
+                            : review.status == .researchingFocusGroup
+                                ? "The company check-in starts after the focus group reports."
+                                : "The CEO is gathering short reports from the current company."
                     )
                     .foregroundStyle(.secondary)
                 }
@@ -82,6 +86,59 @@ struct OverseerReviewDetailView: View {
                             role: personRoles[manager.id]
                         )
                     }
+                }
+            }
+        }
+    }
+
+    private var focusGroup: some View {
+        ReviewDisclosureSection("Focus Group", symbol: "person.2.wave.2.fill") {
+            if let report = review.focusGroup {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Simulated directional feedback, not real customer validation.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+
+                    detail("Audience", text: report.audience)
+                    detail("Question", text: report.question)
+                    detail(
+                        "A/B comparison",
+                        text: "Current product vs \(report.comparison). \(report.comparisonReason)"
+                    )
+
+                    if let failure = report.failure {
+                        detail("Availability", text: failure)
+                    } else {
+                        ForEach(report.participants.indices, id: \.self) { index in
+                            let participant = report.participants[index]
+                            detail(
+                                "\(participant.archetype) · \(participant.choice.displayName)",
+                                text: participant.reaction
+                            )
+                        }
+                        detail("Verdict", text: report.verdict)
+                        detail("Next product experiment", text: report.nextExperiment)
+                    }
+
+                    if let path = report.documentPath {
+                        Label(path, systemImage: "doc.text")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            } else {
+                HStack(spacing: 10) {
+                    if review.status != .failed {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(
+                        review.status == .failed
+                            ? "No focus-group report was available."
+                            : "Comparing the product with one relevant alternative."
+                    )
+                    .foregroundStyle(.secondary)
                 }
             }
         }
@@ -207,6 +264,7 @@ struct OverseerReviewDetailView: View {
 
     private var statusText: String {
         switch review.status {
+        case .researchingFocusGroup: "Running focus group"
         case .selectingManagers: "Gathering company"
         case .consultingManagers:
             "Hearing \(review.completedConsultationCount) of \(review.consultations.count)"
@@ -218,6 +276,7 @@ struct OverseerReviewDetailView: View {
 
     private var statusSymbol: String {
         switch review.status {
+        case .researchingFocusGroup: "person.2.wave.2.fill"
         case .selectingManagers, .consultingManagers: "person.3.sequence.fill"
         case .overseerDeciding: "eye.fill"
         case .completed: "checkmark.circle.fill"
@@ -227,7 +286,8 @@ struct OverseerReviewDetailView: View {
 
     private var statusColor: Color {
         switch review.status {
-        case .selectingManagers, .consultingManagers, .overseerDeciding: .orange
+        case .researchingFocusGroup, .selectingManagers, .consultingManagers,
+                .overseerDeciding: .orange
         case .completed: .blue
         case .failed: .red
         }
@@ -235,6 +295,8 @@ struct OverseerReviewDetailView: View {
 
     private var decisionPendingText: String {
         switch review.status {
+        case .researchingFocusGroup:
+            "The company check-in starts after the focus group reports."
         case .selectingManagers, .consultingManagers:
             "The CEO will decide after the company check-in."
         case .overseerDeciding:

@@ -47,6 +47,7 @@ struct CodexCleanupRetryPolicy: Sendable {
 
 public actor CodexAgentProvider: AgentProviding {
     public nonisolated let id = AgentProviderID.codex
+    public nonisolated let supportsLiveWebResearch = true
     public static let maximumLoadedThreadBudget = 24
     public static let maximumPersistentWorkflowSessionCount =
         maximumLoadedThreadBudget - 1
@@ -173,6 +174,14 @@ public actor CodexAgentProvider: AgentProviding {
     private static let maximumDeltaItemCount = 2_048
     private static let maximumDeltaItemRetainedBytes = 2 * 1_024 * 1_024
     private static let maximumRetiredExecutionIDCount = 4_096
+    private static let liveWebResearchConfiguration: JSONValue = .object([
+        "web_search": .string("live"),
+        "tools": .object([
+            "web_search": .object([
+                "context_size": .string("medium")
+            ])
+        ])
+    ])
 
     public init(
         appServer: CodexAppServerClient,
@@ -507,7 +516,10 @@ public actor CodexAgentProvider: AgentProviding {
                 // and are never deleted by this path.
                 ephemeral: false,
                 readOnly: true,
-                approvalPolicy: "never"
+                approvalPolicy: "never",
+                configuration: request.allowsWebResearch
+                    ? Self.liveWebResearchConfiguration
+                    : nil
             )
             try requireAvailableProtocolGeneration(admittedRevision: admittedProtocolRevision)
             retainedUtilityThreadIDs.insert(sessionID)

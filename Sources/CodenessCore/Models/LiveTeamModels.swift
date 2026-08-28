@@ -491,6 +491,7 @@ public struct LiveTeamEditRecord: Codable, Equatable, Identifiable, Sendable {
 }
 
 public enum LiveTeamReviewStatus: String, Codable, Equatable, Sendable {
+    case researchingFocusGroup
     case selectingManagers
     case consultingManagers
     case overseerDeciding
@@ -503,6 +504,130 @@ public enum LiveTeamManagerConsultationStatus: String, Codable, Equatable, Senda
     case reporting
     case completed
     case unavailable
+}
+
+public enum LiveTeamFocusGroupResearchBasis: String, Codable, Equatable, Sendable {
+    case liveWeb
+    case generalKnowledge
+
+    public var displayName: String {
+        switch self {
+        case .liveWeb: "Live web comparison"
+        case .generalKnowledge: "General category knowledge"
+        }
+    }
+}
+
+public enum LiveTeamFocusGroupChoice: String, Codable, CaseIterable, Equatable, Sendable {
+    case currentProduct
+    case comparison
+    case neither
+
+    public var displayName: String {
+        switch self {
+        case .currentProduct: "Current product"
+        case .comparison: "Comparison"
+        case .neither: "Neither"
+        }
+    }
+}
+
+public struct LiveTeamFocusGroupSource: Codable, Equatable, Sendable {
+    public let title: String
+    public let url: String
+    public let publishedAt: String?
+    public let relevance: String
+
+    public init(
+        title: String,
+        url: String,
+        publishedAt: String? = nil,
+        relevance: String
+    ) {
+        self.title = title
+        self.url = url
+        self.publishedAt = publishedAt
+        self.relevance = relevance
+    }
+}
+
+public struct LiveTeamFocusGroupParticipant: Codable, Equatable, Sendable {
+    public let archetype: String
+    public let expectation: String
+    public let choice: LiveTeamFocusGroupChoice
+    public let reaction: String
+
+    public init(
+        archetype: String,
+        expectation: String,
+        choice: LiveTeamFocusGroupChoice,
+        reaction: String
+    ) {
+        self.archetype = archetype
+        self.expectation = expectation
+        self.choice = choice
+        self.reaction = reaction
+    }
+}
+
+public struct LiveTeamFocusGroupReport: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let subject: String
+    public let question: String
+    public let audience: String
+    public let comparison: String
+    public let comparisonReason: String
+    public let researchBasis: LiveTeamFocusGroupResearchBasis
+    public let sources: [LiveTeamFocusGroupSource]
+    public let participants: [LiveTeamFocusGroupParticipant]
+    public let findings: [String]
+    public let verdict: String
+    public let nextExperiment: String
+    public var limitations: String
+    public var documentPath: String?
+    public var failure: String?
+    public let tokenUsage: RunTokenUsage?
+    public let completedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        subject: String,
+        question: String,
+        audience: String,
+        comparison: String,
+        comparisonReason: String,
+        researchBasis: LiveTeamFocusGroupResearchBasis,
+        sources: [LiveTeamFocusGroupSource],
+        participants: [LiveTeamFocusGroupParticipant],
+        findings: [String],
+        verdict: String,
+        nextExperiment: String,
+        limitations: String,
+        documentPath: String? = nil,
+        failure: String? = nil,
+        tokenUsage: RunTokenUsage? = nil,
+        completedAt: Date = .now
+    ) {
+        self.id = id
+        self.subject = subject
+        self.question = question
+        self.audience = audience
+        self.comparison = comparison
+        self.comparisonReason = comparisonReason
+        self.researchBasis = researchBasis
+        self.sources = sources
+        self.participants = participants
+        self.findings = findings
+        self.verdict = verdict
+        self.nextExperiment = nextExperiment
+        self.limitations = limitations
+        self.documentPath = documentPath
+        self.failure = failure
+        self.tokenUsage = tokenUsage
+        self.completedAt = completedAt
+    }
+
+    public var isAvailable: Bool { failure == nil }
 }
 
 public struct LiveTeamManagerConsultation: Codable, Equatable, Identifiable, Sendable {
@@ -592,6 +717,7 @@ public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
     public let baseRevision: Int
     public let startedAt: Date
     public var status: LiveTeamReviewStatus
+    public var focusGroup: LiveTeamFocusGroupReport?
     public var consultations: [LiveTeamManagerConsultation]
     public var decision: LiveTeamReviewDecision?
     public var resultingRevision: Int?
@@ -606,7 +732,8 @@ public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
         sourceRunID: UUID?,
         baseRevision: Int,
         startedAt: Date = .now,
-        status: LiveTeamReviewStatus = .selectingManagers,
+        status: LiveTeamReviewStatus = .researchingFocusGroup,
+        focusGroup: LiveTeamFocusGroupReport? = nil,
         consultations: [LiveTeamManagerConsultation] = [],
         decision: LiveTeamReviewDecision? = nil,
         resultingRevision: Int? = nil,
@@ -621,6 +748,7 @@ public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
         self.baseRevision = max(baseRevision, 1)
         self.startedAt = startedAt
         self.status = status
+        self.focusGroup = focusGroup
         self.consultations = consultations
         self.decision = decision
         self.resultingRevision = resultingRevision
@@ -637,6 +765,7 @@ public struct LiveTeamReviewRecord: Codable, Equatable, Identifiable, Sendable {
 }
 
 public enum LiveTeamReviewProgress: Sendable, Equatable {
+    case focusGroupCompleted(LiveTeamFocusGroupReport)
     case personasSelected([LiveTeamManagerConsultation])
     case consultationCompleted(index: Int, consultation: LiveTeamManagerConsultation)
     case overseerDeciding

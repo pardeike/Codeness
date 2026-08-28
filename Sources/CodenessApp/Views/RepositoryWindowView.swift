@@ -743,6 +743,8 @@ private extension LiveTeamReviewRecord {
 
     var sidebarDetail: String {
         switch status {
+        case .researchingFocusGroup:
+            "Focus group · comparing alternatives"
         case .selectingManagers:
             "Gathering company"
         case .consultingManagers:
@@ -804,6 +806,7 @@ private struct OverseerReviewRow: View {
 
     private var symbol: String {
         switch review.status {
+        case .researchingFocusGroup: "person.2.wave.2.fill"
         case .selectingManagers, .consultingManagers: "person.3.sequence.fill"
         case .overseerDeciding: "eye.fill"
         case .completed:
@@ -821,7 +824,8 @@ private struct OverseerReviewRow: View {
 
     private var color: Color {
         switch review.status {
-        case .selectingManagers, .consultingManagers, .overseerDeciding: .orange
+        case .researchingFocusGroup, .selectingManagers, .consultingManagers,
+                .overseerDeciding: .orange
         case .completed: .purple
         case .failed: .red
         }

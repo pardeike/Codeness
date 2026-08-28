@@ -4296,8 +4296,8 @@ public final class RepositoryCoordinator {
         record.activity?.status = .running
         statusMessage = switch request.mode {
         case .bootstrap: "Codeness · Preparing agents…"
-        case .strategicReview: "Codeness · Reviewing strategy…"
-        case .completionReview: "Codeness · Reviewing completion…"
+        case .strategicReview: "Codeness · Running focus group…"
+        case .completionReview: "Codeness · Running focus group…"
         case .migration: "Codeness · Preparing agents…"
         }
         do {
@@ -4438,6 +4438,11 @@ public final class RepositoryCoordinator {
             $0.id == reviewID
         }) else { return }
         switch progress {
+        case .focusGroupCompleted(let report):
+            record.activity?.liveTeam?.reviews[index].focusGroup = report
+            record.activity?.liveTeam?.reviews[index].status = .selectingManagers
+            statusMessage = "Codeness · Gathering company opinions…"
+
         case .personasSelected(let consultations):
             record.activity?.liveTeam?.reviews[index].status = .consultingManagers
             record.activity?.liveTeam?.reviews[index].consultations = consultations
@@ -5205,6 +5210,7 @@ public final class RepositoryCoordinator {
     private func repairInterruptedLiveTeamReviewsIfNeeded() {
         guard let reviews = record.activity?.liveTeam?.reviews else { return }
         for index in reviews.indices where [
+            LiveTeamReviewStatus.researchingFocusGroup,
             LiveTeamReviewStatus.selectingManagers,
             .consultingManagers,
             .overseerDeciding

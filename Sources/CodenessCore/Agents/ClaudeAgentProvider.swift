@@ -25,6 +25,7 @@ public actor ClaudeAgentProvider: AgentProviding {
     }
 
     public nonisolated let id = AgentProviderID.claude
+    public nonisolated let supportsLiveWebResearch = true
     private static let processLogger = Logger(
         subsystem: "ap.codeness",
         category: "ClaudeProcess"
@@ -312,7 +313,8 @@ public actor ClaudeAgentProvider: AgentProviding {
             prompt: request.prompt,
             target: request.target,
             outputSchema: request.outputSchema,
-            utility: true
+            utility: true,
+            utilityAllowsWebResearch: request.allowsWebResearch
         )
         do {
             let result = try await withTaskCancellationHandler {
@@ -428,7 +430,8 @@ public actor ClaudeAgentProvider: AgentProviding {
         prompt: String,
         target: AgentTarget,
         outputSchema: JSONValue?,
-        utility: Bool
+        utility: Bool,
+        utilityAllowsWebResearch: Bool = false
     ) async throws -> AgentRunHandle {
         guard !isShuttingDown else {
             throw AgentProviderError.resourceLimit("Claude is shutting down.")
@@ -481,7 +484,8 @@ public actor ClaudeAgentProvider: AgentProviding {
                     session: session,
                     target: target,
                     outputSchema: outputSchema,
-                    utility: utility
+                    utility: utility,
+                    utilityAllowsWebResearch: utilityAllowsWebResearch
                 ),
                 environment: environment,
                 currentDirectoryURL: URL(fileURLWithPath: cwd, isDirectory: true)
@@ -621,7 +625,8 @@ public actor ClaudeAgentProvider: AgentProviding {
         session: SessionConfiguration,
         target: AgentTarget,
         outputSchema: JSONValue?,
-        utility: Bool
+        utility: Bool,
+        utilityAllowsWebResearch: Bool
     ) -> [String] {
         let permissionMode: String
         if utility {
@@ -656,7 +661,11 @@ public actor ClaudeAgentProvider: AgentProviding {
             result.append("--session-id=\(sessionID)")
         }
         if utility {
-            result += ["--tools", "", "--no-session-persistence"]
+            result += [
+                "--tools",
+                utilityAllowsWebResearch ? "WebSearch,WebFetch" : "",
+                "--no-session-persistence"
+            ]
         } else {
             // Keep Claude in Plan mode when requested while making bypass
             // available so no Codeness run pauses for tool approval.

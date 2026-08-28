@@ -397,7 +397,8 @@ public actor CodexAppServerClient {
         developerInstructions: String,
         ephemeral: Bool = false,
         readOnly: Bool = false,
-        approvalPolicy: String? = nil
+        approvalPolicy: String? = nil,
+        configuration: JSONValue? = nil
     ) async throws -> String {
         var params: [String: JSONValue] = [
             "cwd": .string(cwd),
@@ -411,6 +412,9 @@ public actor CodexAppServerClient {
         }
         if let approvalPolicy {
             params["approvalPolicy"] = .string(approvalPolicy)
+        }
+        if let configuration {
+            params["config"] = configuration
         }
         let response = try await sendRequest(
             method: "thread/start",

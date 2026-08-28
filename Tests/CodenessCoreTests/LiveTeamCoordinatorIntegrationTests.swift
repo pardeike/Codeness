@@ -315,6 +315,7 @@ struct LiveTeamCoordinatorIntegrationTests {
         let reviewRecords = try #require(activity.liveTeam?.reviews)
         #expect(reviewRecords.count == 2)
         #expect(reviewRecords.allSatisfy { $0.status == .completed })
+        #expect(reviewRecords.allSatisfy { $0.focusGroup?.participants.count == 4 })
         #expect(reviewRecords.allSatisfy { $0.consultations.count == 2 })
         #expect(reviewRecords.allSatisfy {
             $0.consultations.allSatisfy { $0.status == .completed }
@@ -1730,6 +1731,27 @@ private actor RecordingLiveTeamOverseer: LiveTeamOverseerRouting {
     private func reportFixtureConsultation(
         _ progress: LiveTeamReviewProgressHandler
     ) async {
+        await progress(.focusGroupCompleted(LiveTeamFocusGroupReport(
+            subject: "A bounded product demonstration",
+            question: "Would the intended audience choose it?",
+            audience: "Intended users",
+            comparison: "A close alternative",
+            comparisonReason: "It serves the same user need.",
+            researchBasis: .generalKnowledge,
+            sources: [],
+            participants: (1...4).map { index in
+                LiveTeamFocusGroupParticipant(
+                    archetype: "Participant \(index)",
+                    expectation: "Immediate product value.",
+                    choice: index.isMultiple(of: 2) ? .comparison : .currentProduct,
+                    reaction: "The bounded result supports a concrete choice."
+                )
+            },
+            findings: ["The product creates directional value."],
+            verdict: "Continue the stronger product direction.",
+            nextExperiment: "Exercise one sharper product interaction.",
+            limitations: "Fixture simulation."
+        )))
         let managers = [
             LiveTeamManagerConsultation(
                 name: "Product Director",

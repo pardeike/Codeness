@@ -151,6 +151,12 @@ struct WorkOverviewView: View {
                                 .font(.headline)
                             Text(bet.valuePromise)
                                 .fixedSize(horizontal: false, vertical: true)
+                            if let audience = bet.audience {
+                                Text("For: \(audience)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             Text("Showcase: \(bet.showcase)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -796,6 +802,9 @@ struct WorkOverviewMetrics: Equatable {
         controlValues += peopleByID.values.compactMap(\.generationTokenUsage)
         controlValues += activity.runs.compactMap(\.coordinatorDecision?.tokenUsage)
         controlValues += (activity.liveTeam?.reviews ?? []).compactMap(\.controlTokenUsage)
+        controlValues += (activity.liveTeam?.reviews ?? []).compactMap {
+            $0.focusGroup?.tokenUsage
+        }
         controlValues += (activity.liveTeam?.reviews ?? []).flatMap(\.consultations)
             .compactMap(\.tokenUsage)
         controlTokenUsage = controlValues.isEmpty

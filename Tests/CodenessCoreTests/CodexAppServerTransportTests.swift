@@ -115,7 +115,15 @@ struct CodexAppServerTransportTests {
             developerInstructions: "Plan only.",
             ephemeral: true,
             readOnly: true,
-            approvalPolicy: "never"
+            approvalPolicy: "never",
+            configuration: .object([
+                "web_search": .string("live"),
+                "tools": .object([
+                    "web_search": .object([
+                        "context_size": .string("medium")
+                    ])
+                ])
+            ])
         )
         try await client.resumeThread(
             id: threadID,
@@ -368,6 +376,10 @@ for line in sys.stdin:
         assert params["ephemeral"] is True
         assert params["sandbox"] == "read-only"
         assert params["approvalPolicy"] == "never"
+        assert params["config"] == {
+            "web_search": "live",
+            "tools": {"web_search": {"context_size": "medium"}}
+        }
         emit({"id": identifier, "result": {"thread": {"id": "thread-plan"}}})
     elif method == "thread/resume":
         params = message["params"]
