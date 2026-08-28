@@ -81,6 +81,8 @@ Schedules are:
 
 A completed Once agent becomes eligible again only if its own responsibility or the working goal changes. Unrelated agent changes do not replay it.
 
+Agents perform their saved responsibility directly. They do not delegate it to sub-agents or launch additional agents unless that responsibility explicitly requires delegation; the Overseer's saved setup owns the division of work.
+
 ## Normal operation
 
 After each agent turn, Codeness saves the result before asking for the next handoff. The local-routing decision is then saved before Codeness starts another turn. These are separate durability barriers.

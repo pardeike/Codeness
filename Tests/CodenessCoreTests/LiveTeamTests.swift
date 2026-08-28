@@ -260,6 +260,8 @@ struct LiveTeamModelTests {
         #expect(prompt.contains("Implement the current accepted unit."))
         #expect(prompt.contains("Start with the parser."))
         #expect(prompt.contains("Explicitly disclose any network or external-service use"))
+        #expect(prompt.contains("Do not delegate it to sub-agents"))
+        #expect(prompt.contains("Codeness has already assigned the other responsibilities"))
         #expect(!prompt.contains("Board-only secret constraint"))
     }
 
@@ -267,6 +269,8 @@ struct LiveTeamModelTests {
     func sessionInstructionsRemainValidWhenMembersShareOneConversation() {
         let instructions = LiveTeamPromptBuilder.sessionInstructions()
         #expect(instructions.contains("Each turn supplies your current name"))
+        #expect(instructions.contains("do not delegate it to sub-agents"))
+        #expect(instructions.contains("unless the assignment explicitly requires delegation"))
         #expect(!instructions.contains("Implement member"))
         #expect(!instructions.contains("Review member"))
     }
