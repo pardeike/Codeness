@@ -43,6 +43,7 @@ struct ActivityConfigurationView: View {
                 .padding(32)
                 .frame(maxWidth: .infinity)
             }
+            .modifier(RepositoryDetailTopEdgeSuppression())
 
             Divider()
             HStack {

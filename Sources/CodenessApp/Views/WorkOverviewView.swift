@@ -56,6 +56,7 @@ struct WorkOverviewView: View {
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .top)
         }
+        .modifier(RepositoryDetailTopEdgeSuppression())
     }
 
     private var workSummary: some View {

@@ -21,6 +21,7 @@ struct OverseerReviewDetailView: View {
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .top)
         }
+        .modifier(RepositoryDetailTopEdgeSuppression())
         .navigationTitle(review.mode.displayName)
     }
 

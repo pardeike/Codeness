@@ -39,6 +39,7 @@ struct RunDetailView: View {
                 .frame(maxHeight: 180)
             }
         }
+        .modifier(RepositoryDetailTopEdgeSuppression())
     }
 
     private var recoveryPresentation: RunRecoveryPresentation? {
