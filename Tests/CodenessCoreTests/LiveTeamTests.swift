@@ -1046,6 +1046,59 @@ struct AgentLiveTeamRouterTests {
     }
 
     @Test
+    func bootstrapRetriesAProfessionCapabilityMismatchWithCorrectionFeedback() async throws {
+        let invalid = Self.validResearchBootstrap.replacingOccurrences(
+            of: "[\"workspaceRead\", \"webResearch\"]",
+            with: "[\"workspaceRead\", \"sourceModification\"]"
+        )
+        let provider = LiveTeamUtilityProvider(outputs: [
+            invalid,
+            Self.validResearchBootstrap
+        ], personaNames: ["Rhea Calder", "Noor Akande"])
+        let registry = AgentProviderRegistry(providers: [provider])
+        let router = AgentLiveTeamRouter(providers: registry)
+        let target = testTarget()
+        let definition = try await router.bootstrap(
+            LiveTeamOverseerContext(
+                userGoal: "Research a museum experience without changing source code.",
+                currentDefinition: nil,
+                coordinatorHandoff: nil,
+                recentEvidence: [],
+                editHistory: [],
+                targetOptions: [
+                    LiveTeamTargetOption(id: "primary", label: "Primary", target: target)
+                ],
+                triggerReason: "Bootstrap"
+            ),
+            configuration: LiveTeamOverseerConfiguration(
+                target: target,
+                instructions: "Keep profession boundaries exact."
+            ),
+            defaultCoordinator: LiveTeamCoordinatorConfiguration(
+                target: target,
+                instructions: "Route accepted contributions."
+            ),
+            cwd: "/tmp/live-team-bootstrap-retry"
+        )
+
+        #expect(definition.members.first?.positionID == .researcher)
+        #expect(
+            definition.members.first?.companyAssignment?.requiredCapabilities
+                == [.workspaceRead, .webResearch]
+        )
+        let requests = await provider.requests().filter {
+            $0.outputSchema == AgentLiveTeamRouter.companyDefinitionSchema(
+                targetOptions: [
+                    LiveTeamTargetOption(id: "primary", label: "Primary", target: target)
+                ]
+            )
+        }
+        #expect(requests.count == 2)
+        #expect(requests[1].prompt.contains("CORRECTION RETRY"))
+        #expect(requests[1].prompt.contains("cannot use required capabilities"))
+    }
+
+    @Test
     func strategicReviewRetriesOneInvalidResponseWithCorrectionFeedback() async throws {
         let provider = LiveTeamUtilityProvider(outputs: [
             Self.invalidStrategicRevision,
@@ -1622,6 +1675,42 @@ struct AgentLiveTeamRouterTests {
       ],
       "overseerTargetID": "primary",
       "preferredNextMemberID": "deliver"
+    }
+    """
+
+    private static let validResearchBootstrap = """
+    {
+      "workingGoal": "Research the audience need before product direction.",
+      "strategicReason": "A researcher can resolve the first uncertainty without source changes.",
+      "productBet": {
+        "headline": "Ground the corridor concept",
+        "valuePromise": "Museum visitors receive a concept based on audience evidence.",
+        "audience": "Museum corridor visitors",
+        "focusQuestion": "Would visitors choose this corridor experience over a passive display?",
+        "showcase": "A decision-ready research finding",
+        "integrationTarget": "The supplied concept brief",
+        "killCondition": "Stop if the evidence contradicts the proposed audience need.",
+        "fundingUnits": 3,
+        "maximumTurns": 6
+      },
+      "members": [
+        {
+          "id": "research",
+          "name": "Ground Visitor Need",
+          "instructions": "Research the audience need and deliver sourced findings.",
+          "targetID": "primary",
+          "runPolicy": "once",
+          "sessionPolicy": "ownMemory",
+          "sharedGroupID": null,
+          "positionID": "researcher",
+          "contributionKind": "researchFinding",
+          "requiredCapabilities": ["workspaceRead", "webResearch"],
+          "acceptanceEvidence": "Sources and findings answer the decision question.",
+          "dependencyContributionKinds": [],
+          "stopCondition": "Stop when the finding is decision-ready or capability-blocked."
+        }
+      ],
+      "overseerTargetID": "primary"
     }
     """
 

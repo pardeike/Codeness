@@ -311,14 +311,41 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             )
         )
         let result = try await providers.runUtility(request)
-        let definition = try Self.decodeCompanyDefinition(
-            result.output,
-            revision: 1,
-            targetOptions: context.targetOptions,
-            defaultCoordinator: defaultCoordinator,
-            chiefExecutive: chiefExecutive,
-            setupTokenUsage: result.tokenUsage
-        )
+        let definition: LiveTeamDefinition
+        do {
+            definition = try Self.decodeCompanyDefinition(
+                result.output,
+                revision: 1,
+                targetOptions: context.targetOptions,
+                defaultCoordinator: defaultCoordinator,
+                chiefExecutive: chiefExecutive,
+                setupTokenUsage: result.tokenUsage
+            )
+        } catch let error as AgentProviderError {
+            guard case .invalidResponse = error else { throw error }
+            let retryRequest = AgentUtilityRequest(
+                cwd: request.cwd,
+                prompt: """
+                \(request.prompt)
+
+                CORRECTION RETRY
+                The previous company setup was rejected: \(error.localizedDescription)
+                Return one complete corrected setup. Re-check every required capability and contribution against that position's exact profession contract, then re-check that every dependency is supplied by an earlier assignment. Use only offered target and position IDs.
+                """,
+                target: request.target,
+                developerInstructions: request.developerInstructions,
+                outputSchema: request.outputSchema
+            )
+            let retryResult = try await providers.runUtility(retryRequest)
+            definition = try Self.decodeCompanyDefinition(
+                retryResult.output,
+                revision: 1,
+                targetOptions: context.targetOptions,
+                defaultCoordinator: defaultCoordinator,
+                chiefExecutive: chiefExecutive,
+                setupTokenUsage: Self.adding(result.tokenUsage, retryResult.tokenUsage)
+            )
+        }
         return try await staffedDefinition(
             definition,
             retaining: nil,
