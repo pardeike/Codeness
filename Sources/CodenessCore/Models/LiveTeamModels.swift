@@ -5,7 +5,7 @@ public enum LiveTeamRunPolicy: String, Codable, CaseIterable, Sendable {
     case everyCycle
 
     public var displayName: String {
-        switch self {
+        return switch self {
         case .once: "Once"
         case .everyCycle: "Every round"
         }
@@ -71,11 +71,21 @@ public enum LiveTeamSessionPolicy: Codable, Equatable, Sendable {
     }
 
     public func persistentSlotID(memberID: String) -> String? {
-        switch self {
+        persistentSlotID(memberID: memberID, positionID: nil)
+    }
+
+    public func persistentSlotID(
+        memberID: String,
+        positionID: CompanyPositionID?
+    ) -> String? {
+        let policySuffix = positionID.map {
+            ":policy:\(CompanyToolPolicy(positionID: $0).id)"
+        } ?? ""
+        return switch self {
         case .ownMemory:
-            "member:\(memberID)"
+            "member:\(memberID)\(policySuffix)"
         case .sharedMemory(let groupID):
-            "shared:\(groupID)"
+            "shared:\(groupID)\(policySuffix)"
         case .freshEveryRun:
             nil
         }

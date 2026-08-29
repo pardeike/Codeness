@@ -102,6 +102,66 @@ public struct CompanyPositionPractice: Equatable, Sendable {
     }
 }
 
+public struct CompanyToolPolicy: Equatable, Sendable {
+    public let positionID: CompanyPositionID
+    public let allowedCapabilities: Set<CompanyCapability>
+
+    public init(positionID: CompanyPositionID) {
+        self.positionID = positionID
+        allowedCapabilities = CompanyPositionPracticeCatalog.practice(positionID)
+            .allowedCapabilities
+    }
+
+    public var id: String {
+        let capabilities = allowedCapabilities.map(\.rawValue).sorted()
+            .joined(separator: "+")
+        return "\(positionID.rawValue):\(capabilities)"
+    }
+
+    public var permitsSourceMutation: Bool {
+        allowedCapabilities.contains(.sourceModification)
+    }
+
+    public var permitsWebResearch: Bool {
+        allowedCapabilities.contains(.webResearch)
+    }
+
+    public var requiresReadOnlySandbox: Bool {
+        !permitsSourceMutation
+    }
+
+    public var claudeToolNames: [String] {
+        var tools: [String] = []
+        if allowedCapabilities.contains(.workspaceRead) {
+            tools += ["Read", "Glob", "Grep"]
+        }
+        if allowedCapabilities.contains(.webResearch) {
+            tools += ["WebSearch", "WebFetch"]
+        }
+        if allowedCapabilities.contains(.commandExecution) {
+            tools.append("Bash")
+        }
+        if allowedCapabilities.contains(.sourceModification) {
+            tools += ["Edit", "Write"]
+        }
+        return tools
+    }
+
+    public var openAICompatibleToolNames: Set<String> {
+        var tools: Set<String> = []
+        if allowedCapabilities.contains(.workspaceRead) {
+            tools.formUnion(["read", "glob", "grep"])
+        }
+        if allowedCapabilities.contains(.commandExecution) {
+            tools.insert("bash")
+        }
+        if allowedCapabilities.contains(.sourceModification) {
+            tools.formUnion(["edit", "write"])
+        }
+        return tools
+    }
+}
+
 public enum CompanyPositionPracticeCatalog {
     private static let readWrite: Set<CompanyCapability> = [.workspaceRead, .authoredArtifactWrite]
     private static let research: Set<CompanyCapability> = [.workspaceRead, .webResearch, .authoredArtifactWrite]

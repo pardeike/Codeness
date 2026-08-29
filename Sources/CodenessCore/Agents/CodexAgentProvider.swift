@@ -258,8 +258,12 @@ public actor CodexAgentProvider: AgentProviding {
             cwd: request.cwd,
             model: request.target.model,
             developerInstructions: request.developerInstructions,
-            readOnly: request.target.options.mode == .plan,
-            approvalPolicy: "never"
+            readOnly: request.target.options.mode == .plan
+                || request.companyToolPolicy?.requiresReadOnlySandbox == true,
+            approvalPolicy: "never",
+            configuration: request.companyToolPolicy.map(
+                Self.companyThreadConfiguration
+            )
         )
         try requireAvailableProtocolGeneration(admittedRevision: admittedProtocolRevision)
         if Task.isCancelled {
@@ -2115,6 +2119,19 @@ public actor CodexAgentProvider: AgentProviding {
             ])
         }
         return .object(configuration)
+    }
+
+    nonisolated static func companyThreadConfiguration(
+        _ policy: CompanyToolPolicy
+    ) -> JSONValue {
+        .object([
+            "features": .object([
+                "apps": .bool(false),
+                "multi_agent": .bool(false),
+                "plugins": .bool(false)
+            ]),
+            "web_search": .string(policy.permitsWebResearch ? "live" : "disabled")
+        ])
     }
 
     private nonisolated static func interaction(

@@ -18,19 +18,22 @@ public struct AgentSessionRequest: Sendable, Equatable {
     public let cwd: String
     public let target: AgentTarget
     public let developerInstructions: String
+    public let companyToolPolicy: CompanyToolPolicy?
 
     public init(
         existingSessionID: String?,
         name: String,
         cwd: String,
         target: AgentTarget,
-        developerInstructions: String
+        developerInstructions: String,
+        companyToolPolicy: CompanyToolPolicy? = nil
     ) {
         self.existingSessionID = existingSessionID
         self.name = name
         self.cwd = cwd
         self.target = target
         self.developerInstructions = developerInstructions
+        self.companyToolPolicy = companyToolPolicy
     }
 }
 
@@ -350,7 +353,8 @@ public actor AgentProviderRegistry {
             target: request.target,
             developerInstructions: AgentCommunicationStyle.applying(
                 to: request.developerInstructions
-            )
+            ),
+            companyToolPolicy: request.companyToolPolicy
         ))
     }
 

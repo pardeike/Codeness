@@ -2319,7 +2319,10 @@ public final class RepositoryCoordinator {
                       !Self.requiresNewLineage(from: oldStep.target, to: member.target),
                       var oldSession = authoritativeLegacyActivity.stepSessions[member.id]
                 else { continue }
-                let slotID = member.sessionPolicy.persistentSlotID(memberID: member.id)!
+                let slotID = member.sessionPolicy.persistentSlotID(
+                    memberID: member.id,
+                    positionID: member.positionID
+                )!
                 oldSession.target = member.target
                 migratedSessions[slotID] = WorkflowSessionState(
                     stepID: slotID,
@@ -3430,7 +3433,10 @@ public final class RepositoryCoordinator {
                 return
             }
             let runID = UUID()
-            let slotID = member.sessionPolicy.persistentSlotID(memberID: member.id)
+            let slotID = member.sessionPolicy.persistentSlotID(
+                memberID: member.id,
+                positionID: member.positionID
+            )
                 ?? "fresh:\(member.id):\(runID.uuidString)"
             snapshot = LiveTeamMemberSnapshot(
                 member: member,
@@ -3735,7 +3741,8 @@ public final class RepositoryCoordinator {
             name: "\(repositoryName) — \(snapshot.member.name)",
             cwd: record.canonicalPath,
             target: snapshot.member.target,
-            developerInstructions: LiveTeamPromptBuilder.sessionInstructions()
+            developerInstructions: LiveTeamPromptBuilder.sessionInstructions(),
+            companyToolPolicy: snapshot.member.positionID.map(CompanyToolPolicy.init)
         )
     }
 
@@ -4010,7 +4017,8 @@ public final class RepositoryCoordinator {
                     revision: definition.revision,
                     cycle: snapshot.cycle,
                     sessionSlotID: currentMember.sessionPolicy.persistentSlotID(
-                        memberID: currentMember.id
+                        memberID: currentMember.id,
+                        positionID: currentMember.positionID
                     ) ?? "fresh:\(currentMember.id):retry",
                     productBet: definition.productBet
                 ),
@@ -5066,12 +5074,18 @@ public final class RepositoryCoordinator {
         supersededSessions: Set<ProviderSessionReference>
     ) {
         let oldMembersBySlot = Dictionary(grouping: oldDefinition.members.compactMap { member in
-            member.sessionPolicy.persistentSlotID(memberID: member.id).map {
+            member.sessionPolicy.persistentSlotID(
+                memberID: member.id,
+                positionID: member.positionID
+            ).map {
                 ($0, member)
             }
         }, by: \.0)
         let newMembersBySlot = Dictionary(grouping: newDefinition.members.compactMap { member in
-            member.sessionPolicy.persistentSlotID(memberID: member.id).map {
+            member.sessionPolicy.persistentSlotID(
+                memberID: member.id,
+                positionID: member.positionID
+            ).map {
                 ($0, member)
             }
         }, by: \.0)

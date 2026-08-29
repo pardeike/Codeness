@@ -130,7 +130,8 @@ struct OpenAICompatibleAgentProviderTests {
                 name: "Fixture",
                 cwd: FileManager.default.currentDirectoryPath,
                 target: target,
-                developerInstructions: "Be concise."
+                developerInstructions: "Be concise.",
+                companyToolPolicy: CompanyToolPolicy(positionID: .researcher)
             )
         )
 
@@ -150,7 +151,8 @@ struct OpenAICompatibleAgentProviderTests {
                 name: "Fixture",
                 cwd: FileManager.default.currentDirectoryPath,
                 target: target,
-                developerInstructions: "Be concise."
+                developerInstructions: "Be concise.",
+                companyToolPolicy: CompanyToolPolicy(positionID: .researcher)
             )
         )
         let second = try await provider.startRun(
@@ -201,9 +203,14 @@ struct OpenAICompatibleAgentProviderTests {
             $0["role"]?.stringValue == "user"
                 && $0["content"]?.stringValue == "First prompt"
         } == true)
-        #expect(body["tools"]?.arrayValue?.contains {
-            $0["function"]?["name"]?.stringValue == "write"
-        } == true)
+        let systemContent = body["messages"]?.arrayValue?.first?[
+            "content"
+        ]?.stringValue ?? ""
+        #expect(systemContent.contains("profession tool boundary"))
+        #expect(!systemContent.contains("inspect, edit, build, and test"))
+        #expect(body["tools"]?.arrayValue?.compactMap {
+            $0["function"]?["name"]?.stringValue
+        } == ["read", "glob", "grep"])
         let secondBody = try #require(requests[1].httpBody)
         let resumedBody = try JSONDecoder().decode(JSONValue.self, from: secondBody)
         #expect(resumedBody["messages"]?.arrayValue?.contains {

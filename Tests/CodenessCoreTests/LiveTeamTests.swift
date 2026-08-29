@@ -50,6 +50,31 @@ struct LiveTeamModelTests {
     }
 
     @Test
+    func persistentSessionsAreSeparatedByProfessionToolPolicy() {
+        let policy = LiveTeamSessionPolicy.sharedMemory(groupID: "creative")
+        let artSlot = policy.persistentSlotID(
+            memberID: "art",
+            positionID: .artDirector
+        )
+        let developerSlot = policy.persistentSlotID(
+            memberID: "developer",
+            positionID: .developer
+        )
+
+        #expect(artSlot != developerSlot)
+        #expect(artSlot?.contains("visualAssetProduction") == true)
+        #expect(developerSlot?.contains("sourceModification") == true)
+
+        let researchConfiguration = CodexAgentProvider.companyThreadConfiguration(
+            CompanyToolPolicy(positionID: .researcher)
+        )
+        #expect(researchConfiguration["web_search"]?.stringValue == "live")
+        #expect(researchConfiguration["features"]?["plugins"]?.boolValue == false)
+        #expect(CompanyToolPolicy(positionID: .researcher).requiresReadOnlySandbox)
+        #expect(!CompanyToolPolicy(positionID: .developer).requiresReadOnlySandbox)
+    }
+
+    @Test
     func personaRequirementsRejectIndifferenceAndKeepRandomIngredientsReproducible() {
         var firstGenerator = SeededTestGenerator(seed: 42)
         var secondGenerator = SeededTestGenerator(seed: 42)
@@ -628,8 +653,8 @@ struct LiveTeamModelTests {
         #expect(prompt.contains("Explicitly disclose any network or external-service use"))
         #expect(prompt.contains("Do not delegate it to sub-agents"))
         #expect(prompt.contains("Codeness has already assigned the other responsibilities"))
-        #expect(prompt.contains("at most 180 words"))
-        #expect(prompt.contains("academic analysis, formal report"))
+        #expect(prompt.contains("profession-specific contribution"))
+        #expect(prompt.contains("stop at that boundary and return a capability block"))
         #expect(prompt.contains("personal or global agent memory"))
         #expect(prompt.contains("previous Codeness runs"))
         #expect(!prompt.contains("Board-only secret constraint"))
@@ -673,6 +698,8 @@ struct LiveTeamModelTests {
         #expect(prompt.contains("sourceModification"))
         #expect(!prompt.contains("Improve the repository's actual product"))
         #expect(!prompt.contains("prove the best one through the repository"))
+        #expect(!prompt.contains("Report concrete product changes"))
+        #expect(!prompt.contains("Product work may be large"))
     }
 
 }

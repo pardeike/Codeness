@@ -39,7 +39,8 @@ struct ClaudeAgentProviderTests {
                 name: "Fixture — Review",
                 cwd: fixture.directory.path,
                 target: target,
-                developerInstructions: "Review the repository carefully."
+                developerInstructions: "Review the repository carefully.",
+                companyToolPolicy: CompanyToolPolicy(positionID: .researcher)
             )
         )
         let firstEvents = try await run(
@@ -63,7 +64,8 @@ struct ClaudeAgentProviderTests {
                 name: "Fixture — Review",
                 cwd: fixture.directory.path,
                 target: standardTarget,
-                developerInstructions: "Review the repository carefully."
+                developerInstructions: "Review the repository carefully.",
+                companyToolPolicy: CompanyToolPolicy(positionID: .researcher)
             )
         )
         let resumedEvents = try await run(
@@ -180,6 +182,10 @@ struct ClaudeAgentProviderTests {
         #expect(firstArguments.contains("--allow-dangerously-skip-permissions"))
         #expect(firstArguments.contains("--permission-prompt-tool"))
         #expect(firstArguments.contains("stdio"))
+        let professionToolsIndex = try #require(firstArguments.firstIndex(of: "--tools"))
+        #expect(firstArguments[professionToolsIndex + 1] == "Read,Glob,Grep,WebSearch,WebFetch")
+        #expect(!firstArguments.contains("Bash"))
+        #expect(!firstArguments.contains("Edit"))
         #expect(firstArguments.contains { $0.hasPrefix("--session-id=") })
         #expect(secondArguments.contains { $0 == "--resume=\(firstSession.id)" })
         let standardPermissionIndex = try #require(

@@ -12,6 +12,7 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
     private struct SessionConfiguration {
         let id: String
         var messages: [JSONValue]
+        var companyToolPolicy: CompanyToolPolicy?
     }
 
     private struct ActiveRun {
@@ -113,13 +114,15 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
             let systemMessage = Self.systemMessage(
                 instructions: request.developerInstructions,
                 outputSchema: nil,
-                mode: request.target.options.mode
+                mode: request.target.options.mode,
+                companyToolPolicy: request.companyToolPolicy
             )
             if existing.messages.isEmpty {
                 existing.messages = [systemMessage]
             } else {
                 existing.messages[0] = systemMessage
             }
+            existing.companyToolPolicy = request.companyToolPolicy
             sessions[sessionID] = existing
         } else {
             sessions[sessionID] = SessionConfiguration(
@@ -128,9 +131,11 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
                     Self.systemMessage(
                         instructions: request.developerInstructions,
                         outputSchema: nil,
-                        mode: request.target.options.mode
+                        mode: request.target.options.mode,
+                        companyToolPolicy: request.companyToolPolicy
                     )
-                ]
+                ],
+                companyToolPolicy: request.companyToolPolicy
             )
         }
         return AgentSession(providerID: id, id: sessionID, target: request.target)
@@ -349,7 +354,8 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
                     messages: session.messages,
                     target: run.target,
                     mode: run.target.options.mode,
-                    outputSchema: run.outputSchema
+                    outputSchema: run.outputSchema,
+                    companyToolPolicy: session.companyToolPolicy
                 )
                 try Task.checkCancellation()
 
@@ -485,7 +491,8 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
         messages: [JSONValue],
         target: AgentTarget,
         mode: AgentMode,
-        outputSchema: JSONValue?
+        outputSchema: JSONValue?,
+        companyToolPolicy: CompanyToolPolicy?
     ) async throws -> CompletionResponse {
         let key = try await loadAPIKey()
         guard let endpoint = configuration.endpointURL else {
@@ -494,7 +501,7 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
                 detail: "The endpoint is invalid."
             )
         }
-        let tools = Self.tools(for: mode)
+        let tools = Self.tools(for: mode, companyToolPolicy: companyToolPolicy)
         var body: [String: JSONValue] = [
             "model": .string(target.model),
             "messages": .array(messages),
@@ -1120,11 +1127,16 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
     private static func systemMessage(
         instructions: String,
         outputSchema: JSONValue?,
-        mode: AgentMode
+        mode: AgentMode,
+        companyToolPolicy: CompanyToolPolicy? = nil
     ) -> JSONValue {
         var content = instructions
         content += "\n\nYou are working in the selected Codeness workspace."
-        if mode == .plan {
+        if let companyToolPolicy {
+            let tools = companyToolPolicy.openAICompatibleToolNames.sorted()
+                .joined(separator: ", ")
+            content += " The profession tool boundary is enforced. Available tools: \(tools.isEmpty ? "none" : tools). Do not claim or attempt unavailable effects. Report a capability block when the assignment needs one."
+        } else if mode == .plan {
             content += " Plan mode is read-only: inspect and explain; do not change files or run mutating commands."
         } else {
             content += " Use the provided OpenCode-style tools to inspect, edit, build, and test as needed. Tool paths and shell commands are not sandboxed; the selected workspace is only the initial working directory."
@@ -1154,7 +1166,10 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
         return result
     }
 
-    private static func tools(for mode: AgentMode) -> [JSONValue] {
+    private static func tools(
+        for mode: AgentMode,
+        companyToolPolicy: CompanyToolPolicy? = nil
+    ) -> [JSONValue] {
         let readOnlyTools = [
             tool(
                 name: "read",
@@ -1219,8 +1234,7 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
                 ])
             )
         ]
-        guard mode == .standard else { return readOnlyTools }
-        return [
+        let standardTools = [
             tool(
                 name: "bash",
                 description: "Execute a non-interactive shell command. Use this for builds, tests, Git, linters, package managers, and project scripts. The current working directory starts at the selected workspace and is not sandboxed.",
@@ -1278,6 +1292,13 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
                 ])
             )
         ]
+        let available = mode == .standard ? standardTools : readOnlyTools
+        guard let companyToolPolicy else { return available }
+        let allowed = companyToolPolicy.openAICompatibleToolNames
+        return available.filter {
+            guard let name = $0["function"]?["name"]?.stringValue else { return false }
+            return allowed.contains(name)
+        }
     }
 
     private static func tool(

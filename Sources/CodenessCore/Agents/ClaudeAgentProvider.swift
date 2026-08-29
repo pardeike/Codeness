@@ -36,6 +36,7 @@ public actor ClaudeAgentProvider: AgentProviding {
         let name: String
         let cwd: String
         let developerInstructions: String
+        let companyToolPolicy: CompanyToolPolicy?
         var hasStarted: Bool
     }
 
@@ -162,6 +163,7 @@ public actor ClaudeAgentProvider: AgentProviding {
             name: request.name,
             cwd: request.cwd,
             developerInstructions: request.developerInstructions,
+            companyToolPolicy: request.companyToolPolicy,
             hasStarted: request.existingSessionID != nil
         )
         return AgentSession(providerID: id, id: sessionID, target: request.target)
@@ -303,6 +305,7 @@ public actor ClaudeAgentProvider: AgentProviding {
             name: "Codeness coordinator",
             cwd: request.cwd,
             developerInstructions: request.developerInstructions,
+            companyToolPolicy: nil,
             hasStarted: false
         )
         let handle = try await launch(
@@ -671,6 +674,9 @@ public actor ClaudeAgentProvider: AgentProviding {
             // available so no Codeness run pauses for tool approval.
             result.append("--allow-dangerously-skip-permissions")
             result += ["--permission-prompt-tool", "stdio"]
+            if let policy = session.companyToolPolicy {
+                result += ["--tools", policy.claudeToolNames.joined(separator: ",")]
+            }
         }
         if let outputSchema {
             result += ["--json-schema", outputSchema.encodedString()]
