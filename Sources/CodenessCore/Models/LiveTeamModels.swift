@@ -101,6 +101,7 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
     public var sessionPolicy: LiveTeamSessionPolicy
     public var positionID: CompanyPositionID?
     public var person: CompanyPerson?
+    public var companyAssignment: CompanyAssignmentContract?
 
     public init(
         id: String,
@@ -110,7 +111,8 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
         runPolicy: LiveTeamRunPolicy,
         sessionPolicy: LiveTeamSessionPolicy,
         positionID: CompanyPositionID? = nil,
-        person: CompanyPerson? = nil
+        person: CompanyPerson? = nil,
+        companyAssignment: CompanyAssignmentContract? = nil
     ) {
         self.id = id
         self.name = name
@@ -120,6 +122,7 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
         self.sessionPolicy = sessionPolicy
         self.positionID = positionID
         self.person = person
+        self.companyAssignment = companyAssignment
     }
 
     public var validationMessage: String? {
@@ -148,6 +151,17 @@ public struct LiveTeamMember: Codable, Equatable, Identifiable, Sendable {
                 return "\(name) has a person hired into a different position."
             }
             if let message = person.profile.validationMessage {
+                return "\(name): \(message)"
+            }
+        }
+        if let companyAssignment {
+            guard let positionID else {
+                return "\(name) has a company assignment without a position."
+            }
+            if let message = companyAssignment.validationMessage(
+                positionID: positionID,
+                target: target
+            ) {
                 return "\(name): \(message)"
             }
         }
@@ -336,8 +350,10 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
             if members.contains(where: { $0.positionID == .chiefExecutive }) {
                 return "The CEO cannot also occupy a worker assignment."
             }
-            if members.contains(where: { $0.positionID == nil || $0.person == nil }) {
-                return "Every company assignment needs a person in a standard position."
+            if members.contains(where: {
+                $0.positionID == nil || $0.person == nil || $0.companyAssignment == nil
+            }) {
+                return "Every company assignment needs a person, standard position, and exact contribution contract."
             }
             let currentPeople = [overseerPerson] + members.map(\.person)
             if Set(currentPeople.compactMap { $0?.id }).count != currentPeople.count {

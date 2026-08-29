@@ -75,6 +75,53 @@ struct LiveTeamModelTests {
     }
 
     @Test
+    func companyAssignmentsFailClosedAcrossProfessionAndTargetBoundaries() {
+        let sourceWritingArt = CompanyAssignmentContract(
+            contributionKind: .visualDirection,
+            requiredCapabilities: [.sourceModification],
+            acceptanceEvidence: "A visual direction exists.",
+            dependencyContributionKinds: [],
+            stopCondition: "Stop when accepted."
+        )
+        #expect(
+            sourceWritingArt.validationMessage(
+                positionID: .artDirector,
+                target: testTarget()
+            )?.contains("Art Director cannot use") == true
+        )
+
+        let audioProduction = CompanyAssignmentContract(
+            contributionKind: .audioDirection,
+            requiredCapabilities: [.audioAssetProduction],
+            acceptanceEvidence: "An audio asset can be played.",
+            dependencyContributionKinds: [],
+            stopCondition: "Stop when playable or blocked."
+        )
+        #expect(
+            audioProduction.validationMessage(
+                positionID: .soundDesigner,
+                target: testTarget()
+            )?.contains("cannot supply") == true
+        )
+
+        var localTarget = testTarget()
+        localTarget.providerID = .openAICompatible
+        let webResearch = CompanyAssignmentContract(
+            contributionKind: .researchFinding,
+            requiredCapabilities: [.webResearch],
+            acceptanceEvidence: "Sources support a decision.",
+            dependencyContributionKinds: [],
+            stopCondition: "Stop when the question is answered or blocked."
+        )
+        #expect(
+            webResearch.validationMessage(
+                positionID: .researcher,
+                target: localTarget
+            )?.contains("cannot supply") == true
+        )
+    }
+
+    @Test
     func personaRequirementsRejectIndifferenceAndKeepRandomIngredientsReproducible() {
         var firstGenerator = SeededTestGenerator(seed: 42)
         var secondGenerator = SeededTestGenerator(seed: 42)
@@ -696,6 +743,9 @@ struct LiveTeamModelTests {
         #expect(prompt.contains("visualAssetProduction"))
         #expect(prompt.contains("Do not silently take on:"))
         #expect(prompt.contains("sourceModification"))
+        #expect(prompt.contains("ASSIGNMENT CONTRACT"))
+        #expect(prompt.contains("Required contribution: visualDirection"))
+        #expect(prompt.contains("Relevant predecessor contributions: productDirection, softwareImplementation"))
         #expect(!prompt.contains("Improve the repository's actual product"))
         #expect(!prompt.contains("prove the best one through the repository"))
         #expect(!prompt.contains("Report concrete product changes"))
@@ -757,6 +807,14 @@ struct AgentLiveTeamRouterTests {
             definition.productBet?.focusQuestion
                 == "Would the intended audience choose this feature over the closest alternative?"
         )
+        #expect(
+            definition.members.first?.companyAssignment?.contributionKind
+                == .softwareImplementation
+        )
+        #expect(
+            definition.members.first?.companyAssignment?.requiredCapabilities
+                == [.workspaceRead, .sourceModification, .commandExecution]
+        )
 
         let snapshot = LiveTeamMemberSnapshot(
             member: try #require(definition.members.first),
@@ -817,6 +875,15 @@ struct AgentLiveTeamRouterTests {
         #expect(bootstrapInstructions.contains("Art Director owns visualDirection"))
         #expect(bootstrapInstructions.contains("Sound Designer owns audioDirection"))
         #expect(bootstrapInstructions.contains("capability block"))
+        let memberProperties = try #require(
+            bootstrapRequest.outputSchema["properties"]?["members"]?["items"]?["properties"]?
+                .objectValue
+        )
+        #expect(memberProperties["contributionKind"] != nil)
+        #expect(memberProperties["requiredCapabilities"] != nil)
+        #expect(memberProperties["acceptanceEvidence"] != nil)
+        #expect(memberProperties["dependencyContributionKinds"] != nil)
+        #expect(memberProperties["stopCondition"] != nil)
         #expect(!bootstrapInstructions.contains("Treat Developer as a default hire"))
         #expect(!bootstrapInstructions.contains("first person must own the next tangible product change"))
         #expect(coordinatorRequest.developerInstructions.contains("route local agent work"))
@@ -892,7 +959,7 @@ struct AgentLiveTeamRouterTests {
         }
         #expect(reviews.count == 2)
         #expect(reviews[1].prompt.contains("CORRECTION RETRY"))
-        #expect(reviews[1].prompt.contains("an agent has missing, extra, or invalid fields"))
+        #expect(reviews[1].prompt.contains("a company assignment has missing, extra, or invalid profession fields"))
         #expect(reviews[1].outputSchema == reviews[0].outputSchema)
     }
 
@@ -1779,7 +1846,12 @@ private actor LiveTeamUtilityProvider: AgentProviding {
               "runPolicy": "everyCycle",
               "sessionPolicy": "ownMemory",
               "sharedGroupID": null,
-              "positionID": "developer"
+              "positionID": "developer",
+              "contributionKind": "softwareImplementation",
+              "requiredCapabilities": ["workspaceRead", "sourceModification", "commandExecution"],
+              "acceptanceEvidence": "The bounded behavior works and focused tests pass.",
+              "dependencyContributionKinds": ["productDirection"],
+              "stopCondition": "Stop after focused verification or report a capability block."
             }
           ],
           "overseerTargetID": "primary"
@@ -1836,7 +1908,14 @@ private func companyLiveTeamDefinition() -> LiveTeamDefinition {
                 runPolicy: .once,
                 sessionPolicy: .ownMemory,
                 positionID: .artDirector,
-                person: artDirector
+                person: artDirector,
+                companyAssignment: CompanyAssignmentContract(
+                    contributionKind: .visualDirection,
+                    requiredCapabilities: [.workspaceRead, .authoredArtifactWrite],
+                    acceptanceEvidence: "A distinct visual direction is inspectable.",
+                    dependencyContributionKinds: [.productDirection, .softwareImplementation],
+                    stopCondition: "Stop when the direction is decision-ready or blocked."
+                )
             ),
             LiveTeamMember(
                 id: "build",
@@ -1846,7 +1925,14 @@ private func companyLiveTeamDefinition() -> LiveTeamDefinition {
                 runPolicy: .everyCycle,
                 sessionPolicy: .ownMemory,
                 positionID: .developer,
-                person: developer
+                person: developer,
+                companyAssignment: CompanyAssignmentContract(
+                    contributionKind: .softwareImplementation,
+                    requiredCapabilities: [.workspaceRead, .sourceModification, .commandExecution],
+                    acceptanceEvidence: "The integrated slice works and focused tests pass.",
+                    dependencyContributionKinds: [.visualDirection, .productDirection],
+                    stopCondition: "Stop after focused verification or report a capability block."
+                )
             )
         ],
         coordinator: .init(target: target, instructions: "Route direct product work."),

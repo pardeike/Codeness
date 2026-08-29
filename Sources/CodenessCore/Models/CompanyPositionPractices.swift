@@ -162,6 +162,96 @@ public struct CompanyToolPolicy: Equatable, Sendable {
     }
 }
 
+public struct CompanyAssignmentContract: Codable, Equatable, Sendable {
+    public let contributionKind: CompanyContributionKind
+    public let requiredCapabilities: [CompanyCapability]
+    public let acceptanceEvidence: String
+    public let dependencyContributionKinds: [CompanyContributionKind]
+    public let stopCondition: String
+
+    public init(
+        contributionKind: CompanyContributionKind,
+        requiredCapabilities: [CompanyCapability],
+        acceptanceEvidence: String,
+        dependencyContributionKinds: [CompanyContributionKind],
+        stopCondition: String
+    ) {
+        self.contributionKind = contributionKind
+        self.requiredCapabilities = requiredCapabilities
+        self.acceptanceEvidence = acceptanceEvidence
+        self.dependencyContributionKinds = dependencyContributionKinds
+        self.stopCondition = stopCondition
+    }
+
+    public func validationMessage(
+        positionID: CompanyPositionID,
+        target: AgentTarget
+    ) -> String? {
+        let practice = CompanyPositionPracticeCatalog.practice(positionID)
+        guard practice.allowedContributions.contains(contributionKind) else {
+            return "\(CompanyPositionCatalog.position(positionID).title) cannot own \(contributionKind.rawValue)."
+        }
+        let requested = Set(requiredCapabilities)
+        guard requested.count == requiredCapabilities.count else {
+            return "The assignment repeats a required capability."
+        }
+        guard requested.isSubset(of: practice.allowedCapabilities) else {
+            let forbidden = requested.subtracting(practice.allowedCapabilities)
+                .map(\.rawValue).sorted().joined(separator: ", ")
+            return "\(CompanyPositionCatalog.position(positionID).title) cannot use required capabilities: \(forbidden)."
+        }
+        let targetCapabilities = CompanyTargetCapabilityProfile(target: target).capabilities
+        guard requested.isSubset(of: targetCapabilities) else {
+            let unavailable = requested.subtracting(targetCapabilities)
+                .map(\.rawValue).sorted().joined(separator: ", ")
+            return "Target \(target.providerID.rawValue)/\(target.model) cannot supply required capabilities: \(unavailable)."
+        }
+        if acceptanceEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "The assignment has no acceptance evidence."
+        }
+        if stopCondition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "The assignment has no stopping or capability-block condition."
+        }
+        return nil
+    }
+
+    public var promptContract: String {
+        let capabilities = requiredCapabilities.map(\.rawValue).joined(separator: ", ")
+        let dependencies = dependencyContributionKinds.map(\.rawValue).joined(separator: ", ")
+        return """
+        ASSIGNMENT CONTRACT
+
+        Required contribution: \(contributionKind.rawValue)
+        Required capabilities: \(capabilities.isEmpty ? "none" : capabilities)
+        Acceptance evidence: \(acceptanceEvidence)
+        Relevant predecessor contributions: \(dependencies.isEmpty ? "none" : dependencies)
+        Stop or block when: \(stopCondition)
+        """
+    }
+}
+
+public struct CompanyTargetCapabilityProfile: Equatable, Sendable {
+    public let capabilities: Set<CompanyCapability>
+
+    public init(target: AgentTarget) {
+        var capabilities: Set<CompanyCapability> = [
+            .workspaceRead,
+            .authoredArtifactWrite
+        ]
+        if target.providerID == .codex || target.providerID == .claude {
+            capabilities.insert(.webResearch)
+        }
+        if target.options.mode != .plan {
+            capabilities.formUnion([.sourceModification, .commandExecution])
+        }
+        self.capabilities = capabilities
+    }
+
+    public var promptDescription: String {
+        capabilities.map(\.rawValue).sorted().joined(separator: ", ")
+    }
+}
+
 public enum CompanyPositionPracticeCatalog {
     private static let readWrite: Set<CompanyCapability> = [.workspaceRead, .authoredArtifactWrite]
     private static let research: Set<CompanyCapability> = [.workspaceRead, .webResearch, .authoredArtifactWrite]

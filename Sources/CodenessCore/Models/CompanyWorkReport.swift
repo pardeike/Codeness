@@ -219,10 +219,16 @@ public struct CompanyWorkReport: Codable, Equatable, Sendable {
 public struct CompanyHandoffPacket: Equatable, Sendable {
     public let report: CompanyWorkReport
     public let recipientPositionID: CompanyPositionID?
+    public let recipientAssignment: CompanyAssignmentContract?
 
-    public init(report: CompanyWorkReport, recipientPositionID: CompanyPositionID?) {
+    public init(
+        report: CompanyWorkReport,
+        recipientPositionID: CompanyPositionID?,
+        recipientAssignment: CompanyAssignmentContract?
+    ) {
         self.report = report
         self.recipientPositionID = recipientPositionID
+        self.recipientAssignment = recipientAssignment
     }
 
     public var rendered: String {
@@ -233,22 +239,28 @@ public struct CompanyHandoffPacket: Equatable, Sendable {
             CompanyPositionPracticeCatalog.practice($0)
                 .subscribedContributions.contains(report.contributionKind)
         } ?? true
+        let requiredByAssignment = recipientAssignment.map {
+            $0.dependencyContributionKinds.contains(report.contributionKind)
+        } ?? true
+        let relevantDetail = subscribed && requiredByAssignment
         var sections = [
             "HANDOFF PACKET",
             "From: \(CompanyPositionCatalog.position(report.positionID).title) [\(report.workerID)]",
             "For: \(recipient)",
             "Contribution: \(report.contributionKind.rawValue)"
         ]
-        if subscribed || report.contributionKind == .unstructured {
+        if relevantDetail || report.contributionKind == .unstructured {
             sections.append("Summary: \(report.summary)")
             append(report.decisions, label: "Decisions", to: &sections)
         } else {
-            sections.append("Summary: The source contribution is outside this profession's subscribed detail. Use only the shared artifacts, evidence, and constraints below.")
+            sections.append("Summary: This contribution is outside the recipient's subscribed assignment dependencies.")
         }
-        append(report.artifacts, label: "Artifacts", to: &sections)
-        append(report.evidence, label: "Evidence", to: &sections)
-        append(report.constraints, label: "Constraints", to: &sections)
-        append(report.risks, label: "Risks", to: &sections)
+        if requiredByAssignment || report.contributionKind == .unstructured {
+            append(report.artifacts, label: "Artifacts", to: &sections)
+            append(report.evidence, label: "Evidence", to: &sections)
+            append(report.constraints, label: "Constraints", to: &sections)
+            append(report.risks, label: "Risks", to: &sections)
+        }
         if let block = report.capabilityBlock {
             sections.append("CAPABILITY BLOCK: \(block.kind.rawValue) / \(block.requiredCapability.rawValue) / \(block.detail)")
             append(block.artifacts, label: "Block artifacts", to: &sections)

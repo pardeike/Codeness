@@ -1890,7 +1890,14 @@ private func companyLiveDefinition(maximumTurns: Int) -> LiveTeamDefinition {
         runPolicy: .everyCycle,
         sessionPolicy: .ownMemory,
         positionID: .developer,
-        person: developer
+        person: developer,
+        companyAssignment: CompanyAssignmentContract(
+            contributionKind: .softwareImplementation,
+            requiredCapabilities: [.workspaceRead, .sourceModification, .commandExecution],
+            acceptanceEvidence: "The integrated product works under focused exercise.",
+            dependencyContributionKinds: [.productDirection],
+            stopCondition: "Stop after verification or report a capability block."
+        )
     )
     return LiveTeamDefinition(
         revision: 1,

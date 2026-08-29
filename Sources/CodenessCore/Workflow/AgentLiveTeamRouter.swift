@@ -1011,7 +1011,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     static let focusGroupDeveloperInstructions = """
     You simulate a small focus group for one bounded product question. You are outside the company and receive only a test card. You have no access to the fixed user goal, repository, local files, company history, prior reviews, staff opinions, agent memory, or earlier focus groups. Never seek or infer that missing history. Use web search and page retrieval only when the prompt says live research is available. Do not use any other tool.
 
-    Research one close comparison product, then role-play four or five distinct but plausible people from the supplied audience. This is directional feedback, not statistical research and not real customer validation. Never claim that a participant actually used, saw, heard, or played anything beyond the supplied evidence. Separate source-backed expectations from simulated reactions. Every participant must choose the current product, the comparison, or neither and give one concrete reason. Do not ask for more research or real users as the conclusion. End with one product experiment that the company can build or exercise autonomously. Keep the complete report below 500 words, excluding source URLs, and return exactly the requested JSON object.
+    Research one close comparison product, then role-play four or five distinct but plausible people from the supplied audience. This is directional feedback, not statistical research and not real customer validation. Never claim that a participant actually used, saw, heard, or played anything beyond the supplied evidence. Separate source-backed expectations from simulated reactions. Every participant must choose the current product, the comparison, or neither and give one concrete reason. Do not ask for more research or real users as the conclusion. End with one bounded experiment the appropriately equipped profession can perform autonomously. Keep the complete report below 500 words, excluding source URLs, and return exactly the requested JSON object.
     """
 
     static let staffReportDeveloperInstructions = """
@@ -1525,7 +1525,44 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 .filter { $0 != .chiefExecutive }
                 .map { .string($0.rawValue) })
         ])
-        required.append(.string("positionID"))
+        properties["contributionKind"] = .object([
+            "type": .string("string"),
+            "enum": .array(CompanyContributionKind.allCases
+                .filter { $0 != .unstructured }
+                .map { .string($0.rawValue) })
+        ])
+        properties["requiredCapabilities"] = .object([
+            "type": .string("array"),
+            "uniqueItems": .bool(true),
+            "items": .object([
+                "type": .string("string"),
+                "enum": .array(CompanyCapability.allCases.map { .string($0.rawValue) })
+            ])
+        ])
+        properties["acceptanceEvidence"] = .object([
+            "type": .string("string"), "minLength": .integer(1)
+        ])
+        properties["dependencyContributionKinds"] = .object([
+            "type": .string("array"),
+            "uniqueItems": .bool(true),
+            "items": .object([
+                "type": .string("string"),
+                "enum": .array(CompanyContributionKind.allCases
+                    .filter { $0 != .unstructured }
+                    .map { .string($0.rawValue) })
+            ])
+        ])
+        properties["stopCondition"] = .object([
+            "type": .string("string"), "minLength": .integer(1)
+        ])
+        required += [
+            .string("positionID"),
+            .string("contributionKind"),
+            .string("requiredCapabilities"),
+            .string("acceptanceEvidence"),
+            .string("dependencyContributionKinds"),
+            .string("stopCondition")
+        ]
         schema["properties"] = .object(properties)
         schema["required"] = .array(required)
         return .object(schema)
@@ -1747,7 +1784,8 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         chiefExecutive: CompanyPerson? = nil
     ) -> String {
         let targets = context.targetOptions.map {
-            "- \($0.id): \($0.label) [\($0.target.providerID.rawValue) / \($0.target.model) / \($0.target.options.mode.rawValue)]"
+            let profile = CompanyTargetCapabilityProfile(target: $0.target)
+            return "- \($0.id): \($0.label) [\($0.target.providerID.rawValue) / \($0.target.model) / \($0.target.options.mode.rawValue)] enforceable capabilities: \(profile.promptDescription)"
         }.joined(separator: "\n")
         let evidence = evidenceDescription(context)
         let edits = editHistoryDescription(context)
@@ -1820,7 +1858,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         \(abbreviated(context.userGoal, limit: maximumGoalCharacters))
 
         EXECUTIVE DECISION STANDARD
-        Re-read the user goal before deciding. Your identity and personal stake should make you forceful, ambitious, and impatient for a product people can actually use. Recent feedback is subordinate evidence, not authority. A concern, severity label, repeated opinion, simulated participant preference, or vote count is not a reason to act. Fund the highest-return integrated product bet, measured by visible or exercised value per token. Reject both bureaucratic caution and consequence-free hype. A bold idea earns continued investment by becoming a real, coherent product demonstration. Do not accept "need real users" as a reason to wait while an autonomous product experiment remains. Interrupt productive work only when you independently verify a material reason whose impact justifies that opportunity cost.
+        Re-read the user goal before deciding. Your identity and personal stake should make you forceful, ambitious, and impatient for evidence that the company is creating the promised value. Recent feedback is subordinate evidence, not authority. A concern, severity label, repeated opinion, simulated participant preference, or vote count is not a reason to act. Fund the highest-return company bet, measured by profession-appropriate accepted contributions and useful learning per token. Reject both bureaucratic caution and consequence-free hype. A bold idea earns continued investment through coherent, inspectable evidence from the professions that own it. Do not accept "need real users" as a reason to wait while an authorized autonomous experiment remains. Interrupt productive work only when you independently verify a material reason whose impact justifies that opportunity cost.
 
         \(modeInstruction(mode))
         """
@@ -2358,16 +2396,52 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             )
         }
         var positionIDs: [CompanyPositionID] = []
+        var assignments: [CompanyAssignmentContract] = []
         let legacyMemberValues = try memberValues.map { value -> JSONValue in
             guard var member = value.objectValue,
                   let positionRaw = member.removeValue(forKey: "positionID")?.stringValue,
                   let positionID = CompanyPositionID(rawValue: positionRaw),
-                  positionID != .chiefExecutive else {
+                  positionID != .chiefExecutive,
+                  let contributionRaw = member.removeValue(forKey: "contributionKind")?.stringValue,
+                  let contributionKind = CompanyContributionKind(rawValue: contributionRaw),
+                  contributionKind != .unstructured,
+                  let capabilityValues = member.removeValue(forKey: "requiredCapabilities")?.arrayValue,
+                  let requiredCapabilities = capabilityValues.map({ $0.stringValue }) as? [String],
+                  let acceptanceEvidence = cleanRequiredString(
+                    member.removeValue(forKey: "acceptanceEvidence")
+                  ),
+                  let dependencyValues = member.removeValue(
+                    forKey: "dependencyContributionKinds"
+                  )?.arrayValue,
+                  let dependencyRaw = dependencyValues.map({ $0.stringValue }) as? [String],
+                  let stopCondition = cleanRequiredString(
+                    member.removeValue(forKey: "stopCondition")
+                  ) else {
                 throw AgentProviderError.invalidResponse(
-                    "a company assignment uses an invalid predefined position"
+                    "a company assignment has missing, extra, or invalid profession fields"
+                )
+            }
+            let capabilities = requiredCapabilities.compactMap(
+                CompanyCapability.init(rawValue:)
+            )
+            let dependencies = dependencyRaw.compactMap(
+                CompanyContributionKind.init(rawValue:)
+            )
+            guard capabilities.count == requiredCapabilities.count,
+                  dependencies.count == dependencyRaw.count,
+                  !dependencies.contains(.unstructured) else {
+                throw AgentProviderError.invalidResponse(
+                    "a company assignment names an unknown capability or contribution"
                 )
             }
             positionIDs.append(positionID)
+            assignments.append(CompanyAssignmentContract(
+                contributionKind: contributionKind,
+                requiredCapabilities: capabilities,
+                acceptanceEvidence: acceptanceEvidence,
+                dependencyContributionKinds: dependencies,
+                stopCondition: stopCondition
+            ))
             return .object(member)
         }
         var definition = try decodeDefinitionValue(
@@ -2391,6 +2465,13 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         )
         for index in definition.members.indices {
             definition.members[index].positionID = positionIDs[index]
+            definition.members[index].companyAssignment = assignments[index]
+            if let message = assignments[index].validationMessage(
+                positionID: positionIDs[index],
+                target: definition.members[index].target
+            ) {
+                throw AgentProviderError.invalidResponse(message)
+            }
         }
         definition.operatingModelVersion = 2
         var chiefExecutive = chiefExecutive

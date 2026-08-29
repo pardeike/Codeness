@@ -35,12 +35,13 @@ public enum CompanyProductMotor {
         let completedRunway = betRuns.count >= minimumProductTurns
         let report = CompanyWorkReport.decode(sourceResult, for: snapshot)
             ?? CompanyWorkReport.unstructured(sourceResult, for: snapshot)
-        let recipientPositionID = proposedCheckpoint.flatMap {
-            definition.member(id: $0.memberID)?.positionID
+        let recipient = proposedCheckpoint.flatMap {
+            definition.member(id: $0.memberID)
         }
         let packet = CompanyHandoffPacket(
             report: report,
-            recipientPositionID: recipientPositionID
+            recipientPositionID: recipient?.positionID,
+            recipientAssignment: recipient?.companyAssignment
         )
 
         let disposition: LiveTeamCoordinatorDisposition
