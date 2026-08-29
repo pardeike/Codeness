@@ -125,7 +125,7 @@ public enum CompanyProductMotor {
                     recipientAssignment: recipient?.companyAssignment
                 ).rendered
             } else {
-                packet = storedPacket
+                packet = currentContribution(from: storedPacket)
             }
             let fairShare = max(
                 1,
@@ -154,6 +154,14 @@ public enum CompanyProductMotor {
         let marker = " ... [truncated]"
         guard limit > marker.count else { return String(value.prefix(limit)) }
         return String(value.prefix(limit - marker.count)) + marker
+    }
+
+    private static func currentContribution(from storedHandoff: String) -> String {
+        let marker = "\nCURRENT CONTRIBUTION\n"
+        guard let range = storedHandoff.range(of: marker, options: .backwards) else {
+            return storedHandoff
+        }
+        return String(storedHandoff[range.upperBound...])
     }
 
     public static func usage(

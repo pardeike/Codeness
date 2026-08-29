@@ -327,7 +327,7 @@ struct CompanyHarnessV2FixtureTests {
             fixtureMember(positionID: .artDirector, contribution: .visualDirection)
         ]
         definition.members = predecessors + [sound, quality]
-        let runs = predecessors.enumerated().map { index, member in
+        var runs = predecessors.enumerated().map { index, member in
             RunRecord(
                 sequence: index + 1,
                 role: .implementer,
@@ -348,6 +348,17 @@ struct CompanyHarnessV2FixtureTests {
                 )
             )
         }
+        let productPacket = runs[1].coordinatorDecision!.handoff
+        runs[1].coordinatorDecision = LiveTeamCoordinatorDecision(
+            handoff: "PRIOR ACCEPTED DEPENDENCY EVIDENCE\n"
+                + runs[0].coordinatorDecision!.handoff
+                + "\n\nCURRENT CONTRIBUTION\n"
+                + productPacket,
+            runLabel: "Stored aggregate product handoff",
+            disposition: .continueTeam,
+            evidence: "Accepted profession evidence.",
+            progressEvidence: .none
+        )
         let report = CompanyWorkReport(
             workerID: sound.id,
             positionID: .soundDesigner,
@@ -373,6 +384,10 @@ struct CompanyHarnessV2FixtureTests {
         #expect(decision.handoff.contains("productDirection"))
         #expect(decision.handoff.contains("visualDirection"))
         #expect(decision.handoff.contains("... [truncated]"))
+        #expect(
+            decision.handoff.components(separatedBy: "Contribution: researchFinding").count
+                == 2
+        )
     }
 }
 
