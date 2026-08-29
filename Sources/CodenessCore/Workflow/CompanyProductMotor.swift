@@ -33,10 +33,22 @@ public enum CompanyProductMotor {
             "INVESTMENT BOUNDARY: READY"
         )
         let completedRunway = betRuns.count >= minimumProductTurns
+        let report = CompanyWorkReport.decode(sourceResult, for: snapshot)
+            ?? CompanyWorkReport.unstructured(sourceResult, for: snapshot)
+        let recipientPositionID = proposedCheckpoint.flatMap {
+            definition.member(id: $0.memberID)?.positionID
+        }
+        let packet = CompanyHandoffPacket(
+            report: report,
+            recipientPositionID: recipientPositionID
+        )
 
         let disposition: LiveTeamCoordinatorDisposition
         let evidence: String
-        if proposedCheckpoint == nil {
+        if let block = report.capabilityBlock {
+            disposition = .requestOversight
+            evidence = "The assigned profession reported a \(block.kind.rawValue) capability block for \(block.requiredCapability.rawValue). The CEO must change staffing, target, or scope."
+        } else if proposedCheckpoint == nil {
             disposition = .requestOversight
             evidence = "The funded product bet reached an investment decision because no assigned person remains eligible."
         } else if reachedTokenLimit && completedRunway {
@@ -54,8 +66,8 @@ public enum CompanyProductMotor {
         }
 
         return LiveTeamCoordinatorDecision(
-            handoff: handoff(from: sourceResult),
-            runLabel: runLabel(from: sourceResult, fallback: snapshot.member.name),
+            handoff: packet.rendered,
+            runLabel: runLabel(from: report.summary, fallback: snapshot.member.name),
             disposition: disposition,
             evidence: evidence,
             progressEvidence: .none,
@@ -91,14 +103,6 @@ public enum CompanyProductMotor {
             return person.generationTokenUsage
         }
         return values.reduce(RunTokenUsage.zero) { $0.adding($1) }
-    }
-
-    private static func handoff(from output: String) -> String {
-        let clean = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else {
-            return "The previous person returned no written result. Inspect the repository and continue the funded product bet from its durable state."
-        }
-        return String(clean.suffix(6_000))
     }
 
     private static func runLabel(from output: String, fallback: String) -> String {

@@ -59,6 +59,7 @@ public enum LiveTeamPromptBuilder {
             """,
             productBet,
             professionContract,
+            snapshot.member.positionID == nil ? nil : CompanyWorkReport.promptContract(for: snapshot),
             """
             OPERATING BOUNDARY
 

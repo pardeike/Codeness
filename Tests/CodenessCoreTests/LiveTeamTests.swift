@@ -310,6 +310,101 @@ struct LiveTeamModelTests {
     }
 
     @Test
+    func productMotorBuildsARecipientAwareHandoffFromStructuredWork() throws {
+        var definition = companyLiveTeamDefinition()
+        let developer = try #require(definition.members.first { $0.positionID == .developer })
+        let artDirector = try #require(definition.members.first { $0.positionID == .artDirector })
+        definition.members = [developer, artDirector]
+        let snapshot = LiveTeamMemberSnapshot(
+            member: developer,
+            workingGoal: definition.workingGoal,
+            revision: definition.revision,
+            cycle: 1,
+            sessionSlotID: "member:\(developer.id)",
+            productBet: definition.productBet
+        )
+        let report = CompanyWorkReport(
+            workerID: developer.id,
+            positionID: .developer,
+            contributionKind: .softwareImplementation,
+            summary: "Changed twelve private parser functions and rewired the cache internals.",
+            artifacts: ["Demo.app", "Sources/Parser.swift"],
+            evidence: ["The demo now opens on the main product screen."],
+            decisions: ["Internal cache now uses stable keys."],
+            constraints: ["The main screen is 900 by 600 points."],
+            risks: [],
+            capabilityBlock: nil,
+            recommendedRecipientPositions: [.artDirector]
+        )
+        let output = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+
+        let decision = CompanyProductMotor.decision(
+            sourceResult: output,
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: LiveTeamCheckpoint(
+                memberID: artDirector.id,
+                cycle: 1,
+                revision: definition.revision
+            ),
+            runs: []
+        )
+
+        #expect(decision.handoff.contains("For: Art Director"))
+        #expect(decision.handoff.contains("Demo.app"))
+        #expect(decision.handoff.contains("900 by 600"))
+        #expect(!decision.handoff.contains("twelve private parser functions"))
+        #expect(!decision.handoff.contains("stable keys"))
+    }
+
+    @Test
+    func productMotorEscalatesCapabilityBlocksWithoutRetryingTheWrongProfession() throws {
+        let definition = companyLiveTeamDefinition()
+        let artDirector = try #require(definition.members.first { $0.positionID == .artDirector })
+        let snapshot = LiveTeamMemberSnapshot(
+            member: artDirector,
+            workingGoal: definition.workingGoal,
+            revision: definition.revision,
+            cycle: 1,
+            sessionSlotID: "member:\(artDirector.id)",
+            productBet: definition.productBet
+        )
+        let report = CompanyWorkReport(
+            workerID: artDirector.id,
+            positionID: .artDirector,
+            contributionKind: .visualDirection,
+            summary: "The visual direction is ready, but the interaction also needs an audio identity.",
+            artifacts: ["VisualDirection.md"],
+            evidence: ["Three visual states are specified."],
+            decisions: [],
+            constraints: ["Audio must follow the three visual states."],
+            risks: [],
+            capabilityBlock: CompanyCapabilityBlock(
+                kind: .professionForbidden,
+                requiredCapability: .audioAssetProduction,
+                detail: "Producing the score belongs to an audio specialist.",
+                artifacts: ["VisualDirection.md"],
+                suggestedPositions: [.soundDesigner]
+            ),
+            recommendedRecipientPositions: [.soundDesigner]
+        )
+        let output = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+
+        let decision = CompanyProductMotor.decision(
+            sourceResult: output,
+            snapshot: snapshot,
+            definition: definition,
+            proposedCheckpoint: nil,
+            runs: []
+        )
+
+        #expect(decision.disposition == .requestOversight)
+        #expect(decision.evidence.contains("audioAssetProduction"))
+        #expect(decision.handoff.contains("Sound Designer"))
+        #expect(decision.handoff.contains("VisualDirection.md"))
+    }
+
+    @Test
     func schedulerUsesStableMemberIdentityAndSkipsCompletedOnceMembers() throws {
         let definition = liveTeamDefinition()
         let initial = try #require(
@@ -682,17 +777,21 @@ struct AgentLiveTeamRouterTests {
         #expect(goalPosition.lowerBound > feedbackPosition.lowerBound)
         #expect(bootstrapRequest.developerInstructions.contains("strategic control"))
         #expect(bootstrapRequest.developerInstructions.contains("sole authority source"))
-        #expect(bootstrapRequest.developerInstructions.contains("value and learning per effective token cost"))
-        #expect(bootstrapRequest.developerInstructions.contains("evidence gaps, not autonomous production blockers"))
+        #expect(bootstrapRequest.developerInstructions.contains("useful goal progress and learning per effective token cost"))
+        #expect(bootstrapRequest.developerInstructions.contains("External access that is unavailable is an evidence gap"))
         #expect(bootstrapRequest.developerInstructions.contains("Never sound like an academic"))
         #expect(bootstrapRequest.developerInstructions.contains("PROJECT MEMORY BOUNDARY"))
-        #expect(bootstrapRequest.prompt.contains("first six eligible product turns"))
+        #expect(bootstrapRequest.prompt.contains("first six eligible company turns"))
         #expect(bootstrapRequest.developerInstructions.contains("choose only from this catalog"))
         let bootstrapInstructions = bootstrapRequest.developerInstructions
             + bootstrapRequest.prompt
         #expect(bootstrapInstructions.contains("Order people by real execution dependency"))
-        #expect(bootstrapInstructions.contains("first person must own the next tangible product change"))
-        #expect(bootstrapInstructions.contains("put the appropriate maker before a Product Manager or Producer"))
+        #expect(bootstrapInstructions.contains("required contribution and acceptance evidence"))
+        #expect(bootstrapInstructions.contains("Art Director owns visualDirection"))
+        #expect(bootstrapInstructions.contains("Sound Designer owns audioDirection"))
+        #expect(bootstrapInstructions.contains("capability block"))
+        #expect(!bootstrapInstructions.contains("Treat Developer as a default hire"))
+        #expect(!bootstrapInstructions.contains("first person must own the next tangible product change"))
         #expect(coordinatorRequest.developerInstructions.contains("route local agent work"))
         #expect(coordinatorRequest.developerInstructions.contains("evidence and advice, not authority"))
     }

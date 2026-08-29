@@ -387,6 +387,17 @@ public enum CompanyPositionPracticeCatalog {
         return practice
     }
 
+    public static var promptCatalog: String {
+        practices.map { practice in
+            let position = CompanyPositionCatalog.position(practice.positionID)
+            let contributions = practice.allowedContributions.map(\.rawValue).sorted()
+                .joined(separator: ", ")
+            let capabilities = practice.allowedCapabilities.map(\.rawValue).sorted()
+                .joined(separator: ", ")
+            return "\(position.title) owns \(contributions). Evidence: \(practice.acceptanceEvidence) Capabilities: \(capabilities)"
+        }.joined(separator: "\n")
+    }
+
     private static func practice(
         _ positionID: CompanyPositionID,
         _ purpose: String,

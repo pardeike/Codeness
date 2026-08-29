@@ -3645,7 +3645,8 @@ public final class RepositoryCoordinator {
                         session: session,
                         cwd: record.canonicalPath,
                         prompt: prompt,
-                        target: member.target
+                        target: member.target,
+                        outputSchema: CompanyWorkReport.outputSchema(for: snapshot)
                     )
                 )
             } catch {
@@ -3690,7 +3691,8 @@ public final class RepositoryCoordinator {
                         session: session,
                         cwd: record.canonicalPath,
                         prompt: prompt,
-                        target: member.target
+                        target: member.target,
+                        outputSchema: CompanyWorkReport.outputSchema(for: snapshot)
                     )
                 )
             }
