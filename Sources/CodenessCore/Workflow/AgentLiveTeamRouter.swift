@@ -576,8 +576,10 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             )
         }))
         guard !personas.isEmpty else { return [] }
-        let requests = personas.map { persona in
-            AgentUtilityRequest(
+        var reports: [LiveTeamStaffReport] = []
+        reports.reserveCapacity(personas.count)
+        for (index, persona) in personas.enumerated() {
+            let request = AgentUtilityRequest(
                 cwd: cwd,
                 prompt: Self.staffReportPrompt(
                     context,
@@ -588,34 +590,18 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 developerInstructions: Self.staffReportDeveloperInstructions,
                 outputSchema: Self.staffReportSchema
             )
+            let report = await Self.requestStaffReport(
+                persona: persona,
+                request: request,
+                providers: providers
+            )
+            reports.append(report)
+            await progress(.consultationCompleted(
+                index: index,
+                consultation: Self.consultationRecord(report)
+            ))
+            try Task.checkCancellation()
         }
-        let providers = self.providers
-        let reports = await withTaskGroup(
-            of: (Int, LiveTeamStaffReport).self,
-            returning: [LiveTeamStaffReport].self
-        ) { group in
-            for (index, request) in requests.enumerated() {
-                let persona = personas[index]
-                group.addTask {
-                    let report = await Self.requestStaffReport(
-                        persona: persona,
-                        request: request,
-                        providers: providers
-                    )
-                    return (index, report)
-                }
-            }
-            var indexed: [(Int, LiveTeamStaffReport)] = []
-            for await (index, report) in group {
-                indexed.append((index, report))
-                await progress(.consultationCompleted(
-                    index: index,
-                    consultation: Self.consultationRecord(report)
-                ))
-            }
-            return indexed.sorted { $0.0 < $1.0 }.map { $0.1 }
-        }
-        try Task.checkCancellation()
         return reports
     }
 

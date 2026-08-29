@@ -150,6 +150,19 @@ struct CodexAppServerTransportTests {
     }
 
     @Test
+    func readsConfiguredMCPServerNamesForAWorkingDirectory() async throws {
+        let fixture = try TransportFixture(script: Self.configReadServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        let names = try await client.configuredMCPServerNames(cwd: "/tmp/repository")
+
+        #expect(names == Set(["decompiler", "github-code-search"]))
+        await client.shutdown()
+    }
+
+    @Test
     func loadedThreadIDsExhaustsEveryPaginationPage() async throws {
         let fixture = try TransportFixture(script: Self.paginatedLoadedThreadsServer)
         defer { fixture.remove() }
@@ -411,6 +424,41 @@ for line in sys.stdin:
                     "items": [],
                     "status": "inProgress"
                 }
+            }
+        })
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let configReadServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "config-fixture"}})
+    elif method == "config/read":
+        assert message["params"] == {
+            "cwd": "/tmp/repository",
+            "includeLayers": False
+        }
+        emit({
+            "id": identifier,
+            "result": {
+                "config": {
+                    "mcp_servers": {
+                        "decompiler": {"enabled": True},
+                        "github-code-search": {"enabled": True}
+                    }
+                },
+                "origins": {}
             }
         })
     elif identifier is not None:

@@ -7,6 +7,29 @@ import Testing
 @Suite
 struct AppServerIntegrationTests {
     @Test
+    func codexUtilityConfigurationDisablesHeavyToolsButKeepsRequestedWebResearch() {
+        let serverNames: Set<String> = ["decompiler", "github-code-search"]
+        let textOnly = CodexAgentProvider.utilityThreadConfiguration(
+            mcpServerNames: serverNames,
+            allowsWebResearch: false
+        )
+        let researched = CodexAgentProvider.utilityThreadConfiguration(
+            mcpServerNames: serverNames,
+            allowsWebResearch: true
+        )
+
+        #expect(textOnly["features"]?["apps"]?.boolValue == false)
+        #expect(textOnly["features"]?["multi_agent"]?.boolValue == false)
+        #expect(textOnly["features"]?["plugins"]?.boolValue == false)
+        #expect(textOnly["mcp_servers"]?["decompiler"]?["enabled"]?.boolValue == false)
+        #expect(textOnly["mcp_servers"]?["github-code-search"]?["enabled"]?.boolValue == false)
+        #expect(textOnly["web_search"]?.stringValue == "disabled")
+        #expect(textOnly["tools"] == nil)
+        #expect(researched["web_search"]?.stringValue == "live")
+        #expect(researched["tools"]?["web_search"]?["context_size"]?.stringValue == "medium")
+    }
+
+    @Test
     func appServerClientCorrelatesRequestsAndDecodesModels() async throws {
         let fixture = try FakeAppServerFixture()
         defer { fixture.remove() }
@@ -2342,7 +2365,7 @@ struct CodexProviderReliabilityTests {
     }
 
     @Test(.timeLimit(.minutes(1)))
-    func defaultUtilityBudgetAllowsTwentyRetainedThreadsAndReservesTheTotalBudget() async throws {
+    func defaultUtilityBudgetAllowsTwoRetainedThreadsAndReservesTheTotalBudget() async throws {
         let fixture = try LifecycleAppServerFixture(deleteFailures: 1_000_000)
         defer { fixture.remove() }
         let client = CodexAppServerClient()
@@ -2351,29 +2374,29 @@ struct CodexProviderReliabilityTests {
         defer { consumer.cancel() }
         try await client.start(configuration: fixture.configuration)
 
-        for _ in 1...20 {
+        for _ in 1...2 {
             let result = try await provider.runUtility(Self.utilityRequest(prompt: "complete"))
             #expect(result.output == "utility complete")
         }
 
         do {
             _ = try await provider.runUtility(Self.utilityRequest(prompt: "complete"))
-            Issue.record("Expected the twenty-thread utility budget to stop another utility")
+            Issue.record("Expected the two-thread utility budget to stop another utility")
         } catch {
-            #expect(error.localizedDescription.contains("still retaining 20"))
+            #expect(error.localizedDescription.contains("still retaining 2"))
         }
 
-        for _ in 1...4 {
+        for _ in 1...3 {
             _ = try await provider.prepareSession(Self.sessionRequest(existingSessionID: nil))
         }
         do {
             _ = try await provider.prepareSession(Self.sessionRequest(existingSessionID: nil))
-            Issue.record("Expected the total loaded-thread budget to remain 24")
+            Issue.record("Expected the total loaded-thread budget to remain 5")
         } catch {
-            #expect(error.localizedDescription.contains("24 loaded or reserved"))
+            #expect(error.localizedDescription.contains("5 loaded or reserved"))
         }
 
-        #expect(fixture.loggedMethods().filter { $0 == "thread/start" }.count == 24)
+        #expect(fixture.loggedMethods().filter { $0 == "thread/start" }.count == 5)
         await client.shutdown()
     }
 

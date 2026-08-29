@@ -761,7 +761,7 @@ struct AgentLiveTeamRouterTests {
     }
 
     @Test
-    func strategicReviewConsultsPersistedCompanyPeopleInParallelWithoutSharingFixedGoal() async throws {
+    func strategicReviewConsultsPersistedCompanyPeopleInSequenceWithoutSharingFixedGoal() async throws {
         let provider = LiveTeamUtilityProvider(consultationDelay: .milliseconds(50))
         let registry = AgentProviderRegistry(providers: [provider])
         let router = AgentLiveTeamRouter(providers: registry)
@@ -814,7 +814,7 @@ struct AgentLiveTeamRouterTests {
         #expect(finalReview.prompt.contains(context.userGoal))
         #expect(finalReview.prompt.contains("do not count votes"))
         #expect(finalReview.prompt.contains("vote count is not a reason to act"))
-        #expect(await provider.maximumConcurrentConsultations() == 2)
+        #expect(await provider.maximumConcurrentConsultations() == 1)
         #expect(focusRequest.allowsWebResearch)
         #expect(focusRequest.cwd != repository.path)
         #expect(!focusRequest.prompt.contains(repository.path))
@@ -849,7 +849,7 @@ struct AgentLiveTeamRouterTests {
                 return (index, manager)
             }
         #expect(completed.count == 2)
-        #expect(Set(completed.map(\.0)) == [0, 1])
+        #expect(completed.map(\.0) == [0, 1])
         #expect(completed.allSatisfy { $0.1.status == .completed })
         #expect(progress.last == .overseerDeciding)
     }

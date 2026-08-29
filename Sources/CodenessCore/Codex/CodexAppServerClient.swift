@@ -540,6 +540,20 @@ public actor CodexAppServerClient {
         )
     }
 
+    public func configuredMCPServerNames(cwd: String) async throws -> Set<String> {
+        let response = try await sendRequest(
+            method: "config/read",
+            params: [
+                "cwd": .string(cwd),
+                "includeLayers": .bool(false)
+            ]
+        )
+        guard let servers = response["config"]?["mcp_servers"]?.objectValue else {
+            return []
+        }
+        return Set(servers.keys)
+    }
+
     /// Requests cancellation and removal of every background terminal owned by
     /// a thread. Codex currently acknowledges this mutation with an empty
     /// object; accepting another shape would make a protocol drift look like a

@@ -51,7 +51,7 @@ struct AgentProviderCatalogTests {
 
     @Test
     func codexCoordinatorReservesTransientHeadroomFromPersistentStepSessions() {
-        #expect(CodexAgentProvider.maximumPersistentWorkflowSessionCount == 23)
+        #expect(CodexAgentProvider.maximumPersistentWorkflowSessionCount == 4)
         let accepted = capacityWorkflow(
             codexStepCount: CodexAgentProvider.maximumPersistentWorkflowSessionCount,
             coordinatorProvider: .codex
@@ -62,9 +62,9 @@ struct AgentProviderCatalogTests {
         )
 
         #expect(accepted.validationMessage == nil)
-        #expect(rejected.validationMessage?.contains("24 persistent Codex step sessions") == true)
+        #expect(rejected.validationMessage?.contains("5 persistent Codex step sessions") == true)
         #expect(rejected.validationMessage?.contains("one temporary Codex coordinator session") == true)
-        #expect(rejected.validationMessage?.contains("24-thread loaded-session budget") == true)
+        #expect(rejected.validationMessage?.contains("5-thread loaded-session budget") == true)
     }
 
     @Test
@@ -79,9 +79,9 @@ struct AgentProviderCatalogTests {
         )
 
         #expect(accepted.validationMessage == nil)
-        #expect(rejected.validationMessage?.contains("25 persistent Codex step sessions") == true)
+        #expect(rejected.validationMessage?.contains("6 persistent Codex step sessions") == true)
         #expect(rejected.validationMessage?.contains("temporary Codex coordinator") == false)
-        #expect(rejected.validationMessage?.contains("24-thread loaded-session budget") == true)
+        #expect(rejected.validationMessage?.contains("5-thread loaded-session budget") == true)
     }
 
     private func capacityWorkflow(

@@ -48,7 +48,7 @@ struct CodexCleanupRetryPolicy: Sendable {
 public actor CodexAgentProvider: AgentProviding {
     public nonisolated let id = AgentProviderID.codex
     public nonisolated let supportsLiveWebResearch = true
-    public static let maximumLoadedThreadBudget = 24
+    public static let maximumLoadedThreadBudget = 5
     public static let maximumPersistentWorkflowSessionCount =
         maximumLoadedThreadBudget - 1
 
@@ -174,22 +174,13 @@ public actor CodexAgentProvider: AgentProviding {
     private static let maximumDeltaItemCount = 2_048
     private static let maximumDeltaItemRetainedBytes = 2 * 1_024 * 1_024
     private static let maximumRetiredExecutionIDCount = 4_096
-    private static let liveWebResearchConfiguration: JSONValue = .object([
-        "web_search": .string("live"),
-        "tools": .object([
-            "web_search": .object([
-                "context_size": .string("medium")
-            ])
-        ])
-    ])
-
     public init(
         appServer: CodexAppServerClient,
         models: [CodexModel] = [],
         maximumLoadedThreadCount: Int = CodexAgentProvider.maximumLoadedThreadBudget,
-        maximumRetainedUtilityThreadCount: Int = 20,
+        maximumRetainedUtilityThreadCount: Int = 2,
         maximumCleanupAttemptCount: Int = 8,
-        cleanupRetryDelay: Duration = .milliseconds(250),
+        cleanupRetryDelay: Duration = .milliseconds(100),
         interruptionTerminalTimeout: Duration = .seconds(2),
         backgroundTerminalCleanupTimeout: Duration = .seconds(1),
         eventBufferCapacity: Int = 64,
@@ -507,6 +498,10 @@ public actor CodexAgentProvider: AgentProviding {
             try Task.checkCancellation()
             try await enforceLoadedThreadLimit(reusing: nil, startingUtility: true)
             try requireAvailableProtocolGeneration(admittedRevision: admittedProtocolRevision)
+            let configuredMCPServerNames = try await appServer.configuredMCPServerNames(
+                cwd: request.cwd
+            )
+            try requireAvailableProtocolGeneration(admittedRevision: admittedProtocolRevision)
             sessionID = try await appServer.startThread(
                 cwd: request.cwd,
                 model: request.target.model,
@@ -517,9 +512,10 @@ public actor CodexAgentProvider: AgentProviding {
                 ephemeral: false,
                 readOnly: true,
                 approvalPolicy: "never",
-                configuration: request.allowsWebResearch
-                    ? Self.liveWebResearchConfiguration
-                    : nil
+                configuration: Self.utilityThreadConfiguration(
+                    mcpServerNames: configuredMCPServerNames,
+                    allowsWebResearch: request.allowsWebResearch
+                )
             )
             try requireAvailableProtocolGeneration(admittedRevision: admittedProtocolRevision)
             retainedUtilityThreadIDs.insert(sessionID)
@@ -1760,6 +1756,13 @@ public actor CodexAgentProvider: AgentProviding {
         do {
             try await appServer.deleteThread(id: sessionID)
             guard protocolContainment == nil else { return false }
+            let loadedThreadIDs = try await appServer.loadedThreadIDs()
+            guard !loadedThreadIDs.contains(sessionID) else {
+                throw AppServerClientError.invalidResponse(
+                    "thread/delete returned before \(sessionID) was unloaded"
+                )
+            }
+            guard protocolContainment == nil else { return false }
             clearDeleteDebt(sessionID: sessionID)
             retainedUtilityThreadIDs.remove(sessionID)
             await cancelPendingUnsubscribe(for: sessionID)
@@ -2085,6 +2088,33 @@ public actor CodexAgentProvider: AgentProviding {
                 "Codex App Server changed generations while this operation was suspended. Codeness discarded its stale result; retry after Codex recovers."
             )
         }
+    }
+
+    nonisolated static func utilityThreadConfiguration(
+        mcpServerNames: Set<String>,
+        allowsWebResearch: Bool
+    ) -> JSONValue {
+        var configuration: [String: JSONValue] = [
+            "features": .object([
+                "apps": .bool(false),
+                "multi_agent": .bool(false),
+                "plugins": .bool(false)
+            ]),
+            "mcp_servers": .object(Dictionary(uniqueKeysWithValues:
+                mcpServerNames.sorted().map { name in
+                    (name, .object(["enabled": .bool(false)]))
+                }
+            )),
+            "web_search": .string(allowsWebResearch ? "live" : "disabled")
+        ]
+        if allowsWebResearch {
+            configuration["tools"] = .object([
+                "web_search": .object([
+                    "context_size": .string("medium")
+                ])
+            ])
+        }
+        return .object(configuration)
     }
 
     private nonisolated static func interaction(
