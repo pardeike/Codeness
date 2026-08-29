@@ -38,6 +38,7 @@ struct CompanyHarnessV2FixtureTests {
             #expect(!prompt.contains("Improve the repository's actual product"))
             #expect(!prompt.contains("Report concrete product changes"))
             #expect(!prompt.contains("prove the best one through the repository"))
+            #expect(prompt.contains("complete authored work inline"))
             if member.positionID != .developer {
                 #expect(!CompanyToolPolicy(positionID: member.positionID!).permitsSourceMutation)
             }
@@ -198,7 +199,7 @@ private func fixtureMember(
         companyAssignment: CompanyAssignmentContract(
             contributionKind: contribution,
             requiredCapabilities: practice.allowedCapabilities
-                .filter { [.workspaceRead, .webResearch, .authoredArtifactWrite].contains($0) }
+                .filter { [.workspaceRead, .webResearch].contains($0) }
                 .sorted { $0.rawValue < $1.rawValue },
             acceptanceEvidence: practice.acceptanceEvidence,
             dependencyContributionKinds: dependencies,

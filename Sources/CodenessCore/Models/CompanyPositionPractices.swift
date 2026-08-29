@@ -237,10 +237,7 @@ public struct CompanyTargetCapabilityProfile: Equatable, Sendable {
     public let capabilities: Set<CompanyCapability>
 
     public init(target: AgentTarget) {
-        var capabilities: Set<CompanyCapability> = [
-            .workspaceRead,
-            .authoredArtifactWrite
-        ]
+        var capabilities: Set<CompanyCapability> = [.workspaceRead]
         if target.providerID == .codex || target.providerID == .claude {
             capabilities.insert(.webResearch)
         }

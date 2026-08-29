@@ -76,6 +76,10 @@ struct LiveTeamModelTests {
 
     @Test
     func companyAssignmentsFailClosedAcrossProfessionAndTargetBoundaries() {
+        let targetProfile = CompanyTargetCapabilityProfile(target: testTarget())
+        #expect(targetProfile.capabilities.contains(.workspaceRead))
+        #expect(!targetProfile.capabilities.contains(.authoredArtifactWrite))
+
         let sourceWritingArt = CompanyAssignmentContract(
             contributionKind: .visualDirection,
             requiredCapabilities: [.sourceModification],
@@ -638,6 +642,23 @@ struct LiveTeamModelTests {
         #expect(decoded.workerTurnsSinceStrategicReview == 0)
         #expect(decoded.lastStrategicReviewAt == nil)
         #expect(decoded.boardDirectionReason == nil)
+    }
+
+    @Test
+    func persistedMemberWithoutCompanyAssignmentRemainsReadable() throws {
+        let member = try #require(companyLiveTeamDefinition().members.first)
+        let encoded = try JSONEncoder().encode(member)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        object.removeValue(forKey: "companyAssignment")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(LiveTeamMember.self, from: legacyData)
+
+        #expect(decoded.id == member.id)
+        #expect(decoded.positionID == member.positionID)
+        #expect(decoded.companyAssignment == nil)
     }
 
     @Test
@@ -1929,7 +1950,7 @@ private func companyLiveTeamDefinition() -> LiveTeamDefinition {
                 person: artDirector,
                 companyAssignment: CompanyAssignmentContract(
                     contributionKind: .visualDirection,
-                    requiredCapabilities: [.workspaceRead, .authoredArtifactWrite],
+                    requiredCapabilities: [.workspaceRead],
                     acceptanceEvidence: "A distinct visual direction is inspectable.",
                     dependencyContributionKinds: [.productDirection, .softwareImplementation],
                     stopCondition: "Stop when the direction is decision-ready or blocked."

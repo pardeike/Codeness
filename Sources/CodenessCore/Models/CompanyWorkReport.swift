@@ -199,7 +199,7 @@ public struct CompanyWorkReport: Codable, Equatable, Sendable {
         return """
         WORK REPORT
 
-        Return only the structured JSON work report requested by Codeness. Use workerID "\(snapshot.member.id)", positionID "\(positionID.rawValue)", and one of these contribution kinds: \(contributions). Keep the full result of your craft in artifacts; evidence; decisions; constraints; and risks. If the next required effect is unavailable or belongs to another profession, fill capabilityBlock and recommend the correct position instead of doing that work yourself. Use null when there is no capability block.
+        Return only the structured JSON work report requested by Codeness. Use workerID "\(snapshot.member.id)", positionID "\(positionID.rawValue)", and one of these contribution kinds: \(contributions). Keep the full result of your craft in artifacts; evidence; decisions; constraints; and risks. When separate file writing is unavailable, put complete authored work inline in those report fields; that alone is not a capability block unless the assignment explicitly requires a file artifact. If the next required effect is unavailable or belongs to another profession, fill capabilityBlock and recommend the correct position instead of doing that work yourself. Use null when there is no capability block.
         """
     }
 
