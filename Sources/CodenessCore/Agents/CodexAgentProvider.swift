@@ -137,6 +137,7 @@ public actor CodexAgentProvider: AgentProviding {
 
     private let appServer: CodexAppServerClient
     private var models: [CodexModel]
+    private var retainsCompletedSessionsForDebugging: Bool
     private var activeRuns: [UUID: ActiveRun] = [:]
     private var sessionRuns: [String: UUID] = [:]
     private var executionRuns: [String: UUID] = [:]
@@ -177,6 +178,7 @@ public actor CodexAgentProvider: AgentProviding {
     public init(
         appServer: CodexAppServerClient,
         models: [CodexModel] = [],
+        retainsCompletedSessionsForDebugging: Bool = false,
         maximumLoadedThreadCount: Int = CodexAgentProvider.maximumLoadedThreadBudget,
         maximumRetainedUtilityThreadCount: Int = 2,
         maximumCleanupAttemptCount: Int = 8,
@@ -188,6 +190,7 @@ public actor CodexAgentProvider: AgentProviding {
     ) {
         self.appServer = appServer
         self.models = models
+        self.retainsCompletedSessionsForDebugging = retainsCompletedSessionsForDebugging
         self.maximumLoadedThreadCount = max(1, maximumLoadedThreadCount)
         self.maximumRetainedUtilityThreadCount = max(1, maximumRetainedUtilityThreadCount)
         cleanupRetryPolicy = CodexCleanupRetryPolicy(
@@ -205,6 +208,15 @@ public actor CodexAgentProvider: AgentProviding {
 
     public func updateModels(_ models: [CodexModel]) {
         self.models = models
+    }
+
+    public func updateRetainsCompletedSessionsForDebugging(_ enabled: Bool) {
+        retainsCompletedSessionsForDebugging = enabled
+        guard enabled else { return }
+        for sessionID in Array(deleteDebts.keys) {
+            clearDeleteDebt(sessionID: sessionID)
+            retainedUtilityThreadIDs.remove(sessionID)
+        }
     }
 
     public func prepareSession(_ request: AgentSessionRequest) async throws -> AgentSession {
@@ -582,6 +594,28 @@ public actor CodexAgentProvider: AgentProviding {
         return confirmed
             && protocolContainment == nil
             && protocolGenerationRevision == admittedProtocolRevision
+    }
+
+    @discardableResult
+    public func retireSession(id sessionID: String) async -> Bool {
+        guard protocolContainment == nil else { return false }
+        let admittedProtocolRevision = protocolGenerationRevision
+        if let runID = sessionRuns[sessionID] {
+            guard activeRuns[runID]?.isFinishing == true,
+                  await waitForRunTermination(runID: runID) else { return false }
+        }
+        guard protocolContainment == nil,
+              protocolGenerationRevision == admittedProtocolRevision else { return false }
+        let retired = if retainsCompletedSessionsForDebugging {
+            await archiveThread(id: sessionID)
+        } else {
+            await deleteThread(id: sessionID)
+        }
+        guard retired,
+              protocolContainment == nil,
+              protocolGenerationRevision == admittedProtocolRevision else { return false }
+        attachedSessionIDs.remove(sessionID)
+        return true
     }
 
     private func utilityResult(
@@ -1718,16 +1752,26 @@ public actor CodexAgentProvider: AgentProviding {
 
     private func releaseUtilityThread(id sessionID: String) async {
         guard protocolContainment == nil else { return }
-        let deleted = await deleteUtilityThread(id: sessionID)
+        // Utility callers reach this point only after waitForRunTermination
+        // confirmed the turn is finished, so avoid waiting on the same run a
+        // second time through the public phase-session retirement entry point.
+        let retired = if retainsCompletedSessionsForDebugging {
+            await archiveThread(id: sessionID)
+        } else {
+            await deleteThread(id: sessionID)
+        }
         guard protocolContainment == nil else { return }
-        guard !deleted else { return }
-        // A failed hard delete must not leave the thread loaded while retries
-        // continue. Unsubscribe is a fail-safe, not proof of deletion.
+        guard !retired else { return }
+        // Failed retirement must not leave the thread loaded. Unsubscribe is a
+        // fail-safe only; it never substitutes deletion for requested archival.
         _ = await releaseDetachedThread(id: sessionID)
+        if retainsCompletedSessionsForDebugging {
+            retainedUtilityThreadIDs.remove(sessionID)
+        }
     }
 
     @discardableResult
-    private func deleteUtilityThread(id sessionID: String) async -> Bool {
+    private func deleteThread(id sessionID: String) async -> Bool {
         guard protocolContainment == nil else { return false }
         if let existing = deleteTasks[sessionID] {
             return await existing.task.value
@@ -1743,6 +1787,35 @@ public actor CodexAgentProvider: AgentProviding {
             deleteTasks.removeValue(forKey: sessionID)
         }
         return confirmed
+    }
+
+    private func archiveThread(id sessionID: String) async -> Bool {
+        switch await prepareThreadForRelease(sessionID: sessionID) {
+        case .ready:
+            break
+        case .generationContained:
+            retainedUtilityThreadIDs.remove(sessionID)
+            await cancelPendingUnsubscribe(for: sessionID)
+            return true
+        case .cleanupUnconfirmed:
+            return false
+        }
+        do {
+            try await appServer.archiveThread(id: sessionID)
+            guard protocolContainment == nil else { return false }
+            let loadedThreadIDs = try await appServer.loadedThreadIDs()
+            guard !loadedThreadIDs.contains(sessionID) else {
+                throw AppServerClientError.invalidResponse(
+                    "thread/archive returned before \(sessionID) was unloaded"
+                )
+            }
+            guard protocolContainment == nil else { return false }
+            retainedUtilityThreadIDs.remove(sessionID)
+            await cancelPendingUnsubscribe(for: sessionID)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func performDeleteAttempt(sessionID: String) async -> Bool {
@@ -1808,7 +1881,7 @@ public actor CodexAgentProvider: AgentProviding {
     private func retryDelete(sessionID: String) async {
         deleteRetryTasks.removeValue(forKey: sessionID)
         guard deleteDebts[sessionID] != nil else { return }
-        let deleted = await deleteUtilityThread(id: sessionID)
+        let deleted = await deleteThread(id: sessionID)
         if !deleted {
             _ = await releaseDetachedThread(id: sessionID)
         }
@@ -2026,7 +2099,7 @@ public actor CodexAgentProvider: AgentProviding {
             }
             .sorted()
         for debtSessionID in quiescentDeleteDebt {
-            let deleted = await deleteUtilityThread(id: debtSessionID)
+            let deleted = await deleteThread(id: debtSessionID)
             try requireAvailableProtocolGeneration()
             if !deleted {
                 _ = await releaseDetachedThread(id: debtSessionID)

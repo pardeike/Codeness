@@ -61,6 +61,43 @@ struct RunTranscriptPresentationTests {
     }
 
     @Test
+    func structuredCompanyReportsStayStoredButAreHiddenFromTheTranscript() throws {
+        let snapshot = assignedCompanySnapshot()
+        let report = CompanyWorkReport(
+            workerID: snapshot.member.id,
+            positionID: .artDirector,
+            contributionKind: .visualDirection,
+            summary: "Established a playful paper-cut visual direction.",
+            artifacts: ["ART_DIRECTION.md"],
+            evidence: ["The palette and shape language cover the core interaction states."],
+            decisions: ["Use torn-paper silhouettes and saturated rain colors."],
+            constraints: [],
+            risks: ["Small silhouettes need contrast testing."],
+            capabilityBlock: nil,
+            recommendedRecipientPositions: [.developer]
+        )
+        let rawReport = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+        let transcript = RunTranscriptPresentation.storedText(
+            "Exploring three distinct visual directions.\n",
+            section: .reasoning
+        ) + RunTranscriptPresentation.storedText(rawReport, section: .reasoning)
+        let run = makeRun(
+            prompt: "Define the visual direction.",
+            transcript: transcript,
+            liveTeamMember: snapshot
+        )
+
+        let presented = RunTranscriptPresentation.text(for: run, separatesRuns: true)
+        #expect(presented.contains("Exploring three distinct visual directions."))
+        #expect(!presented.contains("workerID"))
+        #expect(!presented.contains("recommendedRecipientPositions"))
+        #expect(run.transcript.contains(rawReport))
+        #expect(report.presentationMarkdown.contains("playful paper-cut visual direction"))
+        #expect(report.presentationMarkdown.contains("ART_DIRECTION.md"))
+        #expect(!report.presentationMarkdown.contains("workerID"))
+    }
+
+    @Test
     func steeringMessagesRemainVisibleAndIdentifyOnlyTheUserMessage() throws {
         let transcript = RunTranscriptPresentation.storedText(
             "Agent output before steering.\n",
@@ -317,7 +354,8 @@ struct RunTranscriptPresentationTests {
     private func makeRun(
         prompt: String,
         transcript: String,
-        finalOutput: String? = nil
+        finalOutput: String? = nil,
+        liveTeamMember: LiveTeamMemberSnapshot? = nil
     ) -> RunRecord {
         RunRecord(
             sequence: 1,
@@ -329,7 +367,34 @@ struct RunTranscriptPresentationTests {
             effort: "medium",
             prompt: prompt,
             transcript: transcript,
-            finalOutput: finalOutput
+            finalOutput: finalOutput,
+            liveTeamMember: liveTeamMember
+        )
+    }
+
+    private func assignedCompanySnapshot() -> LiveTeamMemberSnapshot {
+        let member = LiveTeamMember(
+            id: "art_direction",
+            name: "Define Visual Direction",
+            instructions: "Create a decision-ready visual direction.",
+            target: AgentTarget(providerID: .codex, model: "gpt-test"),
+            runPolicy: .once,
+            sessionPolicy: .ownMemory,
+            positionID: .artDirector,
+            companyAssignment: CompanyAssignmentContract(
+                contributionKind: .visualDirection,
+                requiredCapabilities: [.workspaceRead],
+                acceptanceEvidence: "A coherent visual direction is inspectable.",
+                dependencyContributionKinds: [],
+                stopCondition: "Stop when the direction is decision-ready."
+            )
+        )
+        return LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: "Define the product before implementation.",
+            revision: 1,
+            cycle: 1,
+            sessionSlotID: "member:art_direction"
         )
     }
 }

@@ -152,13 +152,15 @@ struct RepositoryWindowLifecycleSafetyTests {
         await recent.coordinator.load()
         try original.assertUnchanged(at: fixture.repositoryURL, after: "Open Recent")
 
-        // Paused work remains resumable. Start Over is reserved for a goal the
-        // Overseer has completed, so reopening cannot discard this checkpoint.
-        #expect(!recent.coordinator.canStartOver)
+        // A resumable document can still be reset deliberately. Start Over keeps
+        // the goal and repository while discarding the old activity checkpoint.
+        #expect(recent.coordinator.canStartOver)
         await recent.coordinator.startOver()
-        #expect(recent.coordinator.record.activity?.goal == "Protect this fixture")
-        #expect(recent.coordinator.canResume)
-        try original.assertUnchanged(at: fixture.repositoryURL, after: "rejected Start Over")
+        #expect(recent.coordinator.record.activity == nil)
+        #expect(recent.coordinator.record.activityDraft?.goal == "Protect this fixture")
+        #expect(!recent.coordinator.canResume)
+        #expect(recent.coordinator.canStartActivity)
+        try original.assertUnchanged(at: fixture.repositoryURL, after: "Start Over")
 
         recent.window?.performClose(nil)
         try await waitUntil { restoredManager.isEmpty }

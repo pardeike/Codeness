@@ -22,13 +22,27 @@ struct RunDetailView: View {
                 .background(Color(nsColor: .windowBackgroundColor))
                 .zIndex(1)
             Divider()
-            transcriptAndFinalResult
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if let liveStatusPresentation {
-                        RunLiveStatusView(presentation: liveStatusPresentation)
-                            .padding(.bottom, 10)
-                    }
+            if let workerBrief = WorkerBriefPresentation(
+                snapshot: run.liveTeamMember,
+                prompt: run.prompt
+            ) {
+                VSplitView {
+                    WorkerBriefView(presentation: workerBrief)
+                        .id(run.id)
+                        .frame(minHeight: 90, idealHeight: 180)
+                    transcriptWithLiveStatus
+                        .frame(minHeight: 180)
                 }
+                .background {
+                    RunDetailSplitViewStateBridge(
+                        restoredFraction: coordinator.viewState.workerBriefFraction ?? 0.26,
+                        allowedFractionRange: RepositoryViewState.workerBriefFractionRange,
+                        onFractionChange: coordinator.updateWorkerBriefFraction
+                    )
+                }
+            } else {
+                transcriptWithLiveStatus
+            }
             if let recoveryPresentation {
                 Divider()
                 RunRecoveryView(
@@ -39,6 +53,16 @@ struct RunDetailView: View {
                 .frame(maxHeight: 180)
             }
         }
+    }
+
+    private var transcriptWithLiveStatus: some View {
+        transcriptAndFinalResult
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let liveStatusPresentation {
+                    RunLiveStatusView(presentation: liveStatusPresentation)
+                        .padding(.bottom, 10)
+                }
+            }
     }
 
     private var recoveryPresentation: RunRecoveryPresentation? {
@@ -72,7 +96,7 @@ struct RunDetailView: View {
 
     @ViewBuilder
     private var transcriptAndFinalResult: some View {
-        if let finalOutput = run.finalOutput, !finalOutput.isEmpty {
+        if let finalOutput = presentedFinalOutput, !finalOutput.isEmpty {
             switch coordinator.runDetailPresentation {
             case .split:
                 VSplitView {
@@ -101,6 +125,15 @@ struct RunDetailView: View {
         } else {
             transcript
         }
+    }
+
+    private var presentedFinalOutput: String? {
+        guard let finalOutput = run.finalOutput,
+              let snapshot = run.liveTeamMember,
+              let report = CompanyWorkReport.decode(finalOutput, for: snapshot) else {
+            return run.finalOutput
+        }
+        return report.presentationMarkdown
     }
 
     private var transcript: some View {
@@ -289,6 +322,107 @@ struct RunDetailView: View {
             values.append("Fast")
         }
         return values.joined(separator: " · ") + durationText
+    }
+}
+
+struct WorkerBriefPresentation: Equatable {
+    let goal: String
+    let assignment: String
+    let acceptance: String
+    let stop: String
+    let handoff: String
+
+    init?(snapshot: LiveTeamMemberSnapshot?, prompt: String) {
+        guard let snapshot, let assignment = snapshot.member.companyAssignment else {
+            return nil
+        }
+        let extractedHandoff = Self.promptSection(
+            "HANDOFF",
+            before: "FUNDED PRODUCT BET",
+            in: prompt
+        ) ?? "None"
+        goal = Self.singleLine(snapshot.workingGoal)
+        self.assignment = Self.singleLine(snapshot.member.instructions)
+        acceptance = Self.singleLine(assignment.acceptanceEvidence)
+        stop = Self.singleLine(assignment.stopCondition)
+        handoff = Self.singleLine(extractedHandoff)
+    }
+
+    private static func promptSection(
+        _ heading: String,
+        before nextHeading: String,
+        in prompt: String
+    ) -> String? {
+        let marker = "\n\(heading)\n\n"
+        guard let start = prompt.range(of: marker)?.upperBound else { return nil }
+        let remainder = prompt[start...]
+        let endMarker = "\n\n\(nextHeading)\n"
+        guard let end = remainder.range(of: endMarker)?.lowerBound else { return nil }
+        let value = prompt[start..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private static func singleLine(_ value: String) -> String {
+        value.split(whereSeparator: \Character.isWhitespace).joined(separator: " ")
+    }
+}
+
+private struct WorkerBriefView: View {
+    let presentation: WorkerBriefPresentation
+    @State private var goalExpanded = false
+    @State private var assignmentExpanded = false
+    @State private var acceptanceExpanded = false
+    @State private var stopExpanded = false
+    @State private var handoffExpanded = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Worker brief")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 6) {
+                    briefSection("Goal", text: presentation.goal, isExpanded: $goalExpanded)
+                    briefSection(
+                        "Assignment",
+                        text: presentation.assignment,
+                        isExpanded: $assignmentExpanded
+                    )
+                    briefSection(
+                        "Acceptance",
+                        text: presentation.acceptance,
+                        isExpanded: $acceptanceExpanded
+                    )
+                    briefSection("Stop", text: presentation.stop, isExpanded: $stopExpanded)
+                    briefSection(
+                        "Handoff",
+                        text: presentation.handoff,
+                        isExpanded: $handoffExpanded
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Worker brief")
+    }
+
+    private func briefSection(
+        _ title: String,
+        text: String,
+        isExpanded: Binding<Bool>
+    ) -> some View {
+        DisclosureGroup(title, isExpanded: isExpanded) {
+            Text(text)
+                .font(.callout.monospaced())
+                .textSelection(.enabled)
+                .padding(.top, 2)
+                .padding(.leading, 4)
+        }
+        .font(.callout.weight(.medium))
     }
 }
 

@@ -37,7 +37,7 @@ Ordinary successful turns use a deterministic company motor and do not spend ano
 
 Personas are deliberately non-neutral. They are prompted and validated to be opinionated, ambitious, personally invested, and unwilling to settle for mediocre work. Position is operational, not cosmetic: an Art Director owns visual direction, a Sound Designer owns sound and music, a Researcher owns sourced findings, and only a Developer assignment receives source-modification tools. A missing capability becomes an explicit CEO decision instead of an instruction to program around the gap.
 
-The implementation and tradeoffs are recorded in [Goal-directed orchestration](Documentation/live-loop-redesign.md).
+The implementation and tradeoffs are recorded in [Company orchestration](Documentation/company-orchestration.md).
 
 ## Get started
 
@@ -51,7 +51,7 @@ To run Codeness:
   - Claude Code with the streaming JSON protocol used by Codeness; or
   - an OpenAI-compatible Chat Completions endpoint and model.
 
-To build from source, install Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer. The canonical Release install also needs a Developer ID Application certificate for account `W65292CD8T` and a `notarytool` Keychain profile. The default profile is `brrainz-notary`.
+To build from source, install Xcode 27 and [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.38.0 or newer. The canonical Release install also needs a Developer ID Application certificate for account `W65292CD8T`.
 
 Codeness uses the existing authentication of Codex and Claude Code. For an OpenAI-compatible endpoint, it reads an optional API key from the configured JSON file and property without storing the key itself.
 
@@ -64,9 +64,9 @@ cd Codeness
 open /Applications/Codeness.app
 ```
 
-The script generates the Xcode project, builds and signs a hardened Release app, notarizes and staples it, verifies it with Gatekeeper, and installs it at `/Applications/Codeness.app`. It replaces the installed app only after the pre-installation checks pass. Project settings live in `project.yml`; the generated `.xcodeproj` is ignored.
+The app uses the same stable Developer ID, bundle ID, and privacy entitlements for Debug and Release builds so macOS keeps its privacy permissions attached to one signing identity. Debug adds only the `get-task-allow` entitlement required by XCTest. The install script generates the Xcode project, builds and locally signs a hardened Release app, and installs it at `/Applications/Codeness.app`. It does not submit the app to Apple. It replaces the installed app only after the signature and entitlements pass verification. Project settings live in `project.yml`; the generated `.xcodeproj` is ignored.
 
-Use `CODENESS_CODESIGN_IDENTITY` for another Developer ID identity and `CODENESS_NOTARY_PROFILE` for another saved profile. If either lives outside the normal Keychain search list, set `CODENESS_CODESIGN_KEYCHAIN` or `CODENESS_NOTARY_KEYCHAIN`. The scripts do not store credentials or pass Keychain passwords on the command line.
+Use `CODENESS_CODESIGN_IDENTITY` for another Developer ID identity. If it lives outside the normal Keychain search list, set `CODENESS_CODESIGN_KEYCHAIN`. The scripts do not store credentials or pass Keychain passwords on the command line.
 
 ### Start an activity
 

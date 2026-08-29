@@ -405,7 +405,8 @@ public actor CodexAppServerClient {
             "model": .string(model),
             "developerInstructions": .string(developerInstructions),
             "ephemeral": .bool(ephemeral),
-            "serviceName": .string("Codeness")
+            "serviceName": .string("Codeness"),
+            "threadSource": .string("codeness-automated")
         ]
         if readOnly {
             params["sandbox"] = .string("read-only")
@@ -702,6 +703,18 @@ public actor CodexAppServerClient {
         }
     }
 
+    public func archiveThread(id: String) async throws {
+        let response = try await sendRequest(
+            method: "thread/archive",
+            params: ["threadId": .string(id)]
+        )
+        guard response.objectValue?.isEmpty == true else {
+            throw AppServerClientError.invalidResponse(
+                "thread/archive did not return an empty object"
+            )
+        }
+    }
+
     public func setThreadName(id: String, name: String) async throws {
         _ = try await sendRequest(
             method: "thread/name/set",
@@ -989,7 +1002,8 @@ public actor CodexAppServerClient {
 
     private nonisolated static func isControlRequest(_ method: String) -> Bool {
         switch method {
-        case "initialize", "turn/interrupt", "thread/delete", "thread/unsubscribe",
+        case "initialize", "turn/interrupt", "thread/archive", "thread/delete",
+             "thread/unsubscribe",
              "thread/loaded/list", "thread/backgroundTerminals/clean",
              "thread/backgroundTerminals/list": true
         default: false
@@ -998,7 +1012,8 @@ public actor CodexAppServerClient {
 
     private nonisolated static func requiresMutationOutcome(_ method: String) -> Bool {
         switch method {
-        case "thread/delete", "thread/start", "thread/resume", "thread/unsubscribe",
+        case "thread/archive", "thread/delete", "thread/start", "thread/resume",
+             "thread/unsubscribe",
              "thread/backgroundTerminals/clean", "turn/start", "turn/steer": true
         default: false
         }

@@ -511,6 +511,7 @@ public struct WorkOverviewSummaryCache: Codable, Sendable, Equatable {
 
 public struct RepositoryViewState: Codable, Sendable, Equatable {
     public static let currentSchemaVersion = 1
+    public static let workerBriefFractionRange = 0.12 ... 0.65
 
     public var schemaVersion: Int
     public var selectedRunID: UUID?
@@ -523,6 +524,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
     public var pauseAfterCurrent: Bool
     public var detailPresentation: RunDetailPresentation?
     public var detailSplitFraction: Double?
+    public var workerBriefFraction: Double?
     public var workOverviewSummary: WorkOverviewSummaryCache?
 
     public init(
@@ -537,6 +539,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         pauseAfterCurrent: Bool = false,
         detailPresentation: RunDetailPresentation? = nil,
         detailSplitFraction: Double? = nil,
+        workerBriefFraction: Double? = nil,
         workOverviewSummary: WorkOverviewSummaryCache? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -551,6 +554,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         self.pauseAfterCurrent = pauseAfterCurrent
         self.detailPresentation = detailPresentation
         self.detailSplitFraction = detailSplitFraction
+        self.workerBriefFraction = workerBriefFraction
         self.workOverviewSummary = workOverviewSummary
     }
 
@@ -566,6 +570,7 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         case pauseAfterCurrent
         case detailPresentation
         case detailSplitFraction
+        case workerBriefFraction
         case workOverviewSummary
     }
 
@@ -599,6 +604,10 @@ public struct RepositoryViewState: Codable, Sendable, Equatable {
         detailSplitFraction = try container.decodeIfPresent(
             Double.self,
             forKey: .detailSplitFraction
+        )
+        workerBriefFraction = try container.decodeIfPresent(
+            Double.self,
+            forKey: .workerBriefFraction
         )
         workOverviewSummary = try container.decodeIfPresent(
             WorkOverviewSummaryCache.self,
@@ -867,8 +876,8 @@ public struct ActivityRecord: Codable, Sendable, Equatable, Identifiable {
 /// The editable configuration shown before an activity starts.
 ///
 /// Fresh repository windows have no draft and therefore use the application's
-/// current defaults. Starting over captures the preceding activity here so the
-/// same goal and prompts can be edited before a new session pair is created.
+/// current defaults. Starting over stores only the preceding goal here; prompts
+/// and workflow configuration return to fresh-project defaults.
 public struct ActivityConfigurationDraft: Codable, Sendable, Equatable {
     public var goal: String
     public var prompts: ActivityPrompts

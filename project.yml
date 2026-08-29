@@ -46,14 +46,15 @@ targets:
         INFOPLIST_FILE: Codeness-Info.plist
         CURRENT_PROJECT_VERSION: 1
         MARKETING_VERSION: 0.9.6
-        CODE_SIGN_ENTITLEMENTS: Codeness.entitlements
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
         DEVELOPMENT_TEAM: W65292CD8T
       configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Codeness-Debug.entitlements
         Release:
-          CODE_SIGN_STYLE: Manual
-          CODE_SIGN_IDENTITY: "Developer ID Application"
-          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+          CODE_SIGN_ENTITLEMENTS: Codeness.entitlements
   CodenessPrototype:
     type: application
     platform: macOS

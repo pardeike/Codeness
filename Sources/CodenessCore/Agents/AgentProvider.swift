@@ -270,6 +270,10 @@ public protocol AgentProviding: Actor {
     /// place so a later save or reopen can retry the release.
     @discardableResult
     func releaseSession(id: String) async -> Bool
+    /// Performs provider-defined cleanup for a completed session. Providers
+    /// with durable catalogs can override this to delete or archive it.
+    @discardableResult
+    func retireSession(id: String) async -> Bool
     func shutdown() async
     /// Stops the provider and reports whether every process owned by the
     /// provider was confirmed gone.
@@ -286,6 +290,10 @@ public extension AgentProviding {
     nonisolated var supportsLiveWebResearch: Bool { false }
 
     func releaseSession(id: String) async -> Bool { false }
+
+    func retireSession(id: String) async -> Bool {
+        await releaseSession(id: id)
+    }
 
     @discardableResult
     func shutdownAndVerify() async -> Bool {
@@ -460,6 +468,12 @@ public actor AgentProviderRegistry {
     public func releaseSession(providerID: AgentProviderID, id: String) async -> Bool {
         guard let provider = providers[providerID] else { return false }
         return await provider.releaseSession(id: id)
+    }
+
+    @discardableResult
+    public func retireSession(providerID: AgentProviderID, id: String) async -> Bool {
+        guard let provider = providers[providerID] else { return false }
+        return await provider.retireSession(id: id)
     }
 
     @discardableResult

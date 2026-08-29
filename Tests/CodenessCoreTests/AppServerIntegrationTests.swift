@@ -1013,14 +1013,19 @@ struct AppServerIntegrationTests {
 
         await coordinator.startOver()
 
-        #expect(coordinator.record == beforeReset)
+        // Close preparation durably saves the unchanged activity before the archive
+        // attempt. That advances only the repository timestamp; an archive failure
+        // must still preserve the activity, its configuration, and its session IDs.
+        var expectedAfterFailure = beforeReset
+        expectedAfterFailure.updatedAt = coordinator.record.updatedAt
+        #expect(coordinator.record == expectedAfterFailure)
         #expect(coordinator.record.activityDraft == nil)
         #expect(coordinator.record.implementerThreadID == "old-implementer-thread")
         #expect(coordinator.record.reviewerThreadID == "old-reviewer-thread")
         #expect(coordinator.canStartOver)
         #expect(coordinator.errorMessage?.contains("Could not start over") == true)
         #expect(coordinator.errorMessage?.contains("Injected workspace save failure") == true)
-        #expect(try await baseStore.load(canonicalPath: repositoryPath) == beforeReset)
+        #expect(try await baseStore.load(canonicalPath: repositoryPath) == expectedAfterFailure)
     }
 
     @MainActor
@@ -2159,7 +2164,7 @@ struct CodexProviderReliabilityTests {
             return
         }
         #expect(detail.contains("Could not automatically approve"))
-        try await Self.waitUntilAsync(timeout: .seconds(1)) {
+        try await Self.waitUntilAsync(timeout: .seconds(3)) {
             await provider.cleanupDebtSnapshot().interruptedRuns[runID] != nil
         }
         #expect(await provider.runEventSnapshot(runID: runID) != nil)
@@ -3017,6 +3022,77 @@ struct CodexProviderReliabilityTests {
         await client.shutdown()
     }
 
+    @Test
+    func debugModeArchivesUtilityThreadsInsteadOfDeletingThem() async throws {
+        let fixture = try LifecycleAppServerFixture(backgroundTerminalCount: 1)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        let provider = CodexAgentProvider(
+            appServer: client,
+            retainsCompletedSessionsForDebugging: true
+        )
+        let consumer = await Self.consume(client: client, provider: provider)
+        defer { consumer.cancel() }
+        try await client.start(configuration: fixture.configuration)
+
+        let result = try await provider.runUtility(
+            Self.utilityRequest(prompt: "complete")
+        )
+        #expect(result.output == "utility complete")
+
+        let methods = fixture.loggedMethods()
+        #expect(methods.filter { $0 == "thread/backgroundTerminals/clean" }.count == 1)
+        #expect(methods.filter { $0 == "thread/backgroundTerminals/list" }.count == 1)
+        #expect(methods.filter { $0 == "thread/archive" }.count == 1)
+        #expect(methods.filter { $0 == "thread/delete" }.isEmpty)
+        await client.shutdown()
+    }
+
+    @Test
+    func debugModeNeverDeletesAUtilityThreadWhenArchivingFails() async throws {
+        let fixture = try LifecycleAppServerFixture(archiveFailures: 3)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        let provider = CodexAgentProvider(
+            appServer: client,
+            retainsCompletedSessionsForDebugging: true
+        )
+        let consumer = await Self.consume(client: client, provider: provider)
+        defer { consumer.cancel() }
+        try await client.start(configuration: fixture.configuration)
+
+        for _ in 0..<3 {
+            let result = try await provider.runUtility(Self.utilityRequest(prompt: "complete"))
+            #expect(result.output == "utility complete")
+        }
+        let methods = fixture.loggedMethods()
+        #expect(methods.filter { $0 == "thread/archive" }.count == 3)
+        #expect(methods.filter { $0 == "thread/delete" }.isEmpty)
+        #expect(methods.filter { $0 == "thread/unsubscribe" }.count == 3)
+        await client.shutdown()
+    }
+
+    @Test
+    func enablingDebugModeCancelsOutstandingDeleteRetries() async throws {
+        let fixture = try LifecycleAppServerFixture(deleteFailures: 1)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        let provider = CodexAgentProvider(
+            appServer: client,
+            cleanupRetryDelay: .seconds(5)
+        )
+        let consumer = await Self.consume(client: client, provider: provider)
+        defer { consumer.cancel() }
+        try await client.start(configuration: fixture.configuration)
+
+        _ = try await provider.runUtility(Self.utilityRequest(prompt: "complete"))
+        #expect(await provider.cleanupDebtSnapshot().deleteThreads.count == 1)
+        await provider.updateRetainsCompletedSessionsForDebugging(true)
+        #expect(await provider.cleanupDebtSnapshot().deleteThreads.isEmpty)
+        #expect(fixture.loggedMethods().filter { $0 == "thread/delete" }.count == 1)
+        await client.shutdown()
+    }
+
     @Test(.timeLimit(.minutes(1)))
     func completedPhaseSessionRemainsPersistentUntilExplicitRelease() async throws {
         let fixture = try LifecycleAppServerFixture(backgroundTerminalCount: 2)
@@ -3064,6 +3140,37 @@ struct CodexProviderReliabilityTests {
         #expect(methods.filter { $0 == "thread/unsubscribe" }.count == 1)
         #expect(methods.filter { $0 == "thread/delete" }.isEmpty)
         await client.shutdown()
+    }
+
+    @Test
+    func retiringACompletedPhaseSessionDeletesOrArchivesFromDebugMode() async throws {
+        for retainsForDebugging in [false, true] {
+            let fixture = try LifecycleAppServerFixture()
+            defer { fixture.remove() }
+            let client = CodexAppServerClient()
+            let provider = CodexAgentProvider(
+                appServer: client,
+                retainsCompletedSessionsForDebugging: retainsForDebugging
+            )
+            let consumer = await Self.consume(client: client, provider: provider)
+            defer { consumer.cancel() }
+            try await client.start(configuration: fixture.configuration)
+            let session = try await provider.prepareSession(
+                Self.sessionRequest(existingSessionID: nil)
+            )
+
+            #expect(await provider.retireSession(id: session.id))
+            let methods = fixture.loggedMethods()
+            #expect(
+                methods.filter { $0 == (retainsForDebugging ? "thread/archive" : "thread/delete") }
+                    .count == 1
+            )
+            #expect(
+                methods.filter { $0 == (retainsForDebugging ? "thread/delete" : "thread/archive") }
+                    .isEmpty
+            )
+            await client.shutdown()
+        }
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -3649,6 +3756,7 @@ private struct LifecycleAppServerFixture: Sendable {
     let logURL: URL
     let unsubscribeFailures: Int
     let deleteFailures: Int
+    let archiveFailures: Int
     let unsubscribeDelayMilliseconds: Int
     let interruptFailures: Int
     let interruptEmitsTerminal: Bool
@@ -3670,6 +3778,7 @@ private struct LifecycleAppServerFixture: Sendable {
             logURL.path,
             "--unsubscribe-failures=\(unsubscribeFailures)",
             "--delete-failures=\(deleteFailures)",
+            "--archive-failures=\(archiveFailures)",
             "--unsubscribe-delay-ms=\(unsubscribeDelayMilliseconds)",
             "--interrupt-failures=\(interruptFailures)",
             "--loaded-list-delay-ms=\(loadedListDelayMilliseconds)",
@@ -3699,6 +3808,7 @@ private struct LifecycleAppServerFixture: Sendable {
         rejectsUnsubscribe: Bool = false,
         unsubscribeFailures: Int = 0,
         deleteFailures: Int = 0,
+        archiveFailures: Int = 0,
         unsubscribeDelayMilliseconds: Int = 0,
         interruptFailures: Int = 0,
         interruptEmitsTerminal: Bool = true,
@@ -3721,6 +3831,7 @@ private struct LifecycleAppServerFixture: Sendable {
             .appendingPathComponent("codeness-lifecycle-\(identifier).log")
         self.unsubscribeFailures = rejectsUnsubscribe ? 1_000_000 : unsubscribeFailures
         self.deleteFailures = deleteFailures
+        self.archiveFailures = archiveFailures
         self.unsubscribeDelayMilliseconds = unsubscribeDelayMilliseconds
         self.interruptFailures = interruptFailures
         self.interruptEmitsTerminal = interruptEmitsTerminal
@@ -3764,6 +3875,7 @@ def option(prefix, default=0):
 
 unsubscribe_failures = option("--unsubscribe-failures=")
 delete_failures = option("--delete-failures=")
+archive_failures = option("--archive-failures=")
 unsubscribe_delay_ms = option("--unsubscribe-delay-ms=")
 interrupt_failures = option("--interrupt-failures=")
 interrupt_emits_terminal = "--interrupt-without-terminal" not in arguments
@@ -3784,6 +3896,7 @@ thread_count = 0
 turn_count = 0
 unsubscribe_count = 0
 delete_count = 0
+archive_count = 0
 interrupt_count = 0
 background_clean_count = 0
 
@@ -3891,6 +4004,15 @@ for line in sys.stdin:
             emit({"id": identifier, "error": {"code": -32000, "message": "background terminals still running"}})
         elif delete_count <= delete_failures:
             emit({"id": identifier, "error": {"code": -32000, "message": "injected delete failure"}})
+        else:
+            loaded.discard(thread_id)
+            background_terminals.pop(thread_id, None)
+            emit({"id": identifier, "result": {}})
+    elif method == "thread/archive":
+        archive_count += 1
+        thread_id = message["params"]["threadId"]
+        if archive_count <= archive_failures:
+            emit({"id": identifier, "error": {"code": -32000, "message": "injected archive failure"}})
         else:
             loaded.discard(thread_id)
             background_terminals.pop(thread_id, None)

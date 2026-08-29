@@ -10,6 +10,7 @@ struct ApplicationSettingsView: View {
     @State private var openAICompatibleAPIKeyName: String
     @State private var openAICompatibleDisplayName: String
     @State private var separatesRunTranscripts: Bool
+    @State private var codexDebugMode: Bool
     @State private var isSaving = false
     @State private var closeRequestID = 0
 
@@ -32,6 +33,7 @@ struct ApplicationSettingsView: View {
             initialValue: application.openAICompatibleConfiguration.displayName
         )
         _separatesRunTranscripts = State(initialValue: application.separatesRunTranscripts)
+        _codexDebugMode = State(initialValue: application.codexDebugMode)
     }
 
     var body: some View {
@@ -67,6 +69,10 @@ struct ApplicationSettingsView: View {
                                 }
                             }
                         }
+                        Toggle("Debug Mode", isOn: $codexDebugMode)
+                            .help("Keep completed internal Codex sessions archived for debugging")
+                        Text("Off deletes completed internal Codex sessions. On archives them so their transcripts remain available for debugging.")
+                            .foregroundStyle(.secondary)
                     }
                     VStack(alignment: .leading, spacing: 7) {
                         LabeledContent("Claude executable") {
@@ -293,6 +299,7 @@ struct ApplicationSettingsView: View {
 
     private var isDirty: Bool {
         separatesRunTranscripts != application.separatesRunTranscripts
+            || codexDebugMode != application.codexDebugMode
             || cleanExecutablePath != application.configuredExecutablePath
             || cleanClaudeExecutablePath != application.configuredClaudeExecutablePath
             || cleanOpenAICompatibleConfiguration != application.openAICompatibleConfiguration
@@ -310,6 +317,7 @@ struct ApplicationSettingsView: View {
         openAICompatibleAPIKeyName = application.openAICompatibleConfiguration.apiKeyName
         openAICompatibleDisplayName = application.openAICompatibleConfiguration.displayName
         separatesRunTranscripts = application.separatesRunTranscripts
+        codexDebugMode = application.codexDebugMode
     }
 
     @discardableResult
@@ -343,6 +351,7 @@ struct ApplicationSettingsView: View {
         openAICompatibleAPIKeyName = cleanOpenAICompatibleConfiguration.apiKeyName
         openAICompatibleDisplayName = cleanOpenAICompatibleConfiguration.displayName
         application.setSeparatesRunTranscripts(separatesRunTranscripts)
+        await application.setCodexDebugMode(codexDebugMode)
         return true
     }
 }

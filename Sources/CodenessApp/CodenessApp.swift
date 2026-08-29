@@ -161,7 +161,7 @@ private struct RepositoryWindowCommands: Commands {
             }
             .disabled(state.currentCoordinator?.canStartOver != true)
             .help(
-                "Archive the current activity and return to its editable goal"
+                "Stop active work, archive this activity, and return to its editable goal"
             )
 
             Divider()

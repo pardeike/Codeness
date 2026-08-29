@@ -767,19 +767,25 @@ struct LiveTeamModelTests {
             model: "gpt-5.6-terra",
             options: .init(effort: "medium")
         )
+        let terraHigh = AgentTarget(
+            providerID: .codex,
+            model: "gpt-5.6-terra",
+            options: .init(effort: "high")
+        )
         let runtime = LiveTeamRuntimeConfiguration(
             overseer: .init(target: sol, instructions: "Control strategy."),
             defaultCoordinator: .init(target: sol, instructions: "Route local work."),
             targetOptions: [
                 .init(id: "sol", label: "Sol", target: sol),
-                .init(id: "terra", label: "Terra", target: terra)
+                .init(id: "terra-medium", label: "Terra Medium", target: terra),
+                .init(id: "terra-high", label: "Terra High", target: terraHigh)
             ]
         )
 
         #expect(
             runtime.bootstrapOverseerConfiguration(
                 for: "Use only Codex gpt-5.6-terra for every role."
-            ).target == terra
+            ).target == terraHigh
         )
         #expect(
             runtime.bootstrapOverseerConfiguration(
@@ -790,6 +796,31 @@ struct LiveTeamModelTests {
             runtime.bootstrapOverseerConfiguration(
                 for: "Choose the smallest capable team."
             ).target == sol
+        )
+    }
+
+    @Test
+    func controlTargetsDefaultHighWhileRoutineRoutingDefaultsLow() throws {
+        let targets = ["medium", "low", "high"].map { effort in
+            let target = AgentTarget(
+                providerID: .codex,
+                model: "gpt-company",
+                options: .init(effort: effort)
+            )
+            return LiveTeamTargetOption(
+                id: "company-\(effort)",
+                label: "Company \(effort)",
+                target: target
+            )
+        }
+
+        #expect(
+            LiveTeamRuntimeConfiguration.preferredStrategicTarget(in: targets)?
+                .options.effort == "high"
+        )
+        #expect(
+            LiveTeamRuntimeConfiguration.preferredRoutineTarget(in: targets)?
+                .options.effort == "low"
         )
     }
 
@@ -881,7 +912,11 @@ private struct SeededTestGenerator: RandomNumberGenerator {
 struct AgentLiveTeamRouterTests {
     @Test
     func rolePromptsEnforceUserGoalVisibilityAndMapTargetChoices() async throws {
-        let provider = LiveTeamUtilityProvider()
+        let provider = LiveTeamUtilityProvider(personaNames: [
+            "Rhea Calder",
+            "Eli Navarro",
+            "Mira Voss",
+        ])
         let registry = AgentProviderRegistry(providers: [provider])
         let router = AgentLiveTeamRouter(providers: registry)
         let target = testTarget()
@@ -912,23 +947,23 @@ struct AgentLiveTeamRouterTests {
             defaultCoordinator: coordinator,
             cwd: "/tmp/live-team-router"
         )
-        #expect(definition.members.first?.target == target)
+        #expect(definition.members.allSatisfy { $0.target == target })
         #expect(definition.productBet?.audience == "People who need the feature")
         #expect(
             definition.productBet?.focusQuestion
                 == "Would the intended audience choose this feature over the closest alternative?"
         )
         #expect(
-            definition.members.first?.companyAssignment?.contributionKind
+            definition.member(id: "deliver")?.companyAssignment?.contributionKind
                 == .softwareImplementation
         )
         #expect(
-            definition.members.first?.companyAssignment?.requiredCapabilities
+            definition.member(id: "deliver")?.companyAssignment?.requiredCapabilities
                 == [.workspaceRead, .sourceModification, .commandExecution]
         )
 
         let snapshot = LiveTeamMemberSnapshot(
-            member: try #require(definition.members.first),
+            member: try #require(definition.member(id: "deliver")),
             workingGoal: definition.workingGoal,
             revision: 1,
             cycle: 1,
@@ -939,7 +974,7 @@ struct AgentLiveTeamRouterTests {
                 workingGoal: definition.workingGoal,
                 definition: definition,
                 sourceMember: snapshot,
-                proposedNextMember: definition.members.first,
+                proposedNextMember: definition.member(id: "deliver"),
                 previousHandoff: nil,
                 recentDecisions: [],
                 sourceResult: "Implemented and tested the bounded unit."
@@ -950,7 +985,7 @@ struct AgentLiveTeamRouterTests {
         #expect(decision.disposition == .continueTeam)
 
         let requests = await provider.requests()
-        #expect(requests.count == 4)
+        #expect(requests.count == 5)
         let bootstrapRequest = try #require(requests.first(where: {
             $0.outputSchema.objectValue?["properties"]?.objectValue?["productBet"] != nil
                 && $0.outputSchema.objectValue?["properties"]?.objectValue?["action"] == nil
@@ -961,7 +996,7 @@ struct AgentLiveTeamRouterTests {
         let personaRequests = requests.filter {
             $0.outputSchema.objectValue?["properties"]?.objectValue?["personalStake"] != nil
         }
-        #expect(personaRequests.count == 2)
+        #expect(personaRequests.count == 3)
         #expect(personaRequests[0].prompt.contains(boardGoal))
         #expect(!personaRequests[1].prompt.contains(boardGoal))
         #expect(bootstrapRequest.prompt.contains(boardGoal))
@@ -981,6 +1016,22 @@ struct AgentLiveTeamRouterTests {
         #expect(bootstrapRequest.developerInstructions.contains("choose only from this catalog"))
         let bootstrapInstructions = bootstrapRequest.developerInstructions
             + bootstrapRequest.prompt
+        #expect(
+            bootstrapRequest.outputSchema["properties"]?["members"]?["minItems"]
+                == .integer(2)
+        )
+        #expect(bootstrapInstructions.contains("product-specific lifecycle"))
+        #expect(bootstrapInstructions.contains("A pitch is not an implementation-ready specification"))
+        #expect(bootstrapInstructions.contains("at least two distinct working professions"))
+        #expect(bootstrapInstructions.contains("Do not keep an exhausted assignment"))
+        #expect(bootstrapInstructions.contains("Never use everyCycle to manufacture a funding runway"))
+        #expect(bootstrapInstructions.contains("A prototype is disposable evidence"))
+        #expect(bootstrapInstructions.contains("calibration emergency"))
+        #expect(bootstrapInstructions.contains("remaining distance to the promised product"))
+        #expect(bootstrapInstructions.contains("recurring internal selection pressure"))
+        #expect(bootstrapInstructions.contains("select, combine, mutate, or replace"))
+        #expect(bootstrapInstructions.contains("compete for attention against the current incumbent"))
+        #expect(bootstrapInstructions.contains("high or stronger reasoning by default"))
         #expect(bootstrapInstructions.contains("Order people by real execution dependency"))
         #expect(bootstrapInstructions.contains("required contribution and acceptance evidence"))
         #expect(bootstrapInstructions.contains("Art Director owns visualDirection"))
@@ -1006,7 +1057,8 @@ struct AgentLiveTeamRouterTests {
         let provider = LiveTeamUtilityProvider(personaNames: [
             "Rhea Calder",
             "Rhea Calder",
-            "Eli Navarro"
+            "Eli Navarro",
+            "Mira Voss"
         ])
         let registry = AgentProviderRegistry(providers: [provider])
         let router = AgentLiveTeamRouter(providers: registry)
@@ -1039,7 +1091,7 @@ struct AgentLiveTeamRouterTests {
         let personaRequests = await provider.requests().filter {
             $0.developerInstructions.contains("Create one memorable startup colleague")
         }
-        #expect(personaRequests.count == 3)
+        #expect(personaRequests.count == 4)
         #expect(personaRequests[1].prompt.contains("rhea calder"))
         #expect(personaRequests[2].prompt.contains("CORRECTION RETRY"))
         #expect(personaRequests[2].prompt.contains("reused an existing colleague's name"))
@@ -1644,6 +1696,84 @@ struct AgentLiveTeamRouterTests {
         ) == ["advancing", "stalled", "regressing", "unknown"])
     }
 
+    @Test
+    func companyDecoderRejectsACompanyWithoutTwoDistinctProfessions() throws {
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(Self.validResearchBootstrap.utf8)
+            ) as? [String: Any]
+        )
+        let members = try #require(object["members"] as? [[String: Any]])
+        object["members"] = [try #require(members.first)]
+        let output = String(
+            decoding: try JSONSerialization.data(withJSONObject: object),
+            as: UTF8.self
+        )
+        let target = testTarget()
+
+        #expect(throws: AgentProviderError.self) {
+            try AgentLiveTeamRouter.decodeCompanyDefinition(
+                output,
+                revision: 1,
+                targetOptions: [
+                    LiveTeamTargetOption(id: "primary", label: "Primary", target: target)
+                ],
+                defaultCoordinator: LiveTeamCoordinatorConfiguration(
+                    target: target,
+                    instructions: "Route accepted contributions."
+                ),
+                chiefExecutive: testCompanyPerson(
+                    name: "Rhea Calder",
+                    positionID: .chiefExecutive,
+                    assignment: "Own the fixed goal."
+                ),
+                setupTokenUsage: nil
+            )
+        }
+    }
+
+    @Test
+    func companyDecoderAllowsImplementationReadyDirectionFromRepositoryEvidence() throws {
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(Self.validResearchBootstrap.utf8)
+            ) as? [String: Any]
+        )
+        var members = try #require(object["members"] as? [[String: Any]])
+        members[1]["positionID"] = "developer"
+        members[1]["contributionKind"] = "softwareImplementation"
+        members[1]["requiredCapabilities"] = [
+            "workspaceRead", "sourceModification", "commandExecution"
+        ]
+        members[1]["dependencyContributionKinds"] = []
+        object["members"] = members
+        let output = String(
+            decoding: try JSONSerialization.data(withJSONObject: object),
+            as: UTF8.self
+        )
+        let target = testTarget()
+
+        let definition = try AgentLiveTeamRouter.decodeCompanyDefinition(
+            output,
+            revision: 1,
+            targetOptions: [
+                LiveTeamTargetOption(id: "primary", label: "Primary", target: target)
+            ],
+            defaultCoordinator: LiveTeamCoordinatorConfiguration(
+                target: target,
+                instructions: "Route accepted contributions."
+            ),
+            chiefExecutive: testCompanyPerson(
+                name: "Rhea Calder",
+                positionID: .chiefExecutive,
+                assignment: "Own the fixed goal."
+            ),
+            setupTokenUsage: nil
+        )
+
+        #expect(definition.members.map(\.positionID) == [.researcher, .developer])
+    }
+
     private static let invalidStrategicRevision = """
     {
       "action": "revise",
@@ -1708,6 +1838,21 @@ struct AgentLiveTeamRouterTests {
           "acceptanceEvidence": "Sources and findings answer the decision question.",
           "dependencyContributionKinds": [],
           "stopCondition": "Stop when the finding is decision-ready or capability-blocked."
+        },
+        {
+          "id": "direction",
+          "name": "Shape Corridor Direction",
+          "instructions": "Turn the accepted research into a decision-ready visual direction.",
+          "targetID": "primary",
+          "runPolicy": "once",
+          "sessionPolicy": "ownMemory",
+          "sharedGroupID": null,
+          "positionID": "artDirector",
+          "contributionKind": "visualDirection",
+          "requiredCapabilities": ["workspaceRead"],
+          "acceptanceEvidence": "The concept has an inspectable visual direction grounded in the research.",
+          "dependencyContributionKinds": ["researchFinding"],
+          "stopCondition": "Stop when the visual direction is decision-ready or capability-blocked."
         }
       ],
       "overseerTargetID": "primary"
@@ -2045,8 +2190,8 @@ private actor LiveTeamUtilityProvider: AgentProviding {
         }
         return AgentUtilityResult(output: """
         {
-          "workingGoal": "Implement and verify one durable feature unit.",
-          "strategicReason": "A single delivery member is sufficient to begin.",
+          "workingGoal": "Define, implement, and verify one durable feature unit.",
+          "strategicReason": "Product evidence must precede implementation.",
           "productBet": {
             "headline": "Show one durable feature",
             "valuePromise": "A user can exercise the feature directly.",
@@ -2060,6 +2205,21 @@ private actor LiveTeamUtilityProvider: AgentProviding {
           },
           "members": [
             {
+              "id": "research",
+              "name": "Ground the Feature",
+              "instructions": "Establish the user need and a decision-ready product finding.",
+              "targetID": "primary",
+              "runPolicy": "once",
+              "sessionPolicy": "ownMemory",
+              "sharedGroupID": null,
+              "positionID": "researcher",
+              "contributionKind": "researchFinding",
+              "requiredCapabilities": ["workspaceRead", "webResearch"],
+              "acceptanceEvidence": "The feature direction is grounded in inspectable evidence.",
+              "dependencyContributionKinds": [],
+              "stopCondition": "Stop when the decision question is answered or blocked."
+            },
+            {
               "id": "deliver",
               "name": "Deliver",
               "instructions": "Implement one bounded unit, test it, and stop with evidence.",
@@ -2071,7 +2231,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
               "contributionKind": "softwareImplementation",
               "requiredCapabilities": ["workspaceRead", "sourceModification", "commandExecution"],
               "acceptanceEvidence": "The bounded behavior works and focused tests pass.",
-              "dependencyContributionKinds": [],
+              "dependencyContributionKinds": ["researchFinding"],
               "stopCondition": "Stop after focused verification or report a capability block."
             }
           ],

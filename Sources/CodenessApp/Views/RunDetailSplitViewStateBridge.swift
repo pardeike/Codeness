@@ -6,11 +6,13 @@ import SwiftUI
 /// with different dimensions.
 struct RunDetailSplitViewStateBridge: NSViewRepresentable {
     let restoredFraction: Double?
+    var allowedFractionRange: ClosedRange<Double> = 0.15 ... 0.85
     let onFractionChange: (Double) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             restoredFraction: restoredFraction,
+            allowedFractionRange: allowedFractionRange,
             onFractionChange: onFractionChange
         )
     }
@@ -23,6 +25,7 @@ struct RunDetailSplitViewStateBridge: NSViewRepresentable {
 
     func updateNSView(_ nsView: RunDetailSplitProbeView, context: Context) {
         context.coordinator.restoredFraction = restoredFraction
+        context.coordinator.allowedFractionRange = allowedFractionRange
         context.coordinator.onFractionChange = onFractionChange
         context.coordinator.attachIfPossible(from: nsView)
         context.coordinator.applyRestoredFractionIfNeeded()
@@ -39,17 +42,21 @@ struct RunDetailSplitViewStateBridge: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         var restoredFraction: Double?
+        var allowedFractionRange: ClosedRange<Double>
         var onFractionChange: (Double) -> Void
 
         private weak var splitView: NSSplitView?
         private var appliedRestoredFraction = false
         private var isApplyingFraction = false
+        private var reportTask: Task<Void, Never>?
 
         init(
             restoredFraction: Double?,
+            allowedFractionRange: ClosedRange<Double>,
             onFractionChange: @escaping (Double) -> Void
         ) {
             self.restoredFraction = restoredFraction
+            self.allowedFractionRange = allowedFractionRange
             self.onFractionChange = onFractionChange
         }
 
@@ -69,11 +76,18 @@ struct RunDetailSplitViewStateBridge: NSViewRepresentable {
                 guard !overlap.isNull, !overlap.isEmpty else { return nil }
                 return SplitCandidate(
                     splitView: splitView,
-                    overlapArea: overlap.width * overlap.height
+                    overlapArea: overlap.width * overlap.height,
+                    frameDifference: abs(splitFrame.width - probeFrame.width)
+                        + abs(splitFrame.height - probeFrame.height)
                 )
             }
             guard let splitView = candidates
-                .max(by: { $0.overlapArea < $1.overlapArea })?
+                .max(by: {
+                    if $0.overlapArea == $1.overlapArea {
+                        return $0.frameDifference > $1.frameDifference
+                    }
+                    return $0.overlapArea < $1.overlapArea
+                })?
                 .splitView else { return false }
             self.splitView = splitView
             NotificationCenter.default.addObserver(
@@ -88,6 +102,9 @@ struct RunDetailSplitViewStateBridge: NSViewRepresentable {
         }
 
         func detach() {
+            reportTask?.cancel()
+            reportTask = nil
+            reportCurrentFraction()
             NotificationCenter.default.removeObserver(self)
             splitView = nil
         }
@@ -101,7 +118,7 @@ struct RunDetailSplitViewStateBridge: NSViewRepresentable {
             let second = splitView.subviews[1]
             let contentHeight = first.frame.height + second.frame.height
             guard contentHeight > 0 else { return }
-            let firstHeight = contentHeight * min(max(restoredFraction, 0.15), 0.85)
+            let firstHeight = contentHeight * clamped(restoredFraction)
             let firstIsBelowSecond = first.frame.midY < second.frame.midY
             let dividerPosition = firstIsBelowSecond
                 ? splitView.bounds.minY + firstHeight
@@ -116,7 +133,12 @@ struct RunDetailSplitViewStateBridge: NSViewRepresentable {
         @objc
         private func splitViewDidResize() {
             guard !isApplyingFraction else { return }
-            reportCurrentFraction()
+            reportTask?.cancel()
+            reportTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                self?.reportCurrentFraction()
+            }
         }
 
         private func reportCurrentFraction() {
@@ -126,7 +148,11 @@ struct RunDetailSplitViewStateBridge: NSViewRepresentable {
             let secondHeight = splitView.subviews[1].frame.height
             let contentHeight = firstHeight + secondHeight
             guard contentHeight > 0 else { return }
-            onFractionChange(min(max(firstHeight / contentHeight, 0.15), 0.85))
+            onFractionChange(clamped(firstHeight / contentHeight))
+        }
+
+        private func clamped(_ fraction: Double) -> Double {
+            min(max(fraction, allowedFractionRange.lowerBound), allowedFractionRange.upperBound)
         }
 
         private func horizontalSplitViews(in view: NSView) -> [NSSplitView] {
@@ -168,4 +194,5 @@ final class RunDetailSplitProbeView: NSView {
 private struct SplitCandidate {
     let splitView: NSSplitView
     let overlapArea: CGFloat
+    let frameDifference: CGFloat
 }

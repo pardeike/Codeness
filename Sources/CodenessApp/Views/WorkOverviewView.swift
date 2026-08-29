@@ -590,13 +590,14 @@ struct CompanyFormationPresentation: Equatable {
     let activeMomentIndex: Int?
 
     init(status: ActivityStatus, startedAt: Date, now: Date) {
-        progress = "Step 1/2"
         if status == .running {
+            progress = "Choosing the team"
             let elapsed = max(0, now.timeIntervalSince(startedAt))
             activeMomentIndex = Int(elapsed / 4) % Self.moments.count
             headline = "Founding the company"
             detail = Self.moments[activeMomentIndex!].title
         } else {
+            progress = "Team not formed"
             activeMomentIndex = nil
             headline = "Company setup is paused"
             detail = "Resume when you want Codeness to continue."

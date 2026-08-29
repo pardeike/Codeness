@@ -9,6 +9,7 @@ import OSLog
 final class CodenessApplicationModel {
     private static let separatesRunTranscriptsKey = "SeparatesRunTranscripts"
     private static let transcriptVisibilityKey = "TranscriptVisibility"
+    private static let codexDebugModeKey = "CodexDebugMode"
     private static let claudeExecutablePathKey = "ClaudeExecutablePath"
     private static let openAICompatibleEndpointKey = "OpenAICompatibleEndpoint"
     private static let openAICompatibleAPIKeyFileKey = "OpenAICompatibleAPIKeyFile"
@@ -105,6 +106,7 @@ final class CodenessApplicationModel {
     private(set) var claudeModels: [AgentModelDescriptor]
     private(set) var separatesRunTranscripts: Bool
     private(set) var transcriptVisibility: TranscriptVisibility
+    private(set) var codexDebugMode: Bool
     private(set) var pendingProviderRestarts: Set<AgentProviderID> = []
     private(set) var retainedProviderLaunchFences: Set<AgentProviderID> = []
     var applicationError: String?
@@ -172,8 +174,13 @@ final class CodenessApplicationModel {
         self.handoffConfigurationValidator = handoffConfigurationValidator
         providerCatalog = loadedProviderCatalog
         claudeModels = loadedProviderCatalog.provider(.claude)?.knownModels ?? []
+        let codexDebugMode = UserDefaults.standard.bool(forKey: Self.codexDebugModeKey)
+        self.codexDebugMode = codexDebugMode
         let codexProvider = testingCodexProvider
-            ?? CodexAgentProvider(appServer: appServer)
+            ?? CodexAgentProvider(
+                appServer: appServer,
+                retainsCompletedSessionsForDebugging: codexDebugMode
+            )
         self.codexProvider = codexProvider
         codexShutdownAndVerify = testingCodexShutdownAndVerify
             ?? { await codexProvider.shutdownAndVerify() }
@@ -440,17 +447,23 @@ final class CodenessApplicationModel {
 
     private func liveTeamRuntimeConfiguration() -> LiveTeamRuntimeConfiguration {
         let targetOptions = availableLiveTeamTargetOptions()
-        let controlTarget = targetOptions.first?.target ?? AgentTarget(
+        let unavailableTarget = AgentTarget(
             providerID: .codex,
             model: "unavailable"
         )
+        let strategicTarget = LiveTeamRuntimeConfiguration.preferredStrategicTarget(
+            in: targetOptions
+        ) ?? unavailableTarget
+        let routineTarget = LiveTeamRuntimeConfiguration.preferredRoutineTarget(
+            in: targetOptions
+        ) ?? strategicTarget
         return LiveTeamRuntimeConfiguration(
             overseer: LiveTeamOverseerConfiguration(
-                target: controlTarget,
+                target: strategicTarget,
                 instructions: Self.companyCEOInstructions
             ),
             defaultCoordinator: LiveTeamCoordinatorConfiguration(
-                target: controlTarget,
+                target: routineTarget,
                 instructions: """
                 Manage only the current team's local flow. Preserve the working goal, keep handoffs bounded, allow at most one local retry for an incomplete result, and escalate strategy or completion questions to the Overseer. You cannot stop the activity. Never change the goal, team, order, or session policy.
                 """
@@ -1302,6 +1315,12 @@ final class CodenessApplicationModel {
     func setSeparatesRunTranscripts(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: Self.separatesRunTranscriptsKey)
         separatesRunTranscripts = enabled
+    }
+
+    func setCodexDebugMode(_ enabled: Bool) async {
+        UserDefaults.standard.set(enabled, forKey: Self.codexDebugModeKey)
+        codexDebugMode = enabled
+        await codexProvider.updateRetainsCompletedSessionsForDebugging(enabled)
     }
 
     func setTranscriptVisibility(_ visibility: TranscriptVisibility) {

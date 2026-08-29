@@ -6,6 +6,21 @@ import Testing
 @MainActor
 struct RepositoryWindowGeometryTests {
     @Test
+    func lastRepositoryWindowFrameProvidesTheFallbackForANewProject() throws {
+        let suiteName = "CodenessTests.RepositoryWindowPlacement.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let placement = RepositoryWindowPlacementStore(defaults: defaults)
+        let lastFrame = StoredWindowFrame(x: 90, y: 120, width: 960, height: 720)
+        let repositoryFrame = StoredWindowFrame(x: 20, y: 30, width: 1_100, height: 800)
+
+        #expect(placement.initialFrame(repositoryFrame: nil) == nil)
+        placement.save(lastFrame)
+        #expect(placement.initialFrame(repositoryFrame: nil) == lastFrame)
+        #expect(placement.initialFrame(repositoryFrame: repositoryFrame) == repositoryFrame)
+    }
+
+    @Test
     func savedFrameIsAppliedBeforeDisplayAndIsNotReappliedAfterLoading() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("codeness-window-\(UUID().uuidString)", isDirectory: true)
@@ -39,11 +54,20 @@ struct RepositoryWindowGeometryTests {
             defer: false
         )
         window.minSize = RepositoryWindowMetrics.minimumWindowSize
+        let adjustedFrame = NSRect(
+            x: CGFloat(storedFrame.x) + 24,
+            y: CGFloat(storedFrame.y) + 18,
+            width: CGFloat(storedFrame.width) - 20,
+            height: CGFloat(storedFrame.height) - 16
+        )
         let controller = RepositoryWindowController(
             window: window,
             coordinator: coordinator,
             initialWindowFrame: initialWindowFrame,
             commandState: RepositoryWindowCommandState(),
+            onWindowFrameChange: { savedFrame in
+                #expect(abs(savedFrame.x - adjustedFrame.minX) < 0.5)
+            },
             onClose: { _ in }
         )
 
@@ -53,12 +77,6 @@ struct RepositoryWindowGeometryTests {
         #expect(abs(window.frame.width - CGFloat(storedFrame.width)) < 0.5)
         #expect(abs(window.frame.height - CGFloat(storedFrame.height)) < 0.5)
 
-        let adjustedFrame = NSRect(
-            x: CGFloat(storedFrame.x) + 24,
-            y: CGFloat(storedFrame.y) + 18,
-            width: CGFloat(storedFrame.width) - 20,
-            height: CGFloat(storedFrame.height) - 16
-        )
         window.setFrame(adjustedFrame, display: false)
         controller.windowDidMove(
             Notification(name: NSWindow.didMoveNotification, object: window)

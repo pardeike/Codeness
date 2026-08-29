@@ -1193,7 +1193,8 @@ struct RepositoryCoordinatorRecoveryTests {
                 sidebarWidth: 380,
                 pauseAfterCurrent: true,
                 detailPresentation: .result,
-                detailSplitFraction: 0.62
+                detailSplitFraction: 0.62,
+                workerBriefFraction: 0.31
             ),
             canonicalPath: record.canonicalPath
         )
@@ -1213,6 +1214,7 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(coordinator.viewState.sidebarWidth == 380)
         #expect(coordinator.runDetailPresentation == .result)
         #expect(coordinator.viewState.detailSplitFraction == 0.62)
+        #expect(coordinator.viewState.workerBriefFraction == 0.31)
 
         coordinator.updateRunDetailSplitFraction(0.99)
         #expect(await coordinator.flushDocumentState())
@@ -1220,6 +1222,14 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(
             try await store.loadViewState(canonicalPath: record.canonicalPath)
                 .detailSplitFraction == 0.85
+        )
+
+        coordinator.updateWorkerBriefFraction(0.99)
+        #expect(await coordinator.flushDocumentState())
+        #expect(coordinator.viewState.workerBriefFraction == 0.65)
+        #expect(
+            try await store.loadViewState(canonicalPath: record.canonicalPath)
+                .workerBriefFraction == 0.65
         )
     }
 
@@ -1383,7 +1393,7 @@ struct RepositoryCoordinatorRecoveryTests {
     }
 
     @Test
-    func startOverArchivesHistoryAndRestoresThePreviousEditableConfiguration() async throws {
+    func startOverArchivesHistoryAndRestoresOnlyTheGoalIntoFreshConfiguration() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = WorkspaceStore(rootURL: root)
@@ -1450,11 +1460,11 @@ struct RepositoryCoordinatorRecoveryTests {
         #expect(coordinator.record.activity == nil)
         #expect(coordinator.record.activityDraft == ActivityConfigurationDraft(
             goal: "Rebuild the parser from Docs/Parser.md",
-            prompts: prompts
+            prompts: .builtInDefaults
         ))
         #expect(coordinator.record.implementerThreadID == nil)
         #expect(coordinator.record.reviewerThreadID == nil)
-        #expect(coordinator.record.settings == settings)
+        #expect(coordinator.record.settings == RepositorySettings())
         #expect(coordinator.selectedRunID == nil)
         #expect(coordinator.viewState.selectedRunID == nil)
         #expect(coordinator.viewState.transcriptViewports.isEmpty)
@@ -1484,6 +1494,7 @@ struct RepositoryCoordinatorRecoveryTests {
                 expectedArchive.activity?.runs[runIndex].externalPayload = nil
             }
         }
+        expectedArchive.updatedAt = persistedArchive.updatedAt
         #expect(persistedArchive == expectedArchive)
 
         coordinator.updateActivityDraft(goal: "Edited before restarting", prompts: prompts)

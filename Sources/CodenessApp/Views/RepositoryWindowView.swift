@@ -96,7 +96,7 @@ struct RepositoryWindowView: View {
             Button("Start Over", role: .destructive) {
                 Task { await coordinator.startOver() }
             }
-            .help("Archive the current Codeness activity and return to editable configuration")
+            .help("Stop active work, archive this activity, and return to its editable goal")
         } message: {
             Text(startOverExplanation)
         }
@@ -118,7 +118,7 @@ struct RepositoryWindowView: View {
     }
 
     private var startOverExplanation: String {
-        "Codeness will archive the current activity under Application Support, keep its goal as the next editable draft, and discard its old agent sessions. Repository files will not be changed."
+        "Codeness will stop any active work, archive the current activity under Application Support, and return to a fresh activity with only its goal prefilled. Repository files will not be changed."
     }
 
     @ViewBuilder

@@ -1189,6 +1189,24 @@ public struct LiveTeamRuntimeConfiguration: Sendable, Equatable {
         return nil
     }
 
+    public static func preferredStrategicTarget(
+        in options: [LiveTeamTargetOption]
+    ) -> AgentTarget? {
+        preferredTarget(
+            in: options,
+            effortOrder: ["high", "xhigh", "max", "ultra", "medium", "low"]
+        )
+    }
+
+    public static func preferredRoutineTarget(
+        in options: [LiveTeamTargetOption]
+    ) -> AgentTarget? {
+        preferredTarget(
+            in: options,
+            effortOrder: ["low", "minimal", "medium", "high", "xhigh", "max", "ultra"]
+        )
+    }
+
     /// Selects the target for the first Overseer call before any agent has had
     /// an opportunity to interpret the Board goal. An unambiguous, non-negated
     /// provider or model identifier in the goal wins; otherwise the configured
@@ -1227,16 +1245,37 @@ public struct LiveTeamRuntimeConfiguration: Sendable, Equatable {
             }
         }
         guard mentionedModels.count == 1 || mentionedProviders.count == 1,
-              let selected = candidates.first(where: {
-                  $0.target.options.mode == .standard
-                      && $0.target.options.speed == .standard
-              }) ?? candidates.first else {
+              let selected = Self.preferredStrategicTarget(in: candidates) else {
             return overseer
         }
 
         var selectedOverseer = overseer
-        selectedOverseer.target = selected.target
+        selectedOverseer.target = selected
         return selectedOverseer
+    }
+
+    private static func preferredTarget(
+        in options: [LiveTeamTargetOption],
+        effortOrder: [String]
+    ) -> AgentTarget? {
+        guard let first = options.first else { return nil }
+        let sameModel = options.filter {
+            $0.target.providerID == first.target.providerID
+                && $0.target.model == first.target.model
+        }
+        let standard = sameModel.filter {
+            $0.target.options.mode == .standard
+                && $0.target.options.speed == .standard
+        }
+        let candidates = standard.isEmpty ? sameModel : standard
+        for effort in effortOrder {
+            if let target = candidates.first(where: {
+                $0.target.options.effort?.lowercased() == effort
+            })?.target {
+                return target
+            }
+        }
+        return candidates.first?.target ?? first.target
     }
 
     private static func hasNonNegatedMention(of token: String, in text: String) -> Bool {

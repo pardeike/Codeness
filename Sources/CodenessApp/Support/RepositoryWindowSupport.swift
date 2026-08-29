@@ -52,9 +52,34 @@ final class RepositoryWindowAppearanceState {
 }
 
 @MainActor
+struct RepositoryWindowPlacementStore {
+    private static let frameKey = "LastRepositoryWindowFrame"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func initialFrame(repositoryFrame: StoredWindowFrame?) -> StoredWindowFrame? {
+        repositoryFrame ?? lastFrame
+    }
+
+    func save(_ frame: StoredWindowFrame) {
+        guard let data = try? JSONEncoder().encode(frame) else { return }
+        defaults.set(data, forKey: Self.frameKey)
+    }
+
+    private var lastFrame: StoredWindowFrame? {
+        guard let data = defaults.data(forKey: Self.frameKey) else { return nil }
+        return try? JSONDecoder().decode(StoredWindowFrame.self, from: data)
+    }
+}
+
+@MainActor
 final class RepositoryWindowManager {
     private let applicationModel: CodenessApplicationModel
     private let commandState: RepositoryWindowCommandState
+    private let windowPlacementStore: RepositoryWindowPlacementStore
     private var windowControllers: [String: RepositoryWindowController] = [:]
     private var newProjectPanel: NSSavePanel?
     private var repositoryOpenPanel: NSOpenPanel?
@@ -67,9 +92,14 @@ final class RepositoryWindowManager {
     private var openRequestCompletionHandlers: [() -> Void] = []
     private var isApplicationTerminating = false
 
-    init(applicationModel: CodenessApplicationModel, commandState: RepositoryWindowCommandState) {
+    init(
+        applicationModel: CodenessApplicationModel,
+        commandState: RepositoryWindowCommandState,
+        windowPlacementStore: RepositoryWindowPlacementStore = RepositoryWindowPlacementStore()
+    ) {
         self.applicationModel = applicationModel
         self.commandState = commandState
+        self.windowPlacementStore = windowPlacementStore
     }
 
     var repositoryWindows: [RepositoryWindowController] {
@@ -514,7 +544,7 @@ final class RepositoryWindowManager {
             return (existing, true)
         }
 
-        let initialWindowFrame = await applicationModel.storedWindowFrame(for: path)
+        let repositoryWindowFrame = await applicationModel.storedWindowFrame(for: path)
         // Loading the tiny view-state file yields the MainActor. Recheck so two
         // concurrent open requests cannot create duplicate windows for one path.
         if let existing = windowControllers[path] {
@@ -527,7 +557,10 @@ final class RepositoryWindowManager {
 
         let windowController = makeWindowController(
             for: workspaceURL,
-            initialWindowFrame: initialWindowFrame
+            initialWindowFrame: windowPlacementStore.initialFrame(
+                repositoryFrame: repositoryWindowFrame
+            ),
+            shouldStagger: repositoryWindowFrame == nil
         )
         windowControllers[path] = windowController
         if display {
@@ -653,7 +686,8 @@ final class RepositoryWindowManager {
 
     private func makeWindowController(
         for repositoryURL: URL,
-        initialWindowFrame: StoredWindowFrame?
+        initialWindowFrame: StoredWindowFrame?,
+        shouldStagger: Bool
     ) -> RepositoryWindowController {
         let canonicalPath = repositoryURL.path
         let coordinator = applicationModel.coordinator(for: canonicalPath)
@@ -693,7 +727,6 @@ final class RepositoryWindowManager {
         window.isReleasedWhenClosed = false
         if initialWindowFrame == nil {
             window.center()
-            stagger(window, relativeTo: windowControllers.values.compactMap(\.window))
         }
 
         let controller = RepositoryWindowController(
@@ -702,10 +735,16 @@ final class RepositoryWindowManager {
             initialWindowFrame: initialWindowFrame,
             commandState: commandState,
             appearanceState: appearanceState,
+            onWindowFrameChange: { [windowPlacementStore] frame in
+                windowPlacementStore.save(frame)
+            },
             onClose: { [weak self] closedController in
                 self?.repositoryWindowDidClose(closedController)
             }
         )
+        if shouldStagger {
+            stagger(window, relativeTo: windowControllers.values.compactMap(\.window))
+        }
         controller.shouldCascadeWindows = false
         return controller
     }
@@ -782,7 +821,10 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     let coordinator: RepositoryCoordinator
     private let commandState: RepositoryWindowCommandState
     private let appearanceState: RepositoryWindowAppearanceState
+    private let onWindowFrameChange: @MainActor (StoredWindowFrame) -> Void
     private let onClose: @MainActor (RepositoryWindowController) -> Void
+    private var pendingWindowFrameChange: StoredWindowFrame?
+    private var windowFrameChangeTask: Task<Void, Never>?
     private var bypassCloseGuard = false
     private var didClose = false
     private var isPresentingCloseAlert = false
@@ -797,11 +839,13 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
         initialWindowFrame: StoredWindowFrame? = nil,
         commandState: RepositoryWindowCommandState,
         appearanceState: RepositoryWindowAppearanceState = RepositoryWindowAppearanceState(),
+        onWindowFrameChange: @escaping @MainActor (StoredWindowFrame) -> Void = { _ in },
         onClose: @escaping @MainActor (RepositoryWindowController) -> Void
     ) {
         self.coordinator = coordinator
         self.commandState = commandState
         self.appearanceState = appearanceState
+        self.onWindowFrameChange = onWindowFrameChange
         self.onClose = onClose
         super.init(window: window)
         restoreWindowFrame(initialWindowFrame, display: false)
@@ -934,6 +978,7 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard !didClose else { return }
         didClose = true
+        flushPendingWindowFrameChange()
         loadCompletionTask?.cancel()
         if commandState.currentCoordinator === coordinator {
             commandState.currentCoordinator = nil
@@ -1087,13 +1132,29 @@ final class RepositoryWindowController: NSWindowController, NSWindowDelegate {
               coordinator.isLoaded,
               let window else { return }
         let frame = window.frame
-        coordinator.updateWindowFrame(StoredWindowFrame(
+        let storedFrame = StoredWindowFrame(
             x: frame.origin.x,
             y: frame.origin.y,
             width: frame.width,
             height: frame.height,
             displayIdentifier: window.screen?.localizedName
-        ))
+        )
+        coordinator.updateWindowFrame(storedFrame)
+        pendingWindowFrameChange = storedFrame
+        windowFrameChangeTask?.cancel()
+        windowFrameChangeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.flushPendingWindowFrameChange()
+        }
+    }
+
+    private func flushPendingWindowFrameChange() {
+        windowFrameChangeTask?.cancel()
+        windowFrameChangeTask = nil
+        guard let frame = pendingWindowFrameChange else { return }
+        pendingWindowFrameChange = nil
+        onWindowFrameChange(frame)
     }
 }
 

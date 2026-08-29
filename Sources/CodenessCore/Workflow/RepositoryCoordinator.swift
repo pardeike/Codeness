@@ -349,6 +349,7 @@ public final class RepositoryCoordinator {
     private let router: any HandoffRouting
     private let handoffConfigurationValidator: any HandoffConfigurationValidating
     private let store: any RepositoryWorkspaceStoring
+    private let initialSettings: RepositorySettings
     private let agentProviders: AgentProviderRegistry?
     private let workflowRouter: (any WorkflowHandoffRouting)?
     private let liveTeamCoordinatorRouter: (any LiveTeamCoordinatorRouting)?
@@ -420,13 +421,17 @@ public final class RepositoryCoordinator {
     private var genericInteractionRoutes: [String: GenericInteractionRoute] = [:]
     private var genericSessionFallbacks: [UUID: GenericSessionFallback] = [:]
     private var liveTeamSessionFallbacks: [UUID: LiveTeamSessionFallback] = [:]
-    private var liveTeamControlInvocationCount = 0
+    private var companyControlInvocationCount = 0
+    private var companyControlInvocationWaiters: [CheckedContinuation<Void, Never>] = []
     private var providerLaunchLeases: [UUID: UUID] = [:]
     private var providerLaunchWaiters: [CheckedContinuation<Void, Never>] = []
     /// Sessions attached by this coordinator in the current app process.
     /// Persisted session IDs are resume handles, not proof of a live attachment.
     private var attachedProviderSessions: Set<ProviderSessionReference> = []
     private var providerSessionReleaseWaiters: [
+        ProviderSessionReference: [CheckedContinuation<Bool, Never>]
+    ] = [:]
+    private var providerSessionRetirementWaiters: [
         ProviderSessionReference: [CheckedContinuation<Bool, Never>]
     ] = [:]
 
@@ -455,6 +460,7 @@ public final class RepositoryCoordinator {
         self.router = router
         self.handoffConfigurationValidator = handoffConfigurationValidator
         self.store = store
+        self.initialSettings = initialSettings
         self.agentProviders = agentProviders
         self.workflowRouter = workflowRouter
         self.liveTeamCoordinatorRouter = liveTeamCoordinatorRouter
@@ -536,30 +542,14 @@ public final class RepositoryCoordinator {
             && !isClosing
     }
 
-    /// Starting over creates a new activity only after the Overseer has completed
-    /// the current goal. Paused work resumes from its durable checkpoint instead.
+    /// Starting over is available for every loaded activity. The reset first stops
+    /// and detaches any active provider work through the document-close safety path.
     public var canStartOver: Bool {
-        guard isLoaded,
-              loadInProgressGeneration == nil,
-              record.activity?.status == .completed,
-              !isStartingActivity,
-              !isStartingOver,
-              !isClosing,
-              !pauseState.isInProgress,
-              pendingInteractions.isEmpty,
-              routingTasks.isEmpty,
-              completingRunIDs.isEmpty,
-              !hasUnconfirmedSafetyStop else { return false }
-        guard let run = activeRun else { return true }
-        switch run.status {
-        case .running, .awaitingApproval:
-            return false
-        case .queued:
-            // A paused pre-launch checkpoint has no App Server turn to stop.
-            return run.turnID == nil
-        case .routing, .paused, .completed, .interrupted, .failed:
-            return true
-        }
+        isLoaded
+            && loadInProgressGeneration == nil
+            && record.activity != nil
+            && !isStartingOver
+            && !isClosing
     }
 
     public var canInterrupt: Bool {
@@ -1139,19 +1129,25 @@ public final class RepositoryCoordinator {
     }
 
     public func replaceChiefExecutive() async {
-        guard !isReplacingChiefExecutive,
+        guard !isClosing,
+              !isReplacingChiefExecutive,
               let router = companyPersonaRouter,
               let activity = record.activity,
               var definition = activity.liveTeam?.currentDefinition,
               definition.operatingModelVersion >= 2 else { return }
         isReplacingChiefExecutive = true
-        defer { isReplacingChiefExecutive = false }
+        beginCompanyControlInvocation()
+        defer {
+            isReplacingChiefExecutive = false
+            finishCompanyControlInvocation()
+        }
         do {
             var person = try await router.generateChiefExecutive(
                 goal: activity.goal,
                 target: definition.overseerTarget,
                 cwd: record.canonicalPath
             )
+            guard !isClosing else { return }
             person.hiredRevision = definition.revision
             let previousActivity = record.activity
             let previousSelectedPersonID = selectedPersonID
@@ -1258,6 +1254,14 @@ public final class RepositoryCoordinator {
         let fraction = min(max(fraction, 0.15), 0.85)
         guard viewState.detailSplitFraction != fraction else { return }
         viewState.detailSplitFraction = fraction
+        scheduleViewStateSave()
+    }
+
+    public func updateWorkerBriefFraction(_ fraction: Double) {
+        let range = RepositoryViewState.workerBriefFractionRange
+        let fraction = min(max(fraction, range.lowerBound), range.upperBound)
+        guard viewState.workerBriefFraction != fraction else { return }
+        viewState.workerBriefFraction = fraction
         scheduleViewStateSave()
     }
 
@@ -2295,9 +2299,9 @@ public final class RepositoryCoordinator {
         let context = makeLiveTeamOverseerContext(
             reason: "Use the earlier fixed activity configuration as evidence when preparing the first agents."
         )
-        liveTeamControlInvocationCount += 1
+        beginCompanyControlInvocation()
         defer {
-            liveTeamControlInvocationCount = max(0, liveTeamControlInvocationCount - 1)
+            finishCompanyControlInvocation()
         }
         do {
             let definition = try await router.migrate(
@@ -2308,6 +2312,7 @@ public final class RepositoryCoordinator {
                 defaultCoordinator: runtime.defaultCoordinator,
                 cwd: record.canonicalPath
             )
+            guard !isClosing else { return }
             guard let checkpoint = LiveTeamStateMachine.initialCheckpoint(for: definition) else {
                 throw LiveTeamRevisionError.invalid("The prepared setup has no eligible agent.")
             }
@@ -2465,8 +2470,23 @@ public final class RepositoryCoordinator {
     /// workspace store under Application Support; it never mutates the repository.
     public func startOver() async {
         guard canStartOver, let previousActivity = record.activity else { return }
+        let previousActivityID = previousActivity.id
+        let restartGoal = previousActivity.pendingGoalAmendment?.revisedGoal
+            ?? previousActivity.goal
+
+        guard await prepareForClose(strategy: .immediate) == .ready else { return }
+        guard record.activity?.id == previousActivityID else {
+            cancelClosePreparation()
+            return
+        }
+
         isStartingOver = true
-        defer { isStartingOver = false }
+        defer {
+            isStartingOver = false
+            isClosing = false
+            pauseState = .idle
+        }
+        await waitForCompanyControlInvocations()
 
         let pendingViewSave = viewStateSaveTask
         viewStateSaveTask?.cancel()
@@ -2481,17 +2501,15 @@ public final class RepositoryCoordinator {
 
         let archivedRecord = record
         let abandonedSessions = attachedProviderSessions
-        let restartGoal = previousActivity.pendingGoalAmendment?.revisedGoal
-            ?? previousActivity.goal
         let resetRecord = RepositoryRecord(
             id: record.id,
             canonicalPath: record.canonicalPath,
             implementerThreadID: nil,
             reviewerThreadID: nil,
-            settings: record.settings,
+            settings: initialSettings,
             activityDraft: ActivityConfigurationDraft(
                 goal: restartGoal,
-                prompts: previousActivity.prompts,
+                prompts: .builtInDefaults,
                 workflow: nil
             ),
             activity: nil,
@@ -2507,21 +2525,16 @@ public final class RepositoryCoordinator {
             sidebarVisible: false,
             pauseAfterCurrent: false,
             detailPresentation: viewState.detailPresentation,
-            detailSplitFraction: viewState.detailSplitFraction
+            detailSplitFraction: viewState.detailSplitFraction,
+            workerBriefFraction: viewState.workerBriefFraction
         )
 
         do {
-            guard !isClosing else {
-                throw RepositoryCoordinatorError.startOverWhileClosing
-            }
             try await flushPendingTranscripts()
             // `record` may contain only the bounded UI projection of a large
             // transcript. Empty metadata tells WorkspaceStore to reconstruct the
             // authoritative, complete archive from the append-only run logs.
             try await store.archiveActivity(workspaceMetadataSnapshot(archivedRecord))
-            guard !isClosing else {
-                throw RepositoryCoordinatorError.startOverWhileClosing
-            }
             let unreleasedSessions = await unreleasedProviderSessions(
                 afterReleasing: abandonedSessions
             )
@@ -2541,9 +2554,14 @@ public final class RepositoryCoordinator {
             viewState = resetViewState
             selectedRunID = nil
             selectedReviewID = nil
+            selectedPersonID = nil
             pauseAfterCurrent = false
+            followsActiveProgress = false
+            transcriptFollowRequestRunID = nil
+            transcriptFollowRequestRevision = 0
             itemsWithDeltas.removeAll()
             deltaItemRetainedByteCounts.removeAll()
+            tokenUsageBaselines.removeAll()
             interactionSafetyTerminatingRunIDs.removeAll(keepingCapacity: false)
             runIsAtBottom.removeAll()
             completingRunIDs.removeAll()
@@ -2554,6 +2572,7 @@ public final class RepositoryCoordinator {
             genericSessionFallbacks.removeAll()
             liveTeamSessionFallbacks.removeAll()
             hydratedTranscriptRunIDs.removeAll()
+            nextTranscriptSequence = 0
             pendingTranscriptBuffers.removeAll()
             visibleTranscriptChunks.removeAll()
             visibleTranscriptUTF8ByteCounts.removeAll()
@@ -2646,6 +2665,41 @@ public final class RepositoryCoordinator {
         return succeeded
     }
 
+    private func retireProviderSession(_ session: ProviderSessionReference) async -> Bool {
+        if providerSessionRetirementWaiters[session] != nil {
+            return await withCheckedContinuation { continuation in
+                providerSessionRetirementWaiters[session, default: []].append(continuation)
+            }
+        }
+        if providerSessionReleaseWaiters[session] != nil {
+            _ = await releaseProviderSession(session)
+        }
+
+        providerSessionRetirementWaiters[session] = []
+        let succeeded: Bool
+        if let agentProviders {
+            succeeded = await agentProviders.retireSession(
+                providerID: session.providerID,
+                id: session.sessionID
+            )
+        } else if session.providerID == .codex {
+            do {
+                _ = try await appServer.unsubscribeThread(id: session.sessionID)
+                succeeded = false
+            } catch {
+                succeeded = false
+            }
+        } else {
+            succeeded = false
+        }
+        if succeeded {
+            attachedProviderSessions.remove(session)
+        }
+        let waiters = providerSessionRetirementWaiters.removeValue(forKey: session) ?? []
+        waiters.forEach { $0.resume(returning: succeeded) }
+        return succeeded
+    }
+
     private func markProviderSessionAttached(_ session: ProviderSessionReference) {
         attachedProviderSessions.insert(session)
     }
@@ -2656,6 +2710,19 @@ public final class RepositoryCoordinator {
         let requested = Set(sessions)
         _ = await releaseProviderSessions(requested)
         return requested.intersection(attachedProviderSessions)
+    }
+
+    private func unretiredProviderSessions(
+        afterRetiring sessions: some Sequence<ProviderSessionReference>
+    ) async -> Set<ProviderSessionReference> {
+        let requested = Set(sessions)
+        var unretired: Set<ProviderSessionReference> = []
+        for session in requested {
+            if !(await retireProviderSession(session)) {
+                unretired.insert(session)
+            }
+        }
+        return unretired
     }
 
     private func detachProviderSessionsForCurrentDocument() async -> Set<ProviderSessionReference> {
@@ -4297,8 +4364,8 @@ public final class RepositoryCoordinator {
         if request.mode == .bootstrap || request.mode == .strategicReview {
             state.lastStrategicReviewAt = .now
         }
-        liveTeamControlInvocationCount += 1
-        defer { liveTeamControlInvocationCount = max(0, liveTeamControlInvocationCount - 1) }
+        beginCompanyControlInvocation()
+        defer { finishCompanyControlInvocation() }
         state.resumeCheckpoint = .invokeOverseer(request)
         state.boardDirectionReason = nil
         record.activity?.liveTeam = state
@@ -6187,13 +6254,16 @@ public final class RepositoryCoordinator {
             try await persist()
         } catch {
             errorMessage = "The activity completed, but its final state could not be saved: \(error.localizedDescription)"
+            _ = await releaseProviderSessions(attachedProviderSessions)
+            sessionsPrepared = false
+            return
         }
-        let unreleasedSessions = await unreleasedProviderSessions(
-            afterReleasing: attachedProviderSessions
+        let unretiredSessions = await unretiredProviderSessions(
+            afterRetiring: attachedProviderSessions
         )
         sessionsPrepared = false
-        if !unreleasedSessions.isEmpty {
-            errorMessage = "The activity completed, but Codeness could not confirm provider-session detachment for \(providerSessionDescription(unreleasedSessions))."
+        if !unretiredSessions.isEmpty {
+            errorMessage = "The activity completed, but Codeness could not retire provider sessions for \(providerSessionDescription(unretiredSessions))."
         }
     }
 
@@ -8676,6 +8746,29 @@ public final class RepositoryCoordinator {
         workSummarySnapshotCache = nil
     }
 
+    private func beginCompanyControlInvocation() {
+        companyControlInvocationCount += 1
+    }
+
+    private func finishCompanyControlInvocation() {
+        companyControlInvocationCount = max(0, companyControlInvocationCount - 1)
+        guard companyControlInvocationCount == 0 else { return }
+        let waiters = companyControlInvocationWaiters
+        companyControlInvocationWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForCompanyControlInvocations() async {
+        guard companyControlInvocationCount > 0 else { return }
+        await withCheckedContinuation { continuation in
+            if companyControlInvocationCount == 0 {
+                continuation.resume()
+            } else {
+                companyControlInvocationWaiters.append(continuation)
+            }
+        }
+    }
+
     private func cancelRoutingTasks() async {
         let tasks = Array(routingTasks.values)
         tasks.forEach { $0.cancel() }
@@ -8793,7 +8886,6 @@ public final class RepositoryCoordinator {
 
 private enum RepositoryCoordinatorError: LocalizedError {
     case documentNotLoaded
-    case startOverWhileClosing
     case providerLaunchCancelledForClose
     case providerSessionsStillAttached(String)
     case missingSession(AgentRole)
@@ -8807,8 +8899,6 @@ private enum RepositoryCoordinatorError: LocalizedError {
         switch self {
         case .documentNotLoaded:
             "Repository state has not loaded; its saved data was left unchanged."
-        case .startOverWhileClosing:
-            "The repository window began closing before its activity could be reset."
         case .providerLaunchCancelledForClose:
             "The provider launch stopped because this repository window is closing."
         case .providerSessionsStillAttached(let sessions):

@@ -115,6 +115,7 @@ public enum RunTranscriptPresentation {
         if run.transcript.contains(markerPrefix) {
             return structuredContent(
                 run.transcript,
+                companyMember: run.liveTeamMember,
                 separatesRuns: separatesRuns,
                 visibility: visibility
             )
@@ -133,6 +134,7 @@ public enum RunTranscriptPresentation {
 
     private static func structuredContent(
         _ transcript: String,
+        companyMember: LiveTeamMemberSnapshot?,
         separatesRuns: Bool,
         visibility: TranscriptVisibility
     ) -> PresentedTranscript {
@@ -144,6 +146,7 @@ public enum RunTranscriptPresentation {
             append(
                 String(transcript[cursor..<markerRange.lowerBound]),
                 section: section,
+                companyMember: companyMember,
                 separatesRuns: separatesRuns,
                 visibility: visibility,
                 to: &result
@@ -165,6 +168,7 @@ public enum RunTranscriptPresentation {
         append(
             String(transcript[cursor...]),
             section: section,
+            companyMember: companyMember,
             separatesRuns: separatesRuns,
             visibility: visibility,
             to: &result
@@ -227,12 +231,18 @@ public enum RunTranscriptPresentation {
     private static func append(
         _ text: String,
         section: TranscriptSectionKind?,
+        companyMember: LiveTeamMemberSnapshot?,
         separatesRuns: Bool,
         visibility: TranscriptVisibility,
         to result: inout PresentedTranscriptBuilder
     ) {
         guard let section else {
             result.append(text, isSteering: false)
+            return
+        }
+        if (section == .reasoning || section == .result),
+           let companyMember,
+           CompanyWorkReport.decode(text, for: companyMember) != nil {
             return
         }
         if isVisible(section, separatesRuns: separatesRuns, visibility: visibility) {

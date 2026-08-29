@@ -73,7 +73,11 @@ public struct CompanyWorkReport: Codable, Equatable, Sendable {
         for snapshot: LiveTeamMemberSnapshot
     ) -> CompanyWorkReport? {
         let clean = strippedCodeFence(output)
-        guard let data = clean.data(using: .utf8),
+        guard clean.first == "{",
+              clean.contains("\"workerID\""),
+              clean.contains("\"positionID\""),
+              clean.contains("\"contributionKind\""),
+              let data = clean.data(using: .utf8),
               let report = try? JSONDecoder().decode(Self.self, from: data),
               report.workerID == snapshot.member.id,
               report.positionID == snapshot.member.positionID,
@@ -111,6 +115,41 @@ public struct CompanyWorkReport: Codable, Equatable, Sendable {
             capabilityBlock: nil,
             recommendedRecipientPositions: []
         )
+    }
+
+    public var presentationMarkdown: String {
+        var sections = [
+            "## \(CompanyPositionCatalog.position(positionID).title)",
+            summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        ]
+        appendPresentationList(artifacts, title: "Artifacts", to: &sections)
+        appendPresentationList(evidence, title: "Evidence", to: &sections)
+        appendPresentationList(decisions, title: "Decisions", to: &sections)
+        appendPresentationList(constraints, title: "Constraints", to: &sections)
+        appendPresentationList(risks, title: "Risks", to: &sections)
+        if let capabilityBlock {
+            sections.append("### Capability block")
+            sections.append(capabilityBlock.detail)
+            appendPresentationList(
+                capabilityBlock.artifacts,
+                title: "Affected artifacts",
+                to: &sections
+            )
+        }
+        let recipients = recommendedRecipientPositions.map {
+            CompanyPositionCatalog.position($0).title
+        }
+        appendPresentationList(recipients, title: "Recommended next professions", to: &sections)
+        return sections.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    private func appendPresentationList(
+        _ values: [String],
+        title: String,
+        to sections: inout [String]
+    ) {
+        guard !values.isEmpty else { return }
+        sections.append("### \(title)\n" + values.map { "- \($0)" }.joined(separator: "\n"))
     }
 
     public static func outputSchema(for snapshot: LiveTeamMemberSnapshot) -> JSONValue {

@@ -257,6 +257,51 @@ struct CodexAppServerTransportTests {
     }
 
     @Test
+    func archiveThreadRejectsAMalformedSuccessAcknowledgement() async throws {
+        let fixture = try TransportFixture(script: Self.malformedThreadArchiveServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient()
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            try await client.archiveThread(id: "thread-archive")
+            Issue.record("Expected malformed thread/archive acknowledgement rejection")
+        } catch {
+            #expect(error.localizedDescription.contains("empty object"))
+        }
+        await client.shutdown()
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func archiveTimeoutContainsTheGenerationAfterTheRequestWasWritten() async throws {
+        let fixture = try TransportFixture(script: Self.unansweredThreadArchiveServer)
+        defer { fixture.remove() }
+        let client = CodexAppServerClient(controlRequestTimeout: .milliseconds(30))
+        let stream = await client.events()
+        let exit = Task {
+            for await transportEvent in stream {
+                if case .exited = transportEvent.event { return true }
+            }
+            return false
+        }
+        try await client.start(configuration: fixture.configuration)
+
+        do {
+            try await client.archiveThread(id: "thread-archive")
+            Issue.record("Expected thread/archive to time out")
+        } catch let error as AppServerClientError {
+            guard case .requestTimedOut(let method) = error else {
+                Issue.record("Unexpected App Server error: \(error.localizedDescription)")
+                return
+            }
+            #expect(method == "thread/archive")
+        }
+
+        #expect(await exit.value)
+        #expect(await client.isRunning == false)
+    }
+
+    @Test
     func listModelsRejectsARepeatedPaginationCursor() async throws {
         let fixture = try TransportFixture(script: Self.repeatedModelsCursorServer)
         defer { fixture.remove() }
@@ -386,6 +431,7 @@ for line in sys.stdin:
         emit({"id": identifier, "result": {"userAgent": "parameter-fixture"}})
     elif method == "thread/start":
         params = message["params"]
+        assert params["threadSource"] == "codeness-automated"
         assert params["ephemeral"] is True
         assert params["sandbox"] == "read-only"
         assert params["approvalPolicy"] == "never"
@@ -579,6 +625,46 @@ for line in sys.stdin:
         emit({"id": identifier, "result": {"userAgent": "thread-delete-fixture"}})
     elif method == "thread/delete":
         emit({"id": identifier, "result": None})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let malformedThreadArchiveServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "thread-archive-fixture"}})
+    elif method == "thread/archive":
+        emit({"id": identifier, "result": None})
+    elif identifier is not None:
+        emit({"id": identifier, "result": {}})
+"""#
+
+    private static let unansweredThreadArchiveServer = #"""
+import json
+import sys
+
+def emit(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    identifier = message.get("id")
+    if method == "initialize":
+        emit({"id": identifier, "result": {"userAgent": "thread-archive-timeout-fixture"}})
+    elif method == "thread/archive":
+        continue
     elif identifier is not None:
         emit({"id": identifier, "result": {}})
 """#

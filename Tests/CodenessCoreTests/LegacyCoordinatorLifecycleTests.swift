@@ -626,7 +626,7 @@ struct LegacyCoordinatorLifecycleTests {
         #expect(harness.coordinator.protocolContainmentIsActive)
         #expect(harness.coordinator.record.activity?.runs.last?.status == .failed)
         #expect(!harness.coordinator.canResume)
-        #expect(!harness.coordinator.canStartOver)
+        #expect(harness.coordinator.canStartOver)
         let closeResult = await harness.coordinator.prepareForClose(strategy: .immediate)
         guard case .failed(let closeDetail) = closeResult else {
             Issue.record("Expected close to fail while generation containment is unconfirmed")
@@ -718,7 +718,7 @@ struct LegacyCoordinatorLifecycleTests {
         #expect(harness.coordinator.record.activity?.runs.last?.status == .failed)
         #expect(harness.coordinator.errorMessage?.contains("injected legacy interrupt failure") == true)
         #expect(!harness.coordinator.canResume)
-        #expect(!harness.coordinator.canStartOver)
+        #expect(harness.coordinator.canStartOver)
         await harness.coordinator.resume()
         await harness.coordinator.startOver()
         #expect(harness.coordinator.record.activity?.id == activityID)

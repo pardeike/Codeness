@@ -95,6 +95,55 @@ struct RunLiveStatusPresentationTests {
         #expect(presentation.tone == .attention)
     }
 
+    @Test
+    func workerBriefShowsOperationalPromptWithoutPersonaPreparation() throws {
+        let member = LiveTeamMember(
+            id: "direction",
+            name: "Choose Product Direction",
+            instructions: "Compare three product concepts and commit to a direction.",
+            target: AgentTarget(providerID: .codex, model: "model"),
+            runPolicy: .once,
+            sessionPolicy: .ownMemory,
+            positionID: .designer,
+            companyAssignment: CompanyAssignmentContract(
+                contributionKind: .productDesign,
+                requiredCapabilities: [.workspaceRead],
+                acceptanceEvidence: "Three concepts are comparable and one decision is justified.",
+                dependencyContributionKinds: [],
+                stopCondition: "Stop when the direction is decision-ready."
+            )
+        )
+        let snapshot = LiveTeamMemberSnapshot(
+            member: member,
+            workingGoal: "Find the strongest product direction.",
+            revision: 1,
+            cycle: 1,
+            sessionSlotID: "member:direction"
+        )
+        let prompt = """
+        WHO YOU ARE
+
+        A long generated biography that must stay hidden.
+
+        HANDOFF
+
+        Research found two underserved audience needs.
+
+        FUNDED PRODUCT BET
+
+        Compare product directions.
+        """
+        let presentation = try #require(
+            WorkerBriefPresentation(snapshot: snapshot, prompt: prompt)
+        )
+
+        #expect(presentation.goal == "Find the strongest product direction.")
+        #expect(presentation.assignment.contains("Compare three product concepts"))
+        #expect(presentation.handoff == "Research found two underserved audience needs.")
+        #expect(!presentation.handoff.contains("generated biography"))
+        #expect(!presentation.handoff.contains("WHO YOU ARE"))
+    }
+
     private func run(status: RunStatus) -> RunRecord {
         RunRecord(
             sequence: 1,

@@ -96,6 +96,12 @@ struct GenericCoordinatorIntegrationTests {
         #expect(Set(await claude.releasedSessionIDs()) == [
             "claude-session-1", "claude-session-2"
         ])
+        #expect(Set(await codex.retiredSessionIDs()) == [
+            "codex-session-1", "codex-session-2"
+        ])
+        #expect(Set(await claude.retiredSessionIDs()) == [
+            "claude-session-1", "claude-session-2"
+        ])
 
         await coordinator.startOver()
         #expect(coordinator.record.activity == nil)
@@ -137,9 +143,11 @@ struct GenericCoordinatorIntegrationTests {
         try await waitUntilReleasedSessions(from: codex, count: 1)
         #expect(await coordinator.flushDocumentState())
         #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+        #expect((await codex.retiredSessionIDs()).isEmpty)
 
         #expect(await coordinator.prepareForClose(strategy: .immediate) == .ready)
         #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
+        #expect((await codex.retiredSessionIDs()).isEmpty)
         await coordinator.startOver()
         #expect(await codex.releasedSessionIDs() == ["codex-session-1"])
     }
@@ -1249,6 +1257,56 @@ struct GenericCoordinatorIntegrationTests {
     }
 
     @Test
+    func startOverStopsAnAcceptedRunBeforeResettingToTheSameGoalAndRepository() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = BlockingAcceptedStartProvider()
+        defer { Task { await provider.shutdown() } }
+        let canonicalPath = "/tmp/generic-start-over-accepted-start-\(UUID().uuidString)"
+        let coordinator = RepositoryCoordinator(
+            canonicalPath: canonicalPath,
+            appServer: CodexAppServerClient(),
+            router: NoopLegacyRouter(),
+            store: WorkspaceStore(rootURL: root),
+            agentProviders: AgentProviderRegistry(providers: [provider]),
+            workflowRouter: BlockingOnceWorkflowRouter()
+        )
+
+        await coordinator.load()
+        let repositoryID = coordinator.record.id
+        let startTask = Task {
+            await coordinator.startActivity(
+                goal: "Reset this exact goal without carrying the active run",
+                workflow: singleStepWorkflow()
+            )
+        }
+        await provider.waitUntilStartWasAccepted()
+        #expect(coordinator.canStartOver)
+
+        let resetTask = Task { await coordinator.startOver() }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(coordinator.pauseState == .saving)
+        #expect(await provider.interruptCallCount() == 0)
+
+        await provider.releaseStartResponse()
+        await resetTask.value
+        await startTask.value
+
+        #expect(await provider.interruptCallCount() == 1)
+        #expect(await provider.releasedSessionIDs() == ["codex-session-1"])
+        #expect(coordinator.record.id == repositoryID)
+        #expect(coordinator.record.canonicalPath == canonicalPath)
+        #expect(coordinator.record.activity == nil)
+        #expect(coordinator.record.activityDraft == ActivityConfigurationDraft(
+            goal: "Reset this exact goal without carrying the active run",
+            prompts: .builtInDefaults
+        ))
+        #expect(coordinator.canStartActivity)
+        #expect(!coordinator.canResume)
+    }
+
+    @Test
     func backpressureTerminalPreservesFailureAndCompletesWaitingGenericClose() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1353,17 +1411,11 @@ struct GenericCoordinatorIntegrationTests {
         #expect(coordinator.record.activity?.runs.last?.status == .failed)
         #expect(coordinator.errorMessage?.contains("Injected provider interrupt failure") == true)
         #expect(!coordinator.canResume)
-        #expect(!coordinator.canStartOver)
+        #expect(coordinator.canStartOver)
         await coordinator.resume()
         await coordinator.startOver()
         #expect(coordinator.record.activity?.id == activityID)
-
-        let failedInterruptClose = await coordinator.prepareForClose(strategy: .immediate)
-        guard case .failed(let interruptFailure) = failedInterruptClose else {
-            Issue.record("Expected close to fail while provider termination is unconfirmed")
-            return
-        }
-        #expect(interruptFailure.contains("Injected provider interrupt failure"))
+        #expect(coordinator.errorMessage?.contains("Injected provider interrupt failure") == true)
         #expect((await provider.releasedSessionIDs()).isEmpty)
 
         await provider.emit(.interrupted("Provider stopped"), finish: true)
@@ -1372,31 +1424,22 @@ struct GenericCoordinatorIntegrationTests {
         }
         #expect(coordinator.record.activity?.runs.last?.status == .failed)
 
-        #expect(!coordinator.canStartOver)
+        #expect(coordinator.canStartOver)
         await coordinator.startOver()
         #expect(coordinator.record.activity?.id == activityID)
-        #expect((await provider.releasedSessionIDs()).isEmpty)
-
-        let failedDetachClose = await coordinator.prepareForClose(strategy: .immediate)
-        guard case .failed(let detachFailure) = failedDetachClose else {
-            Issue.record("Expected close to surface the failed provider detachment")
-            return
-        }
-        #expect(detachFailure.contains("could not confirm provider-session detachment"))
+        #expect(coordinator.errorMessage?.contains("could not confirm provider-session detachment") == true)
         #expect(await provider.releasedSessionIDs() == ["controlled-session"])
 
-        let repeatedDetachClose = await coordinator.prepareForClose(strategy: .immediate)
-        guard case .failed(let repeatedDetachFailure) = repeatedDetachClose else {
-            Issue.record("Expected the second close to surface the repeated detachment failure")
-            return
-        }
-        #expect(repeatedDetachFailure.contains("could not confirm provider-session detachment"))
+        await coordinator.startOver()
+        #expect(coordinator.record.activity?.id == activityID)
+        #expect(coordinator.errorMessage?.contains("could not confirm provider-session detachment") == true)
         #expect(await provider.releasedSessionIDs() == [
             "controlled-session",
             "controlled-session"
         ])
 
-        #expect(await coordinator.prepareForClose(strategy: .immediate) == .ready)
+        await coordinator.startOver()
+        #expect(coordinator.record.activity == nil)
         #expect(await provider.releasedSessionIDs() == [
             "controlled-session",
             "controlled-session",
@@ -1837,6 +1880,7 @@ private actor ScriptedAgentProvider: AgentProviding {
     private var sessionCounter = 0
     private var startAttempts = 0
     private var released: [String] = []
+    private var retired: [String] = []
 
     init(
         id: AgentProviderID,
@@ -2010,6 +2054,11 @@ private actor ScriptedAgentProvider: AgentProviding {
         return sessionReleaseResults.isEmpty ? true : sessionReleaseResults.removeFirst()
     }
 
+    func retireSession(id: String) async -> Bool {
+        retired.append(id)
+        return await releaseSession(id: id)
+    }
+
     func shutdown() {}
 
     func sessionRequests() -> [AgentSessionRequest] {
@@ -2030,6 +2079,10 @@ private actor ScriptedAgentProvider: AgentProviding {
 
     func releasedSessionIDs() -> [String] {
         released
+    }
+
+    func retiredSessionIDs() -> [String] {
+        retired
     }
 }
 
