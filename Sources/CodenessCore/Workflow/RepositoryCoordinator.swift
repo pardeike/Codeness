@@ -3652,7 +3652,7 @@ public final class RepositoryCoordinator {
                         cwd: record.canonicalPath,
                         prompt: prompt,
                         target: member.target,
-                        outputSchema: CompanyWorkReport.outputSchema(for: snapshot)
+                        outputSchema: CompanyWorkReport.outputSchemaIfAssigned(for: snapshot)
                     )
                 )
             } catch {
@@ -3698,7 +3698,7 @@ public final class RepositoryCoordinator {
                         cwd: record.canonicalPath,
                         prompt: prompt,
                         target: member.target,
-                        outputSchema: CompanyWorkReport.outputSchema(for: snapshot)
+                        outputSchema: CompanyWorkReport.outputSchemaIfAssigned(for: snapshot)
                     )
                 )
             }

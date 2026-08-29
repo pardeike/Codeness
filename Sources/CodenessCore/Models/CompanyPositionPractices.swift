@@ -135,7 +135,7 @@ public struct CompanyToolPolicy: Equatable, Sendable {
         if allowedCapabilities.contains(.webResearch) {
             tools += ["WebSearch", "WebFetch"]
         }
-        if allowedCapabilities.contains(.commandExecution) {
+        if allowedCapabilities.contains(.commandExecution), permitsSourceMutation {
             tools.append("Bash")
         }
         if allowedCapabilities.contains(.sourceModification) {
@@ -149,7 +149,7 @@ public struct CompanyToolPolicy: Equatable, Sendable {
         if allowedCapabilities.contains(.workspaceRead) {
             tools.formUnion(["read", "glob", "grep"])
         }
-        if allowedCapabilities.contains(.commandExecution) {
+        if allowedCapabilities.contains(.commandExecution), permitsSourceMutation {
             tools.insert("bash")
         }
         if allowedCapabilities.contains(.sourceModification) {

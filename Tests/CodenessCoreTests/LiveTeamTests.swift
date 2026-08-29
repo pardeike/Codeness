@@ -72,6 +72,9 @@ struct LiveTeamModelTests {
         #expect(researchConfiguration["features"]?["plugins"]?.boolValue == false)
         #expect(CompanyToolPolicy(positionID: .researcher).requiresReadOnlySandbox)
         #expect(!CompanyToolPolicy(positionID: .developer).requiresReadOnlySandbox)
+        #expect(!CompanyToolPolicy(positionID: .qaTester).claudeToolNames.contains("Bash"))
+        #expect(!CompanyToolPolicy(positionID: .qaTester).openAICompatibleToolNames.contains("bash"))
+        #expect(CompanyToolPolicy(positionID: .developer).claudeToolNames.contains("Bash"))
     }
 
     @Test
@@ -280,7 +283,7 @@ struct LiveTeamModelTests {
         }
 
         let advancing = CompanyProductMotor.decision(
-            sourceResult: "Shipped a visible interaction.",
+            sourceResult: companyWorkOutput(member, summary: "Shipped a visible interaction."),
             snapshot: snapshot,
             definition: definition,
             proposedCheckpoint: checkpoint,
@@ -290,7 +293,7 @@ struct LiveTeamModelTests {
         #expect(advancing.tokenUsage == nil)
 
         let boundary = CompanyProductMotor.decision(
-            sourceResult: "Integrated and exercised the slice.",
+            sourceResult: companyWorkOutput(member, summary: "Integrated and exercised the slice."),
             snapshot: snapshot,
             definition: definition,
             proposedCheckpoint: checkpoint,
@@ -346,7 +349,7 @@ struct LiveTeamModelTests {
         #expect(usage.effectiveFundingTokens == 708_000)
 
         let protected = CompanyProductMotor.decision(
-            sourceResult: "INVESTMENT BOUNDARY: READY",
+            sourceResult: companyWorkOutput(member, summary: "INVESTMENT BOUNDARY: READY"),
             snapshot: snapshot,
             definition: definition,
             proposedCheckpoint: checkpoint,
@@ -355,7 +358,7 @@ struct LiveTeamModelTests {
         #expect(protected.disposition == .continueTeam)
 
         let stillFunded = CompanyProductMotor.decision(
-            sourceResult: "The integrated product keeps improving.",
+            sourceResult: companyWorkOutput(member, summary: "The integrated product keeps improving."),
             snapshot: snapshot,
             definition: definition,
             proposedCheckpoint: checkpoint,
@@ -364,7 +367,7 @@ struct LiveTeamModelTests {
         #expect(stillFunded.disposition == .continueTeam)
 
         let tokenBoundary = CompanyProductMotor.decision(
-            sourceResult: "The integrated product keeps improving.",
+            sourceResult: companyWorkOutput(member, summary: "The integrated product keeps improving."),
             snapshot: snapshot,
             definition: definition,
             proposedCheckpoint: checkpoint,
@@ -388,7 +391,7 @@ struct LiveTeamModelTests {
         )
 
         let decision = CompanyProductMotor.decision(
-            sourceResult: "The one-time assignments are exhausted.",
+            sourceResult: companyWorkOutput(member, summary: "The one-time assignments are exhausted."),
             snapshot: snapshot,
             definition: definition,
             proposedCheckpoint: nil,
@@ -403,7 +406,14 @@ struct LiveTeamModelTests {
     func productMotorBuildsARecipientAwareHandoffFromStructuredWork() throws {
         var definition = companyLiveTeamDefinition()
         let developer = try #require(definition.members.first { $0.positionID == .developer })
-        let artDirector = try #require(definition.members.first { $0.positionID == .artDirector })
+        var artDirector = try #require(definition.members.first { $0.positionID == .artDirector })
+        artDirector.companyAssignment = CompanyAssignmentContract(
+            contributionKind: .visualDirection,
+            requiredCapabilities: [.workspaceRead],
+            acceptanceEvidence: "A distinct visual direction is inspectable.",
+            dependencyContributionKinds: [.softwareImplementation],
+            stopCondition: "Stop when the direction is decision-ready or blocked."
+        )
         definition.members = [developer, artDirector]
         let snapshot = LiveTeamMemberSnapshot(
             member: developer,
@@ -662,6 +672,53 @@ struct LiveTeamModelTests {
     }
 
     @Test
+    func companyOutputSchemaRequiresAnExactAssignment() {
+        let positionless = LiveTeamMember(
+            id: "legacy",
+            name: "Legacy Worker",
+            instructions: "Continue the saved work.",
+            target: testTarget(),
+            runPolicy: .everyCycle,
+            sessionPolicy: .ownMemory,
+            positionID: nil
+        )
+        var assigned = positionless
+        assigned.positionID = .researcher
+        assigned.companyAssignment = CompanyAssignmentContract(
+            contributionKind: .researchFinding,
+            requiredCapabilities: [.workspaceRead],
+            acceptanceEvidence: "Ground the direction in observed evidence.",
+            dependencyContributionKinds: [],
+            stopCondition: "Stop after the evidence is decision-ready."
+        )
+
+        let snapshot: (LiveTeamMember) -> LiveTeamMemberSnapshot = {
+            LiveTeamMemberSnapshot(
+                member: $0,
+                workingGoal: "Continue the saved company.",
+                revision: 1,
+                cycle: 1,
+                sessionSlotID: "legacy"
+            )
+        }
+        #expect(CompanyWorkReport.outputSchemaIfAssigned(for: snapshot(positionless)) == nil)
+        #expect(CompanyWorkReport.outputSchemaIfAssigned(for: snapshot(assigned)) != nil)
+    }
+
+    @Test
+    func companyDefinitionRejectsAnUnsuppliedOrLateDependency() {
+        var definition = companyLiveTeamDefinition()
+        let developer = definition.members.removeLast()
+        definition.members.insert(developer, at: 0)
+
+        #expect(
+            definition.validationMessage?.contains(
+                "depends on contributions that are not supplied earlier"
+            ) == true
+        )
+    }
+
+    @Test
     func runtimeRejectsDuplicateTargetIdentifiersBeforeRouting() {
         let target = testTarget()
         let runtime = LiveTeamRuntimeConfiguration(
@@ -780,7 +837,7 @@ struct LiveTeamModelTests {
         #expect(prompt.contains("sourceModification"))
         #expect(prompt.contains("ASSIGNMENT CONTRACT"))
         #expect(prompt.contains("Required contribution: visualDirection"))
-        #expect(prompt.contains("Relevant predecessor contributions: productDirection, softwareImplementation"))
+        #expect(prompt.contains("Relevant predecessor contributions: none"))
         #expect(!prompt.contains("Improve the repository's actual product"))
         #expect(!prompt.contains("prove the best one through the repository"))
         #expect(!prompt.contains("Report concrete product changes"))
@@ -1906,7 +1963,7 @@ private actor LiveTeamUtilityProvider: AgentProviding {
               "contributionKind": "softwareImplementation",
               "requiredCapabilities": ["workspaceRead", "sourceModification", "commandExecution"],
               "acceptanceEvidence": "The bounded behavior works and focused tests pass.",
-              "dependencyContributionKinds": ["productDirection"],
+              "dependencyContributionKinds": [],
               "stopCondition": "Stop after focused verification or report a capability block."
             }
           ],
@@ -1969,7 +2026,7 @@ private func companyLiveTeamDefinition() -> LiveTeamDefinition {
                     contributionKind: .visualDirection,
                     requiredCapabilities: [.workspaceRead],
                     acceptanceEvidence: "A distinct visual direction is inspectable.",
-                    dependencyContributionKinds: [.productDirection, .softwareImplementation],
+                    dependencyContributionKinds: [],
                     stopCondition: "Stop when the direction is decision-ready or blocked."
                 )
             ),
@@ -1986,7 +2043,7 @@ private func companyLiveTeamDefinition() -> LiveTeamDefinition {
                     contributionKind: .softwareImplementation,
                     requiredCapabilities: [.workspaceRead, .sourceModification, .commandExecution],
                     acceptanceEvidence: "The integrated slice works and focused tests pass.",
-                    dependencyContributionKinds: [.visualDirection, .productDirection],
+                    dependencyContributionKinds: [.visualDirection],
                     stopCondition: "Stop after focused verification or report a capability block."
                 )
             )
@@ -2003,6 +2060,24 @@ private func companyLiveTeamDefinition() -> LiveTeamDefinition {
             killCondition: "Stop if two exercised slices fail to produce visible value."
         )
     )
+}
+
+private func companyWorkOutput(_ member: LiveTeamMember, summary: String) -> String {
+    let assignment = member.companyAssignment!
+    let report = CompanyWorkReport(
+        workerID: member.id,
+        positionID: member.positionID!,
+        contributionKind: assignment.contributionKind,
+        summary: summary,
+        artifacts: [],
+        evidence: [summary],
+        decisions: [],
+        constraints: [],
+        risks: [],
+        capabilityBlock: nil,
+        recommendedRecipientPositions: []
+    )
+    return String(decoding: try! JSONEncoder().encode(report), as: UTF8.self)
 }
 
 private func testCompanyPerson(

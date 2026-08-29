@@ -33,7 +33,8 @@ public enum CompanyProductMotor {
             "INVESTMENT BOUNDARY: READY"
         )
         let completedRunway = betRuns.count >= minimumProductTurns
-        let report = CompanyWorkReport.decode(sourceResult, for: snapshot)
+        let decodedReport = CompanyWorkReport.decode(sourceResult, for: snapshot)
+        let report = decodedReport
             ?? CompanyWorkReport.unstructured(sourceResult, for: snapshot)
         let recipient = proposedCheckpoint.flatMap {
             definition.member(id: $0.memberID)
@@ -52,7 +53,10 @@ public enum CompanyProductMotor {
 
         let disposition: LiveTeamCoordinatorDisposition
         let evidence: String
-        if let block = report.capabilityBlock {
+        if decodedReport == nil && snapshot.member.companyAssignment != nil {
+            disposition = .requestOversight
+            evidence = "The assigned profession did not return the required structured work-report contract. The CEO must retry, change the target, or revise the assignment."
+        } else if let block = report.capabilityBlock {
             disposition = .requestOversight
             evidence = "The assigned profession reported a \(block.kind.rawValue) capability block for \(block.requiredCapability.rawValue). The CEO must change staffing, target, or scope."
         } else if proposedCheckpoint == nil {
@@ -91,8 +95,14 @@ public enum CompanyProductMotor {
         guard let dependencies = recipient?.companyAssignment?.dependencyContributionKinds else {
             return currentPacket.rendered
         }
+        let maximumCharacters = 6_000
+        let headingCharacters = "PRIOR ACCEPTED DEPENDENCY EVIDENCE\n\n\nCURRENT CONTRIBUTION\n".count
+        let currentBudget = min(currentPacket.rendered.count, maximumCharacters / 2)
+        var remainingCharacters = maximumCharacters - headingCharacters - currentBudget
         var priorPackets: [String] = []
-        var remainingCharacters = 8_000
+        let priorCount = dependencies.filter {
+            $0 != currentPacket.report.contributionKind
+        }.count
         for contribution in dependencies
             where contribution != currentPacket.report.contributionKind {
             guard remainingCharacters > 0,
@@ -103,19 +113,33 @@ public enum CompanyProductMotor {
                               == contribution
                           && $0.coordinatorDecision?.disposition == .continueTeam
                   }),
-                  let packet = run.coordinatorDecision?.handoff else { continue }
-            let bounded = String(packet.prefix(min(2_000, remainingCharacters)))
+                  let storedPacket = run.coordinatorDecision?.handoff else { continue }
+            let packet: String
+            if let output = run.finalOutput,
+               let snapshot = run.liveTeamMember,
+               let report = CompanyWorkReport.decode(output, for: snapshot) {
+                packet = CompanyHandoffPacket(
+                    report: report,
+                    recipientPositionID: recipient?.positionID,
+                    recipientAssignment: recipient?.companyAssignment
+                ).rendered
+            } else {
+                packet = storedPacket
+            }
+            let fairShare = max(1, remainingCharacters / max(priorCount - priorPackets.count, 1))
+            let bounded = String(packet.prefix(min(fairShare, remainingCharacters)))
             priorPackets.append(bounded)
             remainingCharacters -= bounded.count
         }
         guard !priorPackets.isEmpty else { return currentPacket.rendered }
-        return """
+        let result = """
         PRIOR ACCEPTED DEPENDENCY EVIDENCE
         \(priorPackets.joined(separator: "\n\n"))
 
         CURRENT CONTRIBUTION
-        \(currentPacket.rendered)
+        \(currentPacket.rendered.prefix(currentBudget))
         """
+        return String(result.prefix(maximumCharacters))
     }
 
     public static func usage(

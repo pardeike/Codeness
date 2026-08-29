@@ -571,7 +571,9 @@ struct LiveTeamCoordinatorIntegrationTests {
         #expect(await overseer.recordedStrategicContexts().isEmpty)
         #expect(
             coordinator.record.activity?.liveTeam?.currentDefinition?.members.first?
-                .person?.experience.first?.detail.contains("Worker result 1") == true
+                .person?.experience.contains(where: {
+                    $0.detail.contains("Worker result 1")
+                }) == true
         )
         guard case .perform? = coordinator.record.activity?.liveTeam?.resumeCheckpoint else {
             Issue.record("Pause did not preserve the next direct product assignment.")
@@ -1491,6 +1493,9 @@ private actor RecordingLiveTeamProvider: AgentProviding {
     func startRun(_ request: AgentRunRequest) -> AgentRunHandle {
         started.append(request)
         let runNumber = started.count
+        let output = request.outputSchema == nil
+            ? "Worker result \(runNumber)"
+            : Self.companyOutput(prompt: request.prompt, runNumber: runNumber)
         let pair = AsyncStream<AgentEvent>.makeStream(bufferingPolicy: .unbounded)
         let firstRunGate = firstRunGate
         Task {
@@ -1498,7 +1503,7 @@ private actor RecordingLiveTeamProvider: AgentProviding {
             await firstRunGate?.blockIfNeeded(runNumber: runNumber)
             pair.continuation.yield(.transcript("Worker transcript \(runNumber)"))
             pair.continuation.yield(.completed(
-                output: "Worker result \(runNumber)",
+                output: output,
                 durationMilliseconds: 1,
                 tokenUsage: RunTokenUsage(totalTokens: 2, inputTokens: 1, outputTokens: 1)
             ))
@@ -1511,6 +1516,42 @@ private actor RecordingLiveTeamProvider: AgentProviding {
             executionID: "execution-\(runNumber)",
             events: pair.stream
         )
+    }
+
+    private nonisolated static func companyOutput(
+        prompt: String,
+        runNumber: Int
+    ) -> String {
+        func value(after prefix: String, before suffix: String) -> String? {
+            guard let start = prompt.range(of: prefix)?.upperBound,
+                  let end = prompt[start...].range(of: suffix)?.lowerBound else {
+                return nil
+            }
+            return String(prompt[start..<end])
+        }
+        let workerID = value(after: "Use workerID \"", before: "\"") ?? "worker"
+        let positionID = value(after: "positionID \"", before: "\"") ?? "developer"
+        let contribution = value(
+            after: "one of these contribution kinds: ",
+            before: "."
+        )?.split(separator: ",").first.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? "softwareImplementation"
+        let object: [String: Any] = [
+            "workerID": workerID,
+            "positionID": positionID,
+            "contributionKind": contribution,
+            "summary": "Worker result \(runNumber)",
+            "artifacts": [],
+            "evidence": ["Worker result \(runNumber)"],
+            "decisions": [],
+            "constraints": [],
+            "risks": [],
+            "capabilityBlock": NSNull(),
+            "recommendedRecipientPositions": []
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: object)
+        return String(decoding: data, as: UTF8.self)
     }
 
     func steer(runID: UUID, message: String) throws {
@@ -1895,7 +1936,7 @@ private func companyLiveDefinition(maximumTurns: Int) -> LiveTeamDefinition {
             contributionKind: .softwareImplementation,
             requiredCapabilities: [.workspaceRead, .sourceModification, .commandExecution],
             acceptanceEvidence: "The integrated product works under focused exercise.",
-            dependencyContributionKinds: [.productDirection],
+            dependencyContributionKinds: [],
             stopCondition: "Stop after verification or report a capability block."
         )
     )

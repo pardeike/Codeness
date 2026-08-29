@@ -210,7 +210,18 @@ struct CompanyHarnessV2FixtureTests {
             (art, "Warm arrival, cool discovery, and quiet release share one sightline.")
         ]
         let runs = prior.enumerated().map { index, item in
-            RunRecord(
+            let priorReport = CompanyWorkReport(
+                workerID: item.0.id,
+                positionID: item.0.positionID!,
+                contributionKind: item.0.companyAssignment!.contributionKind,
+                summary: item.1,
+                artifacts: ["Complete inline predecessor work."],
+                evidence: [item.1],
+                decisions: [], constraints: [], risks: [],
+                capabilityBlock: nil,
+                recommendedRecipientPositions: []
+            )
+            return RunRecord(
                 sequence: index + 1,
                 role: .implementer,
                 kind: .implementation,
@@ -219,10 +230,14 @@ struct CompanyHarnessV2FixtureTests {
                 model: item.0.target.model,
                 effort: "low",
                 prompt: "Profession-specific work.",
+                finalOutput: String(
+                    decoding: try! JSONEncoder().encode(priorReport),
+                    as: UTF8.self
+                ),
                 startedAt: .now,
                 liveTeamMember: fixtureSnapshot(item.0),
                 coordinatorDecision: LiveTeamCoordinatorDecision(
-                    handoff: "HANDOFF PACKET\nContribution: \(item.0.companyAssignment!.contributionKind.rawValue)\nSummary: \(item.1)",
+                    handoff: "Summary: This contribution was redacted for an earlier recipient.",
                     runLabel: item.1,
                     disposition: .continueTeam,
                     evidence: "Accepted profession evidence.",
@@ -261,6 +276,100 @@ struct CompanyHarnessV2FixtureTests {
         #expect(decision.handoff.contains("accepted corridor promise"))
         #expect(decision.handoff.contains("quiet release"))
         #expect(decision.handoff.contains("Sparse sound and silence"))
+    }
+
+    @Test
+    func malformedCompanyReportCannotContinueAsAcceptedWork() {
+        let researcher = fixtureMember(positionID: .researcher, contribution: .researchFinding)
+        let product = fixtureMember(
+            positionID: .productManager,
+            contribution: .productDirection,
+            dependencies: [.researchFinding]
+        )
+        var definition = fixtureDefinition(member: researcher)
+        definition.members = [researcher, product]
+
+        let decision = CompanyProductMotor.decision(
+            sourceResult: "not a structured report",
+            snapshot: fixtureSnapshot(researcher),
+            definition: definition,
+            proposedCheckpoint: LiveTeamCheckpoint(
+                memberID: product.id,
+                cycle: 1,
+                revision: definition.revision
+            ),
+            runs: []
+        )
+
+        #expect(decision.disposition == .requestOversight)
+        #expect(decision.evidence.contains("structured work-report contract"))
+        #expect(decision.handoff.contains("not a structured report"))
+    }
+
+    @Test
+    func aggregateCompanyHandoffKeepsCurrentWorkWithinSingleBound() throws {
+        let sound = fixtureMember(
+            positionID: .soundDesigner,
+            contribution: .audioDirection,
+            dependencies: [.researchFinding, .productDirection, .visualDirection]
+        )
+        let quality = fixtureMember(
+            positionID: .qaTester,
+            contribution: .qualityAssessment,
+            dependencies: [.researchFinding, .productDirection, .visualDirection, .audioDirection]
+        )
+        var definition = fixtureDefinition(member: sound)
+        let predecessors = [
+            fixtureMember(positionID: .researcher, contribution: .researchFinding),
+            fixtureMember(positionID: .productManager, contribution: .productDirection),
+            fixtureMember(positionID: .artDirector, contribution: .visualDirection)
+        ]
+        definition.members = predecessors + [sound, quality]
+        let runs = predecessors.enumerated().map { index, member in
+            RunRecord(
+                sequence: index + 1,
+                role: .implementer,
+                kind: .implementation,
+                status: .completed,
+                threadID: nil,
+                model: member.target.model,
+                effort: "low",
+                prompt: "Profession-specific work.",
+                startedAt: .now,
+                liveTeamMember: fixtureSnapshot(member),
+                coordinatorDecision: LiveTeamCoordinatorDecision(
+                    handoff: "Contribution: \(member.companyAssignment!.contributionKind.rawValue)\n" + String(repeating: "prior evidence ", count: 600),
+                    runLabel: "Prior evidence",
+                    disposition: .continueTeam,
+                    evidence: "Accepted profession evidence.",
+                    progressEvidence: .none
+                )
+            )
+        }
+        let report = CompanyWorkReport(
+            workerID: sound.id,
+            positionID: .soundDesigner,
+            contributionKind: .audioDirection,
+            summary: "CURRENT SOUND DIRECTION",
+            artifacts: [String(repeating: "current detail ", count: 600)],
+            evidence: [], decisions: [], constraints: [], risks: [],
+            capabilityBlock: nil,
+            recommendedRecipientPositions: [.qaTester]
+        )
+
+        let decision = CompanyProductMotor.decision(
+            sourceResult: String(decoding: try JSONEncoder().encode(report), as: UTF8.self),
+            snapshot: fixtureSnapshot(sound),
+            definition: definition,
+            proposedCheckpoint: LiveTeamCheckpoint(memberID: quality.id, cycle: 1, revision: definition.revision),
+            runs: runs
+        )
+
+        #expect(decision.handoff.count <= 6_000)
+        #expect(decision.handoff.contains("CURRENT SOUND DIRECTION"))
+        #expect(decision.handoff.contains("researchFinding"))
+        #expect(decision.handoff.contains("productDirection"))
+        #expect(decision.handoff.contains("visualDirection"))
     }
 }
 

@@ -191,6 +191,14 @@ public struct CompanyWorkReport: Codable, Equatable, Sendable {
         ])
     }
 
+    public static func outputSchemaIfAssigned(
+        for snapshot: LiveTeamMemberSnapshot
+    ) -> JSONValue? {
+        guard snapshot.member.positionID != nil,
+              snapshot.member.companyAssignment != nil else { return nil }
+        return outputSchema(for: snapshot)
+    }
+
     public static func promptContract(for snapshot: LiveTeamMemberSnapshot) -> String {
         let positionID = snapshot.member.positionID ?? .developer
         let practice = CompanyPositionPracticeCatalog.practice(positionID)
@@ -240,9 +248,13 @@ public struct CompanyHandoffPacket: Equatable, Sendable {
                 .subscribedContributions.contains(report.contributionKind)
         } ?? true
         let requiredByAssignment = recipientAssignment.map {
-            $0.dependencyContributionKinds.contains(report.contributionKind)
+            $0.contributionKind == report.contributionKind
+                || $0.dependencyContributionKinds.contains(report.contributionKind)
         } ?? true
-        let relevantDetail = subscribed && requiredByAssignment
+        let continuesOwnContribution = recipientAssignment?.contributionKind
+            == report.contributionKind
+        let relevantDetail = (subscribed || continuesOwnContribution)
+            && requiredByAssignment
         var result = ""
         appendSection("HANDOFF PACKET", to: &result)
         appendSection(

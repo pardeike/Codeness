@@ -355,6 +355,17 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
             }) {
                 return "Every company assignment needs a person, standard position, and exact contribution contract."
             }
+            var suppliedContributions: Set<CompanyContributionKind> = []
+            for member in members {
+                guard let assignment = member.companyAssignment else { continue }
+                let missing = Set(assignment.dependencyContributionKinds)
+                    .subtracting(suppliedContributions)
+                if !missing.isEmpty {
+                    let names = missing.map(\.rawValue).sorted().joined(separator: ", ")
+                    return "\(member.name) depends on contributions that are not supplied earlier in the company: \(names)."
+                }
+                suppliedContributions.insert(assignment.contributionKind)
+            }
             let currentPeople = [overseerPerson] + members.map(\.person)
             if Set(currentPeople.compactMap { $0?.id }).count != currentPeople.count {
                 return "Every current company position needs a distinct person."
