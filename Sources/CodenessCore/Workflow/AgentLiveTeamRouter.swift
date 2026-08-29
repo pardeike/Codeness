@@ -1135,7 +1135,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 "members": .object([
                     "type": .string("array"),
                     "minItems": .integer(1),
-                    "items": companyMemberSchema(targetIDs: targetIDs)
+                    "items": companyMemberSchema(targetOptions: targetOptions)
                 ]),
                 "overseerTargetID": .object([
                     "type": .string("string"),
@@ -1219,7 +1219,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
                 "productBet": nullable(productBetSchema),
                 "members": nullable(.object([
                     "type": .string("array"),
-                    "items": companyMemberSchema(targetIDs: targetIDs)
+                    "items": companyMemberSchema(targetOptions: targetOptions)
                 ])),
                 "overseerTargetID": nullable(.object([
                     "type": .string("string"),
@@ -1513,7 +1513,26 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ])
     }
 
-    private static func companyMemberSchema(targetIDs: [JSONValue]) -> JSONValue {
+    private static func companyMemberSchema(
+        targetOptions: [LiveTeamTargetOption]
+    ) -> JSONValue {
+        let schemas = targetOptions.map { option in
+            companyMemberSchema(
+                targetIDs: [.string(option.id)],
+                capabilities: CompanyTargetCapabilityProfile(target: option.target)
+                    .capabilities
+            )
+        }
+        if schemas.count == 1 {
+            return schemas[0]
+        }
+        return .object(["anyOf": .array(schemas)])
+    }
+
+    private static func companyMemberSchema(
+        targetIDs: [JSONValue],
+        capabilities: Set<CompanyCapability>
+    ) -> JSONValue {
         guard case .object(var schema) = memberSchema(targetIDs: targetIDs),
               case .object(var properties) = schema["properties"],
               case .array(var required) = schema["required"] else {
@@ -1535,7 +1554,8 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             "type": .string("array"),
             "items": .object([
                 "type": .string("string"),
-                "enum": .array(CompanyCapability.allCases.map { .string($0.rawValue) })
+                "enum": .array(capabilities.sorted { $0.rawValue < $1.rawValue }
+                    .map { .string($0.rawValue) })
             ])
         ])
         properties["acceptanceEvidence"] = .object([

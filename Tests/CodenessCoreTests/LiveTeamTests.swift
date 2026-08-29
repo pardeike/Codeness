@@ -1485,6 +1485,14 @@ struct AgentLiveTeamRouterTests {
             AgentLiveTeamRouter.companyDefinitionSchema(targetOptions: targetOptions),
             key: "uniqueItems"
         ))
+        #expect(
+            companyMemberCapabilityEnumValues(
+                AgentLiveTeamRouter.companyDefinitionSchema(targetOptions: targetOptions)
+            ) == Set(CompanyTargetCapabilityProfile(target: testTarget()).capabilities)
+        )
+        #expect(!companyMemberCapabilityEnumValues(
+            AgentLiveTeamRouter.companyDefinitionSchema(targetOptions: targetOptions)
+        ).contains(.authoredArtifactWrite))
         #expect(schemaEnumValues(
             AgentLiveTeamRouter.coordinatorSchema,
             property: "disposition"
@@ -1559,6 +1567,15 @@ private func schemaEnumValues(_ value: JSONValue, property: String) -> [String] 
     value.objectValue?["properties"]?.objectValue?[property]?.objectValue?["enum"]?
         .arrayValue?
         .compactMap(\.stringValue) ?? []
+}
+
+private func companyMemberCapabilityEnumValues(
+    _ value: JSONValue
+) -> Set<CompanyCapability> {
+    let values = value.objectValue?["properties"]?.objectValue?["members"]?
+        .objectValue?["items"]?.objectValue?["properties"]?.objectValue?["requiredCapabilities"]?
+        .objectValue?["items"]?.objectValue?["enum"]?.arrayValue ?? []
+    return Set(values.compactMap(\.stringValue).compactMap(CompanyCapability.init(rawValue:)))
 }
 
 private func schemaUsesStrictObjectProperties(_ value: JSONValue) -> Bool {
