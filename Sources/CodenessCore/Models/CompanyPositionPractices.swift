@@ -323,7 +323,8 @@ public enum CompanyPositionPracticeCatalog {
             "Product behavior verification, reproduction, and acceptance judgment.",
             [.qualityAssessment],
             "Reproduction steps, expected and observed behavior, environment, and verdict.",
-            [.productDirection, .softwareImplementation, .productDesign, .interactionDesign, .releaseEvidence],
+            [.productDirection, .softwareImplementation, .productDesign, .interactionDesign,
+             .researchFinding, .visualDirection, .audioDirection, .releaseEvidence],
             [.workspaceRead, .commandExecution, .productUIOperation],
             "the assigned behavior has a reproducible acceptance verdict",
             "a defect needs implementation or the environment cannot exercise the promised behavior"

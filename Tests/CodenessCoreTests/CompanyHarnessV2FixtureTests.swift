@@ -108,6 +108,32 @@ struct CompanyHarnessV2FixtureTests {
         #expect(soundPacket.contains("amber threshold"))
         #expect(soundPacket.contains("Transitions last 45 seconds"))
         #expect(!soundPacket.localizedCaseInsensitiveContains("program"))
+
+        let qaTester = fixtureMember(
+            positionID: .qaTester,
+            contribution: .qualityAssessment,
+            dependencies: [.researchFinding, .productDirection, .visualDirection, .audioDirection]
+        )
+        let sound = CompanyWorkReport(
+            workerID: soundDesigner.id,
+            positionID: .soundDesigner,
+            contributionKind: .audioDirection,
+            summary: "Sparse localized sound marks invitation, discovery, consequence, and release.",
+            artifacts: ["Complete sound direction authored inline."],
+            evidence: ["Every cue has a visual equivalent and preserves conversation."],
+            decisions: ["Use real silence between the three sound zones."],
+            constraints: ["Ordinary footsteps remain audible."],
+            risks: ["Representative corridor playback remains unverified."],
+            capabilityBlock: nil,
+            recommendedRecipientPositions: [.qaTester]
+        )
+        let qaPacket = CompanyHandoffPacket(
+            report: sound,
+            recipientPositionID: qaTester.positionID,
+            recipientAssignment: qaTester.companyAssignment
+        ).rendered
+        #expect(qaPacket.contains("Sparse localized sound"))
+        #expect(!qaPacket.contains("outside the recipient's subscribed assignment dependencies"))
     }
 
     @Test
@@ -151,6 +177,90 @@ struct CompanyHarnessV2FixtureTests {
         #expect(decision.handoff.contains("targetUnavailable / audioAssetProduction"))
         #expect(decision.handoff.contains("AudioDirection.md"))
         #expect(!decision.handoff.localizedCaseInsensitiveContains("write code"))
+    }
+
+    @Test
+    func fixtureQualityHandoffIncludesEveryAssignedPredecessorContribution() throws {
+        let researcher = fixtureMember(positionID: .researcher, contribution: .researchFinding)
+        let product = fixtureMember(
+            positionID: .productManager,
+            contribution: .productDirection,
+            dependencies: [.researchFinding]
+        )
+        let art = fixtureMember(
+            positionID: .artDirector,
+            contribution: .visualDirection,
+            dependencies: [.productDirection]
+        )
+        let sound = fixtureMember(
+            positionID: .soundDesigner,
+            contribution: .audioDirection,
+            dependencies: [.productDirection, .visualDirection]
+        )
+        let quality = fixtureMember(
+            positionID: .qaTester,
+            contribution: .qualityAssessment,
+            dependencies: [.researchFinding, .productDirection, .visualDirection, .audioDirection]
+        )
+        var definition = fixtureDefinition(member: sound)
+        definition.members = [researcher, product, art, sound, quality]
+        let prior: [(LiveTeamMember, String)] = [
+            (researcher, "Visitors need a recoverable first action."),
+            (product, "The Waking Trail is the accepted corridor promise."),
+            (art, "Warm arrival, cool discovery, and quiet release share one sightline.")
+        ]
+        let runs = prior.enumerated().map { index, item in
+            RunRecord(
+                sequence: index + 1,
+                role: .implementer,
+                kind: .implementation,
+                status: .completed,
+                threadID: nil,
+                model: item.0.target.model,
+                effort: "low",
+                prompt: "Profession-specific work.",
+                startedAt: .now,
+                liveTeamMember: fixtureSnapshot(item.0),
+                coordinatorDecision: LiveTeamCoordinatorDecision(
+                    handoff: "HANDOFF PACKET\nContribution: \(item.0.companyAssignment!.contributionKind.rawValue)\nSummary: \(item.1)",
+                    runLabel: item.1,
+                    disposition: .continueTeam,
+                    evidence: "Accepted profession evidence.",
+                    progressEvidence: .none
+                )
+            )
+        }
+        let soundReport = CompanyWorkReport(
+            workerID: sound.id,
+            positionID: .soundDesigner,
+            contributionKind: .audioDirection,
+            summary: "Sparse sound and silence follow the same three visual states.",
+            artifacts: ["Complete inline sound direction."],
+            evidence: ["Conversation remains intelligible."],
+            decisions: ["Silence separates each localized zone."],
+            constraints: [],
+            risks: [],
+            capabilityBlock: nil,
+            recommendedRecipientPositions: [.qaTester]
+        )
+        let output = String(decoding: try JSONEncoder().encode(soundReport), as: UTF8.self)
+
+        let decision = CompanyProductMotor.decision(
+            sourceResult: output,
+            snapshot: fixtureSnapshot(sound),
+            definition: definition,
+            proposedCheckpoint: LiveTeamCheckpoint(
+                memberID: quality.id,
+                cycle: 1,
+                revision: definition.revision
+            ),
+            runs: runs
+        )
+
+        #expect(decision.handoff.contains("recoverable first action"))
+        #expect(decision.handoff.contains("accepted corridor promise"))
+        #expect(decision.handoff.contains("quiet release"))
+        #expect(decision.handoff.contains("Sparse sound and silence"))
     }
 }
 

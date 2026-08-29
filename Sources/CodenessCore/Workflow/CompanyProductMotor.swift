@@ -43,6 +43,13 @@ public enum CompanyProductMotor {
             recipientPositionID: recipient?.positionID,
             recipientAssignment: recipient?.companyAssignment
         )
+        let handoff = dependencyHandoff(
+            currentPacket: packet.rendered,
+            recipient: recipient,
+            revision: definition.revision,
+            runs: betRuns,
+            currentContribution: report.contributionKind
+        )
 
         let disposition: LiveTeamCoordinatorDisposition
         let evidence: String
@@ -67,13 +74,49 @@ public enum CompanyProductMotor {
         }
 
         return LiveTeamCoordinatorDecision(
-            handoff: packet.rendered,
+            handoff: handoff,
             runLabel: runLabel(from: report.summary, fallback: snapshot.member.name),
             disposition: disposition,
             evidence: evidence,
             progressEvidence: .none,
             tokenUsage: nil
         )
+    }
+
+    private static func dependencyHandoff(
+        currentPacket: String,
+        recipient: LiveTeamMember?,
+        revision: Int,
+        runs: [RunRecord],
+        currentContribution: CompanyContributionKind
+    ) -> String {
+        guard let dependencies = recipient?.companyAssignment?.dependencyContributionKinds else {
+            return currentPacket
+        }
+        var priorPackets: [String] = []
+        var remainingCharacters = 8_000
+        for contribution in dependencies where contribution != currentContribution {
+            guard remainingCharacters > 0,
+                  let run = runs.reversed().first(where: {
+                      $0.status == .completed
+                          && $0.liveTeamMember?.revision == revision
+                          && $0.liveTeamMember?.member.companyAssignment?.contributionKind
+                              == contribution
+                          && $0.coordinatorDecision?.disposition == .continueTeam
+                  }),
+                  let packet = run.coordinatorDecision?.handoff else { continue }
+            let bounded = String(packet.prefix(min(2_000, remainingCharacters)))
+            priorPackets.append(bounded)
+            remainingCharacters -= bounded.count
+        }
+        guard !priorPackets.isEmpty else { return currentPacket }
+        return """
+        PRIOR ACCEPTED DEPENDENCY EVIDENCE
+        \(priorPackets.joined(separator: "\n\n"))
+
+        CURRENT CONTRIBUTION
+        \(currentPacket)
+        """
     }
 
     public static func usage(
