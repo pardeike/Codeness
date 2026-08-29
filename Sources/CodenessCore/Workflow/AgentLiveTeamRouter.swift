@@ -1516,11 +1516,20 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
     private static func companyMemberSchema(
         targetOptions: [LiveTeamTargetOption]
     ) -> JSONValue {
-        let schemas = targetOptions.map { option in
+        var groups: [(capabilities: Set<CompanyCapability>, targetIDs: [JSONValue])] = []
+        for option in targetOptions {
+            let capabilities = CompanyTargetCapabilityProfile(target: option.target)
+                .capabilities
+            if let index = groups.firstIndex(where: { $0.capabilities == capabilities }) {
+                groups[index].targetIDs.append(.string(option.id))
+            } else {
+                groups.append((capabilities, [.string(option.id)]))
+            }
+        }
+        let schemas = groups.map { group in
             companyMemberSchema(
-                targetIDs: [.string(option.id)],
-                capabilities: CompanyTargetCapabilityProfile(target: option.target)
-                    .capabilities
+                targetIDs: group.targetIDs,
+                capabilities: group.capabilities
             )
         }
         if schemas.count == 1 {

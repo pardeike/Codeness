@@ -44,11 +44,10 @@ public enum CompanyProductMotor {
             recipientAssignment: recipient?.companyAssignment
         )
         let handoff = dependencyHandoff(
-            currentPacket: packet.rendered,
+            currentPacket: packet,
             recipient: recipient,
             revision: definition.revision,
-            runs: betRuns,
-            currentContribution: report.contributionKind
+            runs: betRuns
         )
 
         let disposition: LiveTeamCoordinatorDisposition
@@ -84,18 +83,18 @@ public enum CompanyProductMotor {
     }
 
     private static func dependencyHandoff(
-        currentPacket: String,
+        currentPacket: CompanyHandoffPacket,
         recipient: LiveTeamMember?,
         revision: Int,
-        runs: [RunRecord],
-        currentContribution: CompanyContributionKind
+        runs: [RunRecord]
     ) -> String {
         guard let dependencies = recipient?.companyAssignment?.dependencyContributionKinds else {
-            return currentPacket
+            return currentPacket.rendered
         }
         var priorPackets: [String] = []
         var remainingCharacters = 8_000
-        for contribution in dependencies where contribution != currentContribution {
+        for contribution in dependencies
+            where contribution != currentPacket.report.contributionKind {
             guard remainingCharacters > 0,
                   let run = runs.reversed().first(where: {
                       $0.status == .completed
@@ -109,13 +108,13 @@ public enum CompanyProductMotor {
             priorPackets.append(bounded)
             remainingCharacters -= bounded.count
         }
-        guard !priorPackets.isEmpty else { return currentPacket }
+        guard !priorPackets.isEmpty else { return currentPacket.rendered }
         return """
         PRIOR ACCEPTED DEPENDENCY EVIDENCE
         \(priorPackets.joined(separator: "\n\n"))
 
         CURRENT CONTRIBUTION
-        \(currentPacket)
+        \(currentPacket.rendered)
         """
     }
 

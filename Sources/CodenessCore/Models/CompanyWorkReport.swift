@@ -243,37 +243,66 @@ public struct CompanyHandoffPacket: Equatable, Sendable {
             $0.dependencyContributionKinds.contains(report.contributionKind)
         } ?? true
         let relevantDetail = subscribed && requiredByAssignment
-        var sections = [
-            "HANDOFF PACKET",
+        var result = ""
+        appendSection("HANDOFF PACKET", to: &result)
+        appendSection(
             "From: \(CompanyPositionCatalog.position(report.positionID).title) [\(report.workerID)]",
-            "For: \(recipient)",
-            "Contribution: \(report.contributionKind.rawValue)"
-        ]
+            to: &result
+        )
+        appendSection("For: \(recipient)", to: &result)
+        appendSection("Contribution: \(report.contributionKind.rawValue)", to: &result)
         if relevantDetail || report.contributionKind == .unstructured {
-            sections.append("Summary: \(report.summary)")
-            append(report.decisions, label: "Decisions", to: &sections)
+            appendSection("Summary:", to: &result)
+            appendText(" ", to: &result)
+            appendText(report.summary, to: &result)
+            append(report.decisions, label: "Decisions", to: &result)
         } else {
-            sections.append("Summary: This contribution is outside the recipient's subscribed assignment dependencies.")
+            appendSection(
+                "Summary: This contribution is outside the recipient's subscribed assignment dependencies.",
+                to: &result
+            )
         }
         if requiredByAssignment || report.contributionKind == .unstructured {
-            append(report.artifacts, label: "Artifacts", to: &sections)
-            append(report.evidence, label: "Evidence", to: &sections)
-            append(report.constraints, label: "Constraints", to: &sections)
-            append(report.risks, label: "Risks", to: &sections)
+            append(report.artifacts, label: "Artifacts", to: &result)
+            append(report.evidence, label: "Evidence", to: &result)
+            append(report.constraints, label: "Constraints", to: &result)
+            append(report.risks, label: "Risks", to: &result)
         }
         if let block = report.capabilityBlock {
-            sections.append("CAPABILITY BLOCK: \(block.kind.rawValue) / \(block.requiredCapability.rawValue) / \(block.detail)")
-            append(block.artifacts, label: "Block artifacts", to: &sections)
+            appendSection(
+                "CAPABILITY BLOCK: \(block.kind.rawValue) / \(block.requiredCapability.rawValue) /",
+                to: &result
+            )
+            appendText(" ", to: &result)
+            appendText(block.detail, to: &result)
+            append(block.artifacts, label: "Block artifacts", to: &result)
             let suggestions = block.suggestedPositions.map {
                 CompanyPositionCatalog.position($0).title
             }
-            append(suggestions, label: "Suggested professions", to: &sections)
+            append(suggestions, label: "Suggested professions", to: &result)
         }
-        return String(sections.joined(separator: "\n").prefix(6_000))
+        return result
     }
 
-    private func append(_ values: [String], label: String, to sections: inout [String]) {
+    private func append(_ values: [String], label: String, to result: inout String) {
         guard !values.isEmpty else { return }
-        sections.append("\(label): \(values.joined(separator: " | "))")
+        appendSection("\(label):", to: &result)
+        for (index, value) in values.enumerated() {
+            appendText(index == 0 ? " " : " | ", to: &result)
+            appendText(value, to: &result)
+        }
+    }
+
+    private func appendSection(_ value: String, to result: inout String) {
+        if !result.isEmpty {
+            appendText("\n", to: &result)
+        }
+        appendText(value, to: &result)
+    }
+
+    private func appendText(_ value: String, to result: inout String) {
+        let remaining = 6_000 - result.count
+        guard remaining > 0 else { return }
+        result.append(contentsOf: value.prefix(remaining))
     }
 }

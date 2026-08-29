@@ -80,10 +80,6 @@ public struct CompanyPositionPractice: Equatable, Sendable {
         Set(CompanyCapability.allCases).subtracting(allowedCapabilities)
     }
 
-    public var toolPolicyID: String {
-        allowedCapabilities.map(\.rawValue).sorted().joined(separator: "+")
-    }
-
     public var promptContract: String {
         let contributions = allowedContributions.map(\.rawValue).sorted().joined(separator: ", ")
         let capabilities = allowedCapabilities.map(\.rawValue).sorted().joined(separator: ", ")
@@ -104,12 +100,13 @@ public struct CompanyPositionPractice: Equatable, Sendable {
 
 public struct CompanyToolPolicy: Equatable, Sendable {
     public let positionID: CompanyPositionID
-    public let allowedCapabilities: Set<CompanyCapability>
 
     public init(positionID: CompanyPositionID) {
         self.positionID = positionID
-        allowedCapabilities = CompanyPositionPracticeCatalog.practice(positionID)
-            .allowedCapabilities
+    }
+
+    public var allowedCapabilities: Set<CompanyCapability> {
+        CompanyPositionPracticeCatalog.practice(positionID).allowedCapabilities
     }
 
     public var id: String {
