@@ -18,6 +18,38 @@ struct LiveTeamModelTests {
     }
 
     @Test
+    func professionPracticeCatalogCoversEveryPositionWithRealBoundaries() {
+        #expect(
+            Set(CompanyPositionPracticeCatalog.practices.map(\.positionID))
+                == Set(CompanyPositionID.allCases)
+        )
+        #expect(
+            CompanyPositionPracticeCatalog.practices.allSatisfy {
+                !$0.purpose.isEmpty
+                    && !$0.acceptanceEvidence.isEmpty
+                    && !$0.allowedContributions.isEmpty
+                    && !$0.allowedCapabilities.isEmpty
+                    && !$0.subscribedContributions.isEmpty
+                    && !$0.completionCondition.isEmpty
+                    && !$0.escalationCondition.isEmpty
+            }
+        )
+
+        let developer = CompanyPositionPracticeCatalog.practice(.developer)
+        let artDirector = CompanyPositionPracticeCatalog.practice(.artDirector)
+        let soundDesigner = CompanyPositionPracticeCatalog.practice(.soundDesigner)
+        let researcher = CompanyPositionPracticeCatalog.practice(.researcher)
+
+        #expect(developer.allowedCapabilities.contains(.sourceModification))
+        #expect(!artDirector.allowedCapabilities.contains(.sourceModification))
+        #expect(artDirector.allowedCapabilities.contains(.visualAssetProduction))
+        #expect(soundDesigner.allowedCapabilities.contains(.audioAssetProduction))
+        #expect(!soundDesigner.allowedCapabilities.contains(.sourceModification))
+        #expect(researcher.allowedCapabilities.contains(.webResearch))
+        #expect(!researcher.allowedCapabilities.contains(.sourceModification))
+    }
+
+    @Test
     func personaRequirementsRejectIndifferenceAndKeepRandomIngredientsReproducible() {
         var firstGenerator = SeededTestGenerator(seed: 42)
         var secondGenerator = SeededTestGenerator(seed: 42)
@@ -512,13 +544,13 @@ struct LiveTeamModelTests {
     func sessionInstructionsRemainValidWhenMembersShareOneConversation() {
         let instructions = LiveTeamPromptBuilder.sessionInstructions()
         #expect(instructions.contains("personality, position, assignment"))
-        #expect(instructions.contains("do not delegate it to sub-agents"))
-        #expect(instructions.contains("visible, usable, integrated product value"))
+        #expect(instructions.contains("Do not delegate the assignment to sub-agents"))
+        #expect(instructions.contains("current turn's profession contract"))
         #expect(instructions.contains("at most 180 words"))
         #expect(instructions.contains("not an academic, consultant, or formal committee"))
-        #expect(instructions.contains("position is a real division of responsibility"))
-        #expect(instructions.contains("Managers use the running product"))
         #expect(instructions.contains("personal or global agent memory"))
+        #expect(!instructions.contains("visible, usable, integrated product value"))
+        #expect(!instructions.contains("prove the best one through the repository"))
         #expect(!instructions.contains("Implement member"))
         #expect(!instructions.contains("Review member"))
     }
@@ -539,9 +571,13 @@ struct LiveTeamModelTests {
             handoff: nil
         )
 
-        #expect(prompt.contains("position is a real division of responsibility"))
-        #expect(prompt.contains("Do not take over another hired specialist's core craft"))
-        #expect(prompt.contains("Managers use the running product"))
+        #expect(prompt.contains("PROFESSION CONTRACT"))
+        #expect(prompt.contains("Visual direction and visual asset acceptance"))
+        #expect(prompt.contains("visualAssetProduction"))
+        #expect(prompt.contains("Do not silently take on:"))
+        #expect(prompt.contains("sourceModification"))
+        #expect(!prompt.contains("Improve the repository's actual product"))
+        #expect(!prompt.contains("prove the best one through the repository"))
     }
 
 }
