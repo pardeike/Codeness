@@ -195,6 +195,9 @@ public struct CompanyAssignmentContract: Codable, Equatable, Sendable {
         guard requested.count == requiredCapabilities.count else {
             return "The assignment repeats a required capability."
         }
+        guard Set(dependencyContributionKinds).count == dependencyContributionKinds.count else {
+            return "The assignment repeats a predecessor contribution dependency."
+        }
         guard requested.isSubset(of: practice.allowedCapabilities) else {
             let forbidden = requested.subtracting(practice.allowedCapabilities)
                 .map(\.rawValue).sorted().joined(separator: ", ")

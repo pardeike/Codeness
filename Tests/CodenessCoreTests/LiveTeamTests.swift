@@ -119,6 +119,20 @@ struct LiveTeamModelTests {
                 target: localTarget
             )?.contains("cannot supply") == true
         )
+
+        let repeatedDependency = CompanyAssignmentContract(
+            contributionKind: .productDirection,
+            requiredCapabilities: [.workspaceRead],
+            acceptanceEvidence: "A decision exists.",
+            dependencyContributionKinds: [.researchFinding, .researchFinding],
+            stopCondition: "Stop when decided."
+        )
+        #expect(
+            repeatedDependency.validationMessage(
+                positionID: .productManager,
+                target: testTarget()
+            ) == "The assignment repeats a predecessor contribution dependency."
+        )
     }
 
     @Test
@@ -1445,6 +1459,10 @@ struct AgentLiveTeamRouterTests {
         #expect(!schemaContainsKey(
             AgentLiveTeamRouter.companyStrategicSchema(targetOptions: targetOptions),
             key: "maxLength"
+        ))
+        #expect(!schemaContainsKey(
+            AgentLiveTeamRouter.companyDefinitionSchema(targetOptions: targetOptions),
+            key: "uniqueItems"
         ))
         #expect(schemaEnumValues(
             AgentLiveTeamRouter.coordinatorSchema,

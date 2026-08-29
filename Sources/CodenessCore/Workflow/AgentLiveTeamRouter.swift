@@ -1533,7 +1533,6 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ])
         properties["requiredCapabilities"] = .object([
             "type": .string("array"),
-            "uniqueItems": .bool(true),
             "items": .object([
                 "type": .string("string"),
                 "enum": .array(CompanyCapability.allCases.map { .string($0.rawValue) })
@@ -1544,7 +1543,6 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
         ])
         properties["dependencyContributionKinds"] = .object([
             "type": .string("array"),
-            "uniqueItems": .bool(true),
             "items": .object([
                 "type": .string("string"),
                 "enum": .array(CompanyContributionKind.allCases
