@@ -39,6 +39,8 @@ struct CompanyHarnessV2FixtureTests {
             #expect(!prompt.contains("Report concrete product changes"))
             #expect(!prompt.contains("prove the best one through the repository"))
             #expect(prompt.contains("complete authored work inline"))
+            #expect(prompt.contains("prevents your own assigned contribution"))
+            #expect(prompt.contains("Do not block merely because the expected next contribution belongs to another profession"))
             if member.positionID != .developer {
                 #expect(!CompanyToolPolicy(positionID: member.positionID!).permitsSourceMutation)
             }
