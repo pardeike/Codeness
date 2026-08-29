@@ -4,7 +4,7 @@
   <p><strong>Give Codeness a goal and supervise autonomous work from one native macOS window.</strong></p>
 </div>
 
-Codeness coordinates locally installed Codex and Claude Code command-line agents, plus an optional OpenAI-compatible endpoint. You describe the complete outcome once. Codeness appoints a persistent CEO, funds a concrete product bet, hires a small team into familiar company positions, and keeps building until the CEO can prove the goal complete.
+Codeness coordinates locally installed Codex and Claude Code command-line agents, plus an optional OpenAI-compatible endpoint. You describe the complete outcome once. Codeness appoints a persistent CEO, funds a concrete company bet, hires the smallest useful mix of familiar professions, and coordinates their accepted contributions until the CEO can prove the goal complete.
 
 ## Why Codeness?
 
@@ -22,7 +22,7 @@ Your goal
 Codeness appoints a CEO and funds one concrete product bet
     |
     v
-Named people build and exercise the integrated product
+Named specialists contribute research, design, software, media, operations, or evidence
     |
     v
 At the funding boundary, the company reports and the CEO invests again
@@ -33,9 +33,9 @@ Only the CEO completes when the fixed goal has no work left
 
 The CEO and every employee are persistent people with a generated background, successes, scars, convictions, stake, working style, conflict style, blind spot, and evidence that can change their mind. Positions come from fixed ordinary catalogs such as CEO, Developer, Product Manager, Art Director, Research Lead, and Industrial Designer. Codeness never invents an overfitted job title; the person's current assignment carries the project-specific detail.
 
-Ordinary successful turns use a deterministic product motor and do not spend another model call on routing. Investment review occurs only when a funded token or turn boundary is reached, the team presents an integrated demonstration, the goal changes, a material blocker or unrunnable setup needs executive action, or completion must be judged. Resume continues the saved checkpoint; it never creates a review by itself. Every investment review appears as a selectable chapter showing the current company's short reports, the CEO's decision, and the newly funded bet.
+Ordinary successful turns use a deterministic company motor and do not spend another model call on routing. Each worker has an exact profession contract, typed assignment, effect-level tool policy, structured work report, and recipient-filtered handoff. Investment review occurs only when a funded token or turn boundary is reached, the team presents accepted evidence, the goal changes, a capability block or unrunnable setup needs executive action, or completion must be judged. Resume continues the saved checkpoint; it never creates a review by itself. Every investment review appears as a selectable chapter showing the current company's short profession-specific reports, the CEO's decision, and the newly funded bet.
 
-Personas are deliberately non-neutral. They are prompted and validated to be opinionated, ambitious, personally invested, and unwilling to settle for mediocre work. The CEO balances that creative pressure with evidence and return: bold ideas must become a visible, usable, tested, integrated product rather than an endless idea contest or prototype trail.
+Personas are deliberately non-neutral. They are prompted and validated to be opinionated, ambitious, personally invested, and unwilling to settle for mediocre work. Position is operational, not cosmetic: an Art Director owns visual direction, a Sound Designer owns sound and music, a Researcher owns sourced findings, and only a Developer assignment receives source-modification tools. A missing capability becomes an explicit CEO decision instead of an instruction to program around the gap.
 
 The implementation and tradeoffs are recorded in [Goal-directed orchestration](Documentation/live-loop-redesign.md).
 
@@ -73,7 +73,7 @@ Use `CODENESS_CODESIGN_IDENTITY` for another Developer ID identity and `CODENESS
 1. Choose **File > New Project…** to name and locate a new empty folder, or choose **Open Workspace…** for an existing folder. Codeness initializes Git if needed.
 2. Describe the complete desired outcome. Include restrictions such as “use only Codex gpt-5.6-terra,” spending limits, memory requirements, and publishing authority.
 3. Select **Start**.
-4. Follow the company, funded product bet, investment decisions, and product turns in the window.
+4. Follow the company, funded bet, profession-specific contributions, capability blocks, and investment decisions in the window.
 
 The selected folder is not silently replaced by a parent Git root. Different subfolders of one working tree can have independent Codeness documents.
 
@@ -85,11 +85,11 @@ The selected folder is not silently replaced by a parent Git root. Different sub
 - Codeness chooses one-time or recurring assignments and their memory policy as part of each funded bet.
 - **Start Over** is available after completion. It archives the activity, releases its sessions, and prefills a new activity with the previous or amended goal. Repository files stay untouched.
 
-An employee can present a demonstration or report remaining work but cannot finish the activity. The CEO uses the fixed goal and durable evidence at the same investment decision point that controls the company. The CEO can be replaced from the Company list without interrupting current product work; the new person owns future investment decisions.
+An employee can submit its profession's contribution or report a capability block but cannot finish the activity. The CEO uses the fixed goal and durable evidence at the same investment decision point that controls the company. The CEO can be replaced from the Company list without interrupting current work; the new person owns future investment decisions.
 
-The overview separates product-work tokens from company-control tokens. Control includes setup, persona generation, legacy routing calls, company check-ins, retries that returned usage, and CEO decisions. Historical company definitions are retained so former hires and earlier control costs do not disappear when the company changes.
+The overview separates specialist-work tokens from company-control tokens. Control includes setup, persona generation, legacy routing calls, company check-ins, retries that returned usage, and CEO decisions. Historical company definitions are retained so former hires and earlier control costs do not disappear when the company changes.
 
-Agent tool and file operations run without Codeness approval prompts. Agents are instructed to make reversible internal decisions themselves and report unavailable external authority to Codeness instead of asking the user to manage a stage. Standard-mode agents and compatible-provider tools are not sandboxed; they have the account-level file and process access of Codeness.
+Agent tool and file operations run without Codeness approval prompts, but company workers receive profession-specific tool surfaces. Non-source professions run read-only at the effect boundary; Claude and OpenAI-compatible providers receive explicit tool allowlists, while Codex sessions receive a matching sandbox and restricted configuration. External communication, publishing, spending, and other irreversible effects remain authorization-gated. An assignment that needs an unavailable or forbidden capability fails closed or reports a structured capability block to the CEO.
 
 ## Agent providers
 
@@ -97,7 +97,7 @@ Open **Codeness → Settings** to configure executable discovery, the optional O
 
 The first control turn must choose a target before any agent can interpret the goal. If the goal contains one unambiguous, non-negated provider or exact model identifier, Codeness uses that target first. Otherwise it uses the first ready target and chooses subsequent targets from the goal. This convenience is not a complete natural-language policy checker; complex restrictions still require review and evidence.
 
-Codex models and service tiers come from the running App Server. Claude aliases, resolved models, effort levels, and Fast eligibility come from Claude Code's initialization handshake. OpenAI-compatible model identifiers depend on that server's configuration. Autonomous agents use normal execution mode so reviewers can run tests and desktop tools as well as inspect files.
+Codex models and service tiers come from the running App Server. Claude aliases, resolved models, effort levels, and Fast eligibility come from Claude Code's initialization handshake. OpenAI-compatible model identifiers depend on that server's configuration. The CEO sees each target's enforceable effect-level capabilities and may assign only the subset allowed by the selected profession and supplied by that target.
 
 ## Permission preflight
 

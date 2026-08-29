@@ -11,9 +11,9 @@ Codeness is a universal company simulator for producing a real result from one u
 The operating model is designed around two pressures that both force delivery:
 
 - top-down return on investment: the CEO allocates tokens only to work that advances the fixed user goal;
-- personal product investment: every hired person has opinions, ambition, a stake in the result, and a desire to show working product value.
+- personal craft investment: every hired person has opinions, ambition, a stake in the result, and a desire to produce accepted evidence in their profession.
 
-Creative energy is welcome, but ideas earn continued investment by becoming a coherent product people can see, use, test, or make a concrete decision from. This prevents both known local minima: bureaucratic caution with no product, and an endless contest of exciting prototypes with no integrated delivery.
+Creative energy is welcome, but ideas earn continued investment through coherent, inspectable contributions: software, research, visual or audio work, writing, physical design, analysis, commercial evidence, operations, support, or quality findings. This prevents both known local minima: bureaucratic caution with no result, and a software-only loop that erases the company professions needed to produce one.
 
 ## User contract
 
@@ -45,6 +45,20 @@ The CEO funds one product bet and hires the smallest team needed to pursue it. E
 
 The immutable profile keeps a person recognizable across strategy changes. Their assignment and track record evolve with the work.
 
+### Profession, assignment, tools, and contribution
+
+These are separate contracts:
+
+- the fixed position practice defines what the profession owns, accepts, subscribes to, and must escalate;
+- the current assignment names one allowed contribution, required capabilities, acceptance evidence, predecessor dependencies, and a stopping or block condition;
+- the selected target advertises the effect-level capabilities it can enforce and supply;
+- the provider adapter maps the intersection to its concrete tools and sandbox; and
+- the worker returns a typed contribution rather than generic completion prose.
+
+Every predefined position has an explicit practice. No position inherits a generic Developer contract. `Sound Designer` owns audio and music work. Developer is hired only when source implementation is an actual dependency.
+
+The CEO sees target capability profiles before staffing. A proposed assignment is rejected when its contribution does not belong to the position, when its capabilities cross that profession's boundary, or when the target cannot supply them. The existing one-retry correction path applies; a second invalid company stops visibly rather than receiving broader tools.
+
 ### Non-indifference requirement
 
 Personas must be ambitious, emotionally invested, strongly opinionated, willing to disagree, and impatient to show a real product. Persona prompts and structural validation reject neutral facilitators, indifferent colleagues, generic assistants, consensus-first managers, and characters invested in mediocrity.
@@ -73,20 +87,30 @@ One product bet contains:
 
 The CEO normally allocates three to eight funding units and six to twenty turns. Funding uses fresh input plus output at full cost and cached input at one tenth cost; raw provider usage remains available separately. Six turns is a hard minimum before an ordinary token or readiness review, so a review cannot recur after only one or two assignments. A genuinely unrunnable team still receives immediate executive repair. The turn boundary is a fallback when a provider cannot report complete token usage; effective funding tokens remain the primary cost signal.
 
-Assignments must produce or exercise the real product. Plans, documentation, status prose, evidence collection, meetings, and reviews are support work and do not count as product value unless the user goal makes them the deliverable or they directly unlock the integrated demonstration.
+Assignments must produce the accepted contribution of the hired profession. Status prose and meetings are not substitutes, but a research synthesis, visual direction, score specification, operating procedure, cost model, or quality verdict is real company value when its practice owns that artifact. Source changes are neither required nor privileged outside Development.
 
 ## Lightweight orchestration motor
 
-Normal successful turns do not call a model coordinator. A deterministic product motor:
+Normal successful turns do not call a model coordinator. A deterministic company motor:
 
 1. saves the completed worker result;
-2. marks completed one-time assignments;
-3. calculates the next eligible saved assignment;
-4. measures tokens and turns under the current bet;
-5. carries the factual result forward as the next handoff; and
-6. either starts the next person or opens an investment boundary.
+2. decodes its typed work report while preserving the full raw transcript;
+3. marks completed one-time assignments;
+4. calculates the next eligible saved assignment;
+5. intersects the source contribution with the recipient practice and assignment dependencies;
+6. builds a bounded handoff from relevant artifacts, decisions, evidence, constraints, and blocks;
+7. measures tokens and turns under the current bet; and
+8. either starts the next person or opens an investment boundary.
 
 This removes the previous per-turn management call and its tendency to reinterpret every result as a reason for more ceremony.
+
+Malformed output becomes a bounded `unstructured` report with missing-evidence risk. It never gains the authority of a typed contribution. Raw output remains attached to the source run for inspection but is no longer replayed as the next worker's primary brief.
+
+### Capability blocks
+
+Tool boundaries are enforced by provider mechanics: Claude receives an explicit tool allowlist, OpenAI-compatible sessions advertise only permitted local tools, and Codex applies a profession configuration plus a read-only sandbox when source mutation is not allowed. Session identity includes the resolved policy, so shared-memory names cannot widen an existing conversation; different policies get different provider slots.
+
+If a required effect is forbidden to the profession, unavailable on the target, unenforceable by the provider, or discovered missing during work, the result is a structured `CompanyCapabilityBlock`. The motor immediately sends it to investment review. The CEO must select an equipped profession and target, narrow the assignment, or stop the bet. Retrying the same specialist as a programmer is invalid.
 
 After the six-turn runway, the motor opens an ordinary investment boundary when:
 
@@ -109,7 +133,7 @@ Older saved agent loops retain their exact recovery point. They convert once at 
 
 At an investment boundary, every currently hired employee gives one short report in parallel. No model call selects or invents meeting participants. No fresh generic manager personas are created. Each report uses the employee's persisted story, convictions, assignment, and company track record.
 
-Reports cover involvement, progress, evidence, one concern or none, and the single next product move the person would fight for. They are advice, not votes. Missing or invalid reports remain visible as unavailable and never block the CEO from deciding.
+Reports cover involvement, the profession-specific contribution, evidence, one concern or none, and the single next move inside that profession. They are advice, not votes. Missing or invalid reports remain visible as unavailable and never block the CEO from deciding.
 
 The CEO sees the fixed user goal, current product bet and company, durable run evidence and handoffs, token costs, prior company changes, and every available company report.
 
@@ -135,28 +159,29 @@ The CEO prompt establishes a forceful founder mindset:
 - the fixed user goal is the sole authority source;
 - subordinate concerns are hypotheses, not vetoes;
 - the company should be bold, energetic, playful, and eager to show work;
-- the best idea must become an integrated product;
-- repeated support work or disconnected prototypes are investment failures;
-- product value and learning per effective token cost drive the next bet;
+- the best idea must become accepted evidence through the professions that own it;
+- repeated status work or disconnected contributions are investment failures;
+- useful goal progress and learning per effective token cost drive the next bet;
 - unavailable external evidence is recorded once while autonomous product work continues;
 - ordinary position IDs are mandatory; and
 - only the CEO can declare the goal complete.
 
-Employee prompts establish build-first behavior:
+Employee prompts establish profession-first behavior:
 
 - act from the persisted personality and convictions;
 - challenge timid or mediocre work;
-- improve the repository's actual product;
-- exercise or demonstrate the result;
-- avoid documentation unless it is the product or durable operating information;
+- produce exactly the assigned profession contribution;
+- satisfy its stated acceptance evidence;
+- stop and report a capability block rather than imitate another profession;
+- use only the position and target's intersected capabilities;
 - do not launch sub-agents because Codeness owns orchestration; and
-- report concrete changes, exercised evidence, blockers, and the highest-value next move in at most 180 plainspoken words.
+- return a compact structured report containing artifacts, evidence, decisions, constraints, risks, blocks, and recommended recipients.
 
 CEO decisions use short fields rather than essays: reason and evidence are at most two sentences each, working goals are at most three sentences, and assignments are at most 60 words. Company check-ins are capped at 80 words. Formal, academic, consultant, and committee language is explicitly rejected because volume can make weak progress look substantial.
 
 The current repository and Codeness handoffs are the only project-specific history. Prompts forbid recovering old project decisions or implementations from personal or global agent memory, previous Codeness runs, archives, Trash, sibling workspaces, and other checkouts unless the current goal or repository explicitly names that source. This keeps a reset repository genuinely clean while still allowing general engineering and creative knowledge.
 
-The prompts are deliberately product-generic. Software and coding remain common positions and activities, but there is no game-specific language in the operating system.
+The prompts are deliberately company-generic. Software and coding remain one family of contributions, but the operating system gives research, creative, operational, commercial, physical-design, and support work equal standing under their own evidence rules.
 
 ## Interface
 
