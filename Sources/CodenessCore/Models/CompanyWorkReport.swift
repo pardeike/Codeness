@@ -91,9 +91,13 @@ public struct CompanyWorkReport: Codable, Equatable, Sendable {
         for snapshot: LiveTeamMemberSnapshot
     ) -> CompanyWorkReport {
         let clean = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usesStructuredContract = snapshot.member.companyAssignment != nil
+        let limit = usesStructuredContract ? 800 : 6_000
         let summary = clean.isEmpty
             ? "The worker returned no structured contribution."
-            : String(clean.prefix(800))
+            : usesStructuredContract
+                ? String(clean.prefix(limit))
+                : String(clean.suffix(limit))
         return CompanyWorkReport(
             workerID: snapshot.member.id,
             positionID: snapshot.member.positionID ?? .developer,
@@ -263,6 +267,19 @@ public struct CompanyHandoffPacket: Equatable, Sendable {
         )
         appendSection("For: \(recipient)", to: &result)
         appendSection("Contribution: \(report.contributionKind.rawValue)", to: &result)
+        if let block = report.capabilityBlock {
+            appendSection(
+                "CAPABILITY BLOCK: \(block.kind.rawValue) / \(block.requiredCapability.rawValue) /",
+                to: &result
+            )
+            appendText(" ", to: &result)
+            appendText(block.detail, to: &result)
+            append(block.artifacts, label: "Block artifacts", to: &result)
+            let suggestions = block.suggestedPositions.map {
+                CompanyPositionCatalog.position($0).title
+            }
+            append(suggestions, label: "Suggested professions", to: &result)
+        }
         if relevantDetail || report.contributionKind == .unstructured {
             appendSection("Summary:", to: &result)
             appendText(" ", to: &result)
@@ -279,19 +296,6 @@ public struct CompanyHandoffPacket: Equatable, Sendable {
             append(report.evidence, label: "Evidence", to: &result)
             append(report.constraints, label: "Constraints", to: &result)
             append(report.risks, label: "Risks", to: &result)
-        }
-        if let block = report.capabilityBlock {
-            appendSection(
-                "CAPABILITY BLOCK: \(block.kind.rawValue) / \(block.requiredCapability.rawValue) /",
-                to: &result
-            )
-            appendText(" ", to: &result)
-            appendText(block.detail, to: &result)
-            append(block.artifacts, label: "Block artifacts", to: &result)
-            let suggestions = block.suggestedPositions.map {
-                CompanyPositionCatalog.position($0).title
-            }
-            append(suggestions, label: "Suggested professions", to: &result)
         }
         return result
     }
@@ -315,6 +319,16 @@ public struct CompanyHandoffPacket: Equatable, Sendable {
     private func appendText(_ value: String, to result: inout String) {
         let remaining = 6_000 - result.count
         guard remaining > 0 else { return }
-        result.append(contentsOf: value.prefix(remaining))
+        guard value.count > remaining else {
+            result.append(contentsOf: value)
+            return
+        }
+        let marker = " ... [truncated]"
+        guard remaining > marker.count else {
+            result.append(contentsOf: value.prefix(remaining))
+            return
+        }
+        result.append(contentsOf: value.prefix(remaining - marker.count))
+        result.append(marker)
     }
 }

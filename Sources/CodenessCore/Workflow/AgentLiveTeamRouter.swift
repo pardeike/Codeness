@@ -1575,7 +1575,7 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             "items": .object([
                 "type": .string("string"),
                 "enum": .array(CompanyContributionKind.allCases
-                    .filter { $0 != .unstructured }
+                    .filter { $0 != .unstructured && $0 != .executiveDecision }
                     .map { .string($0.rawValue) })
             ])
         ])
@@ -2501,6 +2501,9 @@ public actor AgentLiveTeamRouter: LiveTeamCoordinatorRouting, LiveTeamOverseerRo
             }
         }
         definition.operatingModelVersion = 2
+        if let message = definition.companyDependencyValidationMessage {
+            throw AgentProviderError.invalidResponse(message)
+        }
         var chiefExecutive = chiefExecutive
         if chiefExecutive.hiredRevision == nil {
             chiefExecutive.hiredRevision = revision

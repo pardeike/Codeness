@@ -355,16 +355,8 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
             }) {
                 return "Every company assignment needs a person, standard position, and exact contribution contract."
             }
-            var suppliedContributions: Set<CompanyContributionKind> = []
-            for member in members {
-                guard let assignment = member.companyAssignment else { continue }
-                let missing = Set(assignment.dependencyContributionKinds)
-                    .subtracting(suppliedContributions)
-                if !missing.isEmpty {
-                    let names = missing.map(\.rawValue).sorted().joined(separator: ", ")
-                    return "\(member.name) depends on contributions that are not supplied earlier in the company: \(names)."
-                }
-                suppliedContributions.insert(assignment.contributionKind)
+            if let message = companyDependencyValidationMessage {
+                return message
             }
             let currentPeople = [overseerPerson] + members.map(\.person)
             if Set(currentPeople.compactMap { $0?.id }).count != currentPeople.count {
@@ -387,6 +379,21 @@ public struct LiveTeamDefinition: Codable, Equatable, Sendable {
             if incompatible {
                 return "Shared-memory group \(groupID) contains incompatible agent targets."
             }
+        }
+        return nil
+    }
+
+    public var companyDependencyValidationMessage: String? {
+        var suppliedContributions: Set<CompanyContributionKind> = []
+        for member in members {
+            guard let assignment = member.companyAssignment else { continue }
+            let missing = Set(assignment.dependencyContributionKinds)
+                .subtracting(suppliedContributions)
+            if !missing.isEmpty {
+                let names = missing.map(\.rawValue).sorted().joined(separator: ", ")
+                return "\(member.name) depends on contributions that are not supplied earlier in the company: \(names)."
+            }
+            suppliedContributions.insert(assignment.contributionKind)
         }
         return nil
     }

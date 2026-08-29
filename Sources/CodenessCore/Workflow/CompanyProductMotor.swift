@@ -96,16 +96,17 @@ public enum CompanyProductMotor {
             return currentPacket.rendered
         }
         let maximumCharacters = 6_000
-        let headingCharacters = "PRIOR ACCEPTED DEPENDENCY EVIDENCE\n\n\nCURRENT CONTRIBUTION\n".count
-        let currentBudget = min(currentPacket.rendered.count, maximumCharacters / 2)
-        var remainingCharacters = maximumCharacters - headingCharacters - currentBudget
+        let priorHeading = "PRIOR ACCEPTED DEPENDENCY EVIDENCE\n"
+        let currentHeading = "\n\nCURRENT CONTRIBUTION\n"
+        let priorBudget = 1_800
+        var remainingPriorCharacters = priorBudget
         var priorPackets: [String] = []
         let priorCount = dependencies.filter {
             $0 != currentPacket.report.contributionKind
         }.count
         for contribution in dependencies
             where contribution != currentPacket.report.contributionKind {
-            guard remainingCharacters > 0,
+            guard remainingPriorCharacters > 0,
                   let run = runs.reversed().first(where: {
                       $0.status == .completed
                           && $0.liveTeamMember?.revision == revision
@@ -126,20 +127,33 @@ public enum CompanyProductMotor {
             } else {
                 packet = storedPacket
             }
-            let fairShare = max(1, remainingCharacters / max(priorCount - priorPackets.count, 1))
-            let bounded = String(packet.prefix(min(fairShare, remainingCharacters)))
+            let fairShare = max(
+                1,
+                remainingPriorCharacters / max(priorCount - priorPackets.count, 1)
+            )
+            let bounded = boundedText(
+                packet,
+                limit: min(fairShare, remainingPriorCharacters)
+            )
             priorPackets.append(bounded)
-            remainingCharacters -= bounded.count
+            remainingPriorCharacters -= bounded.count
         }
         guard !priorPackets.isEmpty else { return currentPacket.rendered }
-        let result = """
-        PRIOR ACCEPTED DEPENDENCY EVIDENCE
-        \(priorPackets.joined(separator: "\n\n"))
+        let prior = priorPackets.joined(separator: "\n\n")
+        let currentBudget = max(
+            0,
+            maximumCharacters - priorHeading.count - prior.count - currentHeading.count
+        )
+        return priorHeading + prior + currentHeading
+            + boundedText(currentPacket.rendered, limit: currentBudget)
+    }
 
-        CURRENT CONTRIBUTION
-        \(currentPacket.rendered.prefix(currentBudget))
-        """
-        return String(result.prefix(maximumCharacters))
+    private static func boundedText(_ value: String, limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard value.count > limit else { return value }
+        let marker = " ... [truncated]"
+        guard limit > marker.count else { return String(value.prefix(limit)) }
+        return String(value.prefix(limit - marker.count)) + marker
     }
 
     public static func usage(

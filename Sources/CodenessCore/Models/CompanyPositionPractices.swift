@@ -322,7 +322,7 @@ public enum CompanyPositionPracticeCatalog {
             "Reproduction steps, expected and observed behavior, environment, and verdict.",
             [.productDirection, .softwareImplementation, .productDesign, .interactionDesign,
              .researchFinding, .visualDirection, .audioDirection, .releaseEvidence],
-            [.workspaceRead, .commandExecution, .productUIOperation],
+            [.workspaceRead, .productUIOperation],
             "the assigned behavior has a reproducible acceptance verdict",
             "a defect needs implementation or the environment cannot exercise the promised behavior"
         ),
@@ -332,7 +332,7 @@ public enum CompanyPositionPracticeCatalog {
             [.operationsPlan],
             "An executable operating procedure with ownership, signals, and failure handling.",
             [.deliveryCoordination, .qualityAssessment, .releaseEvidence, .supportInsight],
-            productInspection.union([.commandExecution]),
+            productInspection,
             "the operation has an owner, trigger, observable result, and recovery path",
             "the remedy requires source changes, publishing, or another profession's craft"
         ),
@@ -342,7 +342,7 @@ public enum CompanyPositionPracticeCatalog {
             [.technicalDirection],
             "A concrete technical decision supported by source inspection and focused verification.",
             [.productDirection, .softwareImplementation, .qualityAssessment, .releaseEvidence, .supportInsight],
-            [.workspaceRead, .commandExecution, .authoredArtifactWrite],
+            [.workspaceRead, .authoredArtifactWrite],
             "the implementing profession has an unambiguous technical boundary and acceptance rule",
             "the decision requires product authority or direct implementation outside this assignment"
         ),
@@ -362,7 +362,7 @@ public enum CompanyPositionPracticeCatalog {
             [.releaseEvidence],
             "A reproducible artifact with build, signature, package, and readiness evidence.",
             [.softwareImplementation, .qualityAssessment, .deliveryCoordination, .operationsPlan],
-            [.workspaceRead, .commandExecution],
+            [.workspaceRead],
             "the release artifact is reproducible and its integrity and readiness are proven",
             "publishing lacks authorization or a product defect requires another profession"
         ),
@@ -422,7 +422,7 @@ public enum CompanyPositionPracticeCatalog {
             [.dataAnalysis],
             "A reproducible calculation or dataset result with assumptions and decision-relevant interpretation.",
             [.researchPlan, .researchFinding, .productDirection, .financialAnalysis, .customerInsight],
-            [.workspaceRead, .commandExecution, .authoredArtifactWrite],
+            [.workspaceRead, .authoredArtifactWrite],
             "the analysis is reproducible and answers the stated question without hiding uncertainty",
             "required data is missing, invalid, unauthorized, or needs collection by another profession"
         ),
@@ -452,7 +452,7 @@ public enum CompanyPositionPracticeCatalog {
             [.mechanicalDesign],
             "An engineering model or specification with calculations, tolerances, assumptions, and validation evidence.",
             [.industrialDesign, .researchFinding, .fabricationResult, .conformanceReport, .productDirection],
-            [.workspaceRead, .commandExecution, .authoredArtifactWrite, .engineeringAssetProduction],
+            [.workspaceRead, .authoredArtifactWrite, .engineeringAssetProduction],
             "the mechanical design meets stated loads, interfaces, tolerances, and validation criteria",
             "the work requires fabrication, industrial redesign, software, or unavailable engineering tools"
         ),
@@ -472,7 +472,7 @@ public enum CompanyPositionPracticeCatalog {
             [.conformanceReport],
             "A measurement record with method, equipment, tolerance, result, and verdict.",
             [.industrialDesign, .mechanicalDesign, .fabricationResult, .qualityAssessment],
-            [.workspaceRead, .commandExecution, .authoredArtifactWrite, .engineeringAssetProduction],
+            [.workspaceRead, .authoredArtifactWrite, .engineeringAssetProduction],
             "the assigned characteristics have measured pass or fail verdicts",
             "measurement is impossible, unsafe, or requires repair or redesign by another profession"
         ),
@@ -512,7 +512,7 @@ public enum CompanyPositionPracticeCatalog {
             [.financialAnalysis],
             "A reproducible financial model with assumptions, sensitivity, and a decision implication.",
             [.executiveDecision, .productDirection, .deliveryCoordination, .dataAnalysis, .marketPositioning, .salesEvidence],
-            [.workspaceRead, .commandExecution, .authoredArtifactWrite],
+            [.workspaceRead, .authoredArtifactWrite],
             "the financial decision has a traceable model and material uncertainty is explicit",
             "the work requires spending, account mutation, inaccessible records, or executive authority"
         ),

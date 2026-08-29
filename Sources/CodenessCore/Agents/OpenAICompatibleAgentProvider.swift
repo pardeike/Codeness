@@ -1133,9 +1133,14 @@ public actor OpenAICompatibleAgentProvider: AgentProviding {
         var content = instructions
         content += "\n\nYou are working in the selected Codeness workspace."
         if let companyToolPolicy {
-            let tools = companyToolPolicy.openAICompatibleToolNames.sorted()
+            let tools = tools(for: mode, companyToolPolicy: companyToolPolicy)
+                .compactMap { $0["function"]?["name"]?.stringValue }
+                .sorted()
                 .joined(separator: ", ")
             content += " The profession tool boundary is enforced. Available tools: \(tools.isEmpty ? "none" : tools). Do not claim or attempt unavailable effects. Report a capability block when the assignment needs one."
+            if mode == .plan {
+                content += " Plan mode is read-only: inspect and explain; do not change files or run mutating commands."
+            }
         } else if mode == .plan {
             content += " Plan mode is read-only: inspect and explain; do not change files or run mutating commands."
         } else {

@@ -74,6 +74,10 @@ struct LiveTeamModelTests {
         #expect(!CompanyToolPolicy(positionID: .developer).requiresReadOnlySandbox)
         #expect(!CompanyToolPolicy(positionID: .qaTester).claudeToolNames.contains("Bash"))
         #expect(!CompanyToolPolicy(positionID: .qaTester).openAICompatibleToolNames.contains("bash"))
+        #expect(
+            !CompanyPositionPracticeCatalog.practice(.qaTester)
+                .allowedCapabilities.contains(.commandExecution)
+        )
         #expect(CompanyToolPolicy(positionID: .developer).claudeToolNames.contains("Bash"))
     }
 
@@ -703,6 +707,21 @@ struct LiveTeamModelTests {
         }
         #expect(CompanyWorkReport.outputSchemaIfAssigned(for: snapshot(positionless)) == nil)
         #expect(CompanyWorkReport.outputSchemaIfAssigned(for: snapshot(assigned)) != nil)
+
+        var savedV2Member = positionless
+        savedV2Member.positionID = .researcher
+        let savedV2Snapshot = snapshot(savedV2Member)
+        let prompt = LiveTeamPromptBuilder.memberPrompt(
+            snapshot: savedV2Snapshot,
+            handoff: "Continue the saved assignment."
+        )
+        #expect(!prompt.contains("Return only the structured JSON work report"))
+
+        let prose = "OLD-START " + String(repeating: "detail ", count: 1_000) + " NEW-END"
+        let report = CompanyWorkReport.unstructured(prose, for: savedV2Snapshot)
+        #expect(!report.summary.contains("OLD-START"))
+        #expect(report.summary.hasSuffix("NEW-END"))
+        #expect(report.summary.count == 6_000)
     }
 
     @Test

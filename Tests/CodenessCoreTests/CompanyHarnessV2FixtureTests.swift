@@ -372,6 +372,7 @@ struct CompanyHarnessV2FixtureTests {
         #expect(decision.handoff.contains("researchFinding"))
         #expect(decision.handoff.contains("productDirection"))
         #expect(decision.handoff.contains("visualDirection"))
+        #expect(decision.handoff.contains("... [truncated]"))
     }
 }
 
