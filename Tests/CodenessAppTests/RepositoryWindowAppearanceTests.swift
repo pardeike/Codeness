@@ -7,6 +7,17 @@ import Testing
 @MainActor
 struct RepositoryWindowAppearanceTests {
     @Test
+    func defaultChiefExecutiveInstructionsAreProfessionLed() {
+        let instructions = CodenessApplicationModel.companyCEOInstructions
+        #expect(instructions.contains("profession that owns each contribution"))
+        #expect(instructions.contains("research, visual or audio work"))
+        #expect(instructions.contains("capability block"))
+        #expect(!instructions.contains("Build an early startup"))
+        #expect(!instructions.contains("keep funding autonomous building"))
+        #expect(!instructions.contains("integrated product people can see"))
+    }
+
+    @Test
     func controlsAppearActiveOnlyForAKeyWindowInTheActiveApplication() {
         let state = RepositoryWindowAppearanceState()
 
